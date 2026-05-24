@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>市场宽度监控</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/breadth.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <nav class="top-nav">
+    <a class="top-nav-item active" href="/breadth">
+      <span class="top-nav-item-icon" aria-hidden="true"></span>
+      <span>Breadth</span>
+    </a>
+    <a class="top-nav-item" href="/strong">
+      <span class="top-nav-item-icon" aria-hidden="true"></span>
+      <span>Strong Industry</span>
+    </a>
+  </nav>
+
+  <header class="page-header">
+    <div>
+      <h1>市场宽度监控</h1>
+      <p class="subtitle">数据源：Stockbee Market Monitor（Google Sheet）</p>
+    </div>
+    <div class="header-actions">
+      <button id="refreshBreadthBtn" type="button">刷新宽度数据</button>
+    </div>
+  </header>
+
+  <main class="breadth-main">
+    <section class="panel">
+      <div class="panel-header-row">
+        <h2>市场宽度总览</h2>
+        <span id="breadthMeta" class="hint"></span>
+      </div>
+      <p class="hint">
+        指标解释参考：
+        <a id="explainLink" class="industry-link" target="_blank" rel="noreferrer">Market Monitor Scans</a>
+      </p>
+      <div class="breadth-table-wrap">
+        <table id="breadthTable">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel chart-panel">
+      <div class="panel-header-row">
+        <h2>市场宽度图表</h2>
+        <label class="chart-width-control">
+          图表宽度
+          <input id="chartWidthRange" type="range" min="55" max="100" step="5" value="100" />
+          <span id="chartWidthValue">100%</span>
+        </label>
+      </div>
+      <div id="breadthCharts" class="breadth-charts adaptive-charts">
+        <article class="chart-card">
+          <h3>短线强弱比：5D / 10D + T2108</h3>
+          <p class="hint">用途：观察市场短线动能是否扩散。比值持续大于 1，且 T2108 回升，通常代表风险偏好增强。</p>
+          <div class="chart-wrap compact"><canvas id="ratioChart"></canvas></div>
+        </article>
+        <article class="chart-card">
+          <h3>日内极端波动：Up4% vs Down4%</h3>
+          <p class="hint">用途：识别当天情绪偏向。上涨极值数量显著高于下跌极值，说明买盘广度更强。</p>
+          <div class="chart-wrap compact"><canvas id="upDown4Chart"></canvas></div>
+        </article>
+        <article class="chart-card">
+          <h3>季度强弱分布：Up25%Q vs Down25%Q</h3>
+          <p class="hint">用途：判断中期趋势是否健康。上涨象限扩张代表趋势股池在扩大。</p>
+          <div class="chart-wrap compact"><canvas id="quarter25Chart"></canvas></div>
+        </article>
+        <article class="chart-card">
+          <h3>月度强弱分布：Up25%M vs Down25%M</h3>
+          <p class="hint">用途：监测近一个月资金偏向，适合确认轮动方向是否持续。</p>
+          <div class="chart-wrap compact"><canvas id="month25Chart"></canvas></div>
+        </article>
+        <article class="chart-card">
+          <h3>极端涨跌：Up50%M vs Down50%M</h3>
+          <p class="hint">用途：观察高波动区间。Down50%突然抬升常对应市场风险阶段。</p>
+          <div class="chart-wrap compact"><canvas id="extreme50Chart"></canvas></div>
+        </article>
+        <article class="chart-card">
+          <h3>34日强弱：Up13% vs Down13% + S&P</h3>
+          <p class="hint">用途：对照指数判断“指数涨但广度弱”或“指数弱但广度先回暖”的背离。</p>
+          <div class="chart-wrap compact"><canvas id="spxBreadthChart"></canvas></div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/breadth.js"></script>
+</body>
+</html>

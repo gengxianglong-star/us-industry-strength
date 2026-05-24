@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>美股行业强势筛选</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <nav class="top-nav">
+    <a class="top-nav-item" href="/breadth">
+      <span class="top-nav-item-icon" aria-hidden="true"></span>
+      <span>Breadth</span>
+    </a>
+    <a class="top-nav-item active" href="/strong">
+      <span class="top-nav-item-icon" aria-hidden="true"></span>
+      <span>Strong Industry</span>
+    </a>
+  </nav>
+
+  <header class="page-header">
+    <div>
+      <h1>强势行业</h1>
+      <p class="subtitle">数据源：Finviz Industry + Yahoo Adj Close + Stockbee Market Monitor</p>
+    </div>
+    <div class="header-actions">
+      <label>
+        快照日期
+        <select id="dateSelect"></select>
+      </label>
+      <button id="refreshBtn" type="button">刷新页面</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel" id="decisionPanel">
+      <div class="panel-header-row">
+        <h2>决策中心：今日交易清单</h2>
+        <div class="panel-header-actions">
+          <button type="button" id="fetchCoreStocksBtn">刷新 Top 10 个股</button>
+          <button type="button" id="computeRsBtn">刷新个股RS</button>
+          <span id="rsStatus" class="inline-status" aria-live="polite"></span>
+        </div>
+      </div>
+      <div class="decision-grid">
+        <div class="table-wrap decision-core-wrap">
+          <h3 class="subheading">强势行业 Top 10</h3>
+          <table id="coreTable">
+            <thead>
+              <tr>
+                <th>行业</th>
+                <th>成分股</th>
+                <th>Score</th>
+                <th>1W</th>
+                <th>1M</th>
+                <th>3M</th>
+                <th>6M</th>
+                <th>1Y</th>
+                <th>排名 W/M/Q/H/Y</th>
+                <th>短期趋势(Q)</th>
+                <th>长期趋势(H)</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="decision-watchlist-wrap">
+          <h3 class="subheading">最终观察名单 · Finviz 日K图</h3>
+          <div id="watchlistChartGrid" class="watchlist-chart-grid"></div>
+        </div>
+      </div>
+    </section>
+    <section class="summary" id="summary"></section>
+
+    <details class="panel" id="rsPanel">
+      <summary>证据层A：个股相对强度（RS）</summary>
+      <p class="hint">决策用途：验证清单中的个股是否仍保持全市场相对强势。</p>
+      <div id="coveragePanel" class="coverage-panel"></div>
+      <div class="hint">数据口径：Yahoo Adj Close（复权收盘价）</div>
+      <div class="table-wrap table-scroll medium-scroll">
+        <h3 class="subheading">RS Top</h3>
+        <table id="rsTable">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Score</th>
+              <th>Tier</th>
+              <th>1W</th>
+              <th>1M</th>
+              <th>3M</th>
+              <th>6M</th>
+              <th>1Y</th>
+              <th>Rank W/M/Q/H/Y</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </details>
+
+    <details class="panel" id="strongCardsPanel">
+      <summary>证据层B：行业内筛选个股明细</summary>
+      <p class="hint">决策用途：在强势行业里寻找结构最健康的个股候选。</p>
+      <div id="strongIndustryCards" class="strong-cards compact-scroll"></div>
+    </details>
+
+    <details class="panel">
+      <summary>证据层C：行业排名历史曲线</summary>
+      <p class="hint">决策用途：确认行业是“持续强势”还是“短期脉冲”。</p>
+      <div class="chart-controls">
+        <label>
+          选择行业
+          <select id="industrySelect"></select>
+        </label>
+        <label>
+          曲线指标
+          <select id="metricSelect">
+            <option value="rank_m">1月排名 (rank_m)</option>
+            <option value="rank_q">3月排名 (rank_q)</option>
+            <option value="rank_h">6月排名 (rank_h)</option>
+            <option value="rank_w">1周排名 (rank_w)</option>
+            <option value="rank_y">1年排名 (rank_y)</option>
+            <option value="score">综合得分 (score)</option>
+          </select>
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="multiRankToggle" />
+          叠加五周期排名
+        </label>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="historyChart"></canvas>
+      </div>
+    </details>
+
+    <details class="panel all-industries-panel">
+      <summary>辅助信息：全部行业（排名热力）</summary>
+      <p class="hint">决策用途：仅在需要扩展备选行业时查看，默认折叠减少干扰。</p>
+      <input id="searchInput" type="search" placeholder="搜索行业名称…" />
+      <div class="table-wrap">
+        <table id="allTable">
+          <thead>
+            <tr>
+              <th>行业</th>
+              <th>Stocks</th>
+              <th>Score</th>
+              <th>Rank W</th>
+              <th>Rank M</th>
+              <th>Rank Q</th>
+              <th>Rank H</th>
+              <th>Rank Y</th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </details>
+
+    <details class="panel config-panel" id="configPanel">
+      <summary>进阶参数配置</summary>
+      <div class="config-header">
+        <h2>进阶参数配置</h2>
+        <p class="hint">保存后写入 <code>config.yaml</code>。建议先稳定执行，再小步调参。</p>
+      </div>
+      <form id="configForm" class="config-form">
+        <fieldset>
+          <legend>周期权重</legend>
+          <div class="config-grid weights-grid">
+            <label>1周 <input type="number" id="weightWeek" step="0.01" min="0" required /></label>
+            <label>1月 <input type="number" id="weightMonth" step="0.01" min="0" required /></label>
+            <label>3月 <input type="number" id="weightQuarter" step="0.01" min="0" required /></label>
+            <label>6月 <input type="number" id="weightHalf" step="0.01" min="0" required /></label>
+            <label>1年 <input type="number" id="weightYear" step="0.01" min="0" required /></label>
+          </div>
+          <p class="hint" id="weightHint"></p>
+        </fieldset>
+
+        <fieldset>
+          <legend>阈值</legend>
+          <div class="config-grid">
+            <label>A级得分 ≥ <span class="help-tip" data-tip="行业综合得分达到该值才算A级。越高越严格。">?</span><input type="number" id="tierAScore" step="0.01" min="0" max="1" required /></label>
+            <label>B级得分 ≥ <span class="help-tip" data-tip="行业综合得分达到该值才算B级。应小于或等于A级阈值。">?</span><input type="number" id="tierBScore" step="0.01" min="0" max="1" required /></label>
+            <label>核心排名上限 <span class="help-tip" data-tip="1月/3月/6月排名都需小于等于该值，才可能被标记为核心强势。">?</span><input type="number" id="coreRankMax" min="1" required /></label>
+            <label>排名极差上限 <span class="help-tip" data-tip="五个周期排名的最大值减最小值。越小越强调多周期一致性。">?</span><input type="number" id="maxRankSpread" min="0" required /></label>
+            <label>主列表数量 <span class="help-tip" data-tip="首页强势行业列表显示的数量（当前建议10）。">?</span><input type="number" id="topListCount" min="1" required /></label>
+            <label>加速排名差 <span class="help-tip" data-tip="用于“加速”标签：本周排名需比1月排名至少好这么多名。">?</span><input type="number" id="accelerationRankDelta" min="0" required /></label>
+            <label>回调-中期排名上限 <span class="help-tip" data-tip="用于“强势回调”标签：1月/3月/6月排名都要在该值以内。">?</span><input type="number" id="pullbackMidtermRankMax" min="1" required /></label>
+            <label>回调-1周排名下限 <span class="help-tip" data-tip="用于“强势回调”标签：1周排名需大于等于该值，且1周涨幅为负。">?</span><input type="number" id="pullbackWeekRankMin" min="1" required /></label>
+          </div>
+          <div class="preset-row">
+            <span class="preset-label">一键预设：</span>
+            <button type="button" class="preset-btn" data-preset="conservative">保守</button>
+            <button type="button" class="preset-btn" data-preset="balanced">均衡</button>
+            <button type="button" class="preset-btn" data-preset="aggressive">激进</button>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>个股筛选（Finviz Screener）</legend>
+          <div class="config-grid">
+            <label>股价 &gt; SMA20 <input type="text" id="stockPriceAboveSma20" required /></label>
+            <label>SMA50 &lt; SMA20 <input type="text" id="stockSma20AboveSma50" required /></label>
+            <label>当日成交额 <input type="text" id="stockDollarVolumeMin" required /></label>
+          </div>
+          <p class="hint">对应 Finviz：Price above SMA20、SMA50 below SMA20、Current Volume Over $100M（<code>sh_curvol_ousd100000</code>）</p>
+        </fieldset>
+
+        <fieldset>
+          <legend>个股RS参数</legend>
+          <div class="config-grid">
+            <label>请求超时(秒)
+              <input type="number" id="rsTimeoutSeconds" min="5" max="120" required />
+            </label>
+            <label>最少价格天数
+              <input type="number" id="rsMinPriceRows" min="120" max="1000" required />
+            </label>
+            <label>RS A级阈值
+              <input type="number" id="rsTierAScore" step="0.01" min="0" max="1" required />
+            </label>
+            <label>RS B级阈值
+              <input type="number" id="rsTierBScore" step="0.01" min="0" max="1" required />
+            </label>
+            <label>交叉比例 Top%
+              <input type="number" id="rsCrossTopPercent" step="0.01" min="0.01" max="1" required />
+            </label>
+            <label>Universe上限(0=不限)
+              <input type="number" id="rsUniverseCap" min="0" max="12000" required />
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" id="rsPreferStooq" />
+              优先 Stooq（不可用时回退 Yahoo）
+            </label>
+          </div>
+          <p class="hint">建议默认使用 Yahoo 免费接口（更稳定）。如果你后续有可用 Stooq 链路，再勾选优先 Stooq。</p>
+        </fieldset>
+
+        <div class="config-actions">
+          <button type="submit" id="saveConfigBtn">保存配置</button>
+          <button type="button" id="saveAndRecomputeBtn">保存并重新计算当前快照</button>
+          <span id="configStatus" class="config-status" aria-live="polite"></span>
+        </div>
+      </form>
+    </details>
+
+  </main>
+
+  <footer>
+    <p>数据来源：<a href="https://finviz.com/groups?g=industry&v=210&o=name" target="_blank" rel="noreferrer">Finviz Industry Groups</a>（延迟 15 分钟）· 仅供研究，非投资建议</p>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

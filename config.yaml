@@ -1,0 +1,38 @@
+weights:
+  week: 0.05
+  month: 0.3
+  quarter: 0.4
+  half: 0.2
+  year: 0.05
+thresholds:
+  tier_a_score: 0.8
+  tier_b_score: 0.65
+  core_rank_max: 25
+  max_rank_spread: 60
+  top_list_count: 10
+  acceleration_rank_delta: 5
+  pullback_midterm_rank_max: 30
+  pullback_week_rank_min: 40
+stock_filters:
+  price_above_sma20: ta_sma20_pa
+  sma20_above_sma50: ta_sma50_sb20
+  dollar_volume_min: sh_curvol_ousd100000
+stock_rs:
+  request_timeout_seconds: 20
+  max_workers: 24
+  min_price_rows: 260
+  save_price_history: false
+  incremental_mode: true
+  prefer_stooq: false
+  tier_a_score: 0.8
+  tier_b_score: 0.65
+  cross_top_percent: 0.1
+  universe_cap: 0
+scraper:
+  user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36
+  request_delay_seconds: 1.0
+server:
+  host: 127.0.0.1
+  port: 8080
+database:
+  path: data/industry_strength.db
