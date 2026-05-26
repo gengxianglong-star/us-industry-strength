@@ -439,6 +439,75 @@ class Storage:
             data["result"] = {}
         return data
 
+    def claim_rs_job_run(
+        self,
+        job_id: str,
+        snapshot_date: str,
+        job_kind: str,
+        *,
+        stale_seconds: int,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Atomically claim an RS job slot; returns (claimed, blocking_job)."""
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT *
+                FROM rs_job_runs
+                WHERE snapshot_date = ? AND job_kind = ?
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (snapshot_date, job_kind),
+            ).fetchone()
+            if row:
+                active = dict(row)
+                status = str(active.get("status") or "")
+                if status in {"running", "cancelling"}:
+                    age_seconds = stale_seconds + 1
+                    try:
+                        updated = datetime.fromisoformat(str(active["updated_at"]))
+                        age_seconds = (now - updated).total_seconds()
+                    except ValueError:
+                        pass
+                    if age_seconds <= stale_seconds:
+                        conn.execute("ROLLBACK")
+                        data = dict(active)
+                        try:
+                            data["result"] = json.loads(data.get("result_json") or "{}")
+                        except json.JSONDecodeError:
+                            data["result"] = {}
+                        return False, data
+                    conn.execute(
+                        """
+                        UPDATE rs_job_runs
+                        SET status = 'error',
+                            error = ?,
+                            updated_at = ?,
+                            finished_at = ?
+                        WHERE job_id = ?
+                        """,
+                        (
+                            f"stale job timeout>{stale_seconds}s",
+                            now_iso,
+                            now_iso,
+                            active["job_id"],
+                        ),
+                    )
+            conn.execute(
+                """
+                INSERT INTO rs_job_runs(
+                    job_id, snapshot_date, job_kind, status, processed, total,
+                    started_at, updated_at, finished_at, error, result_json
+                ) VALUES (?, ?, ?, 'running', 0, 0, ?, ?, NULL, NULL, '{}')
+                """,
+                (job_id, snapshot_date, job_kind, now_iso, now_iso),
+            )
+            conn.commit()
+        return True, None
+
     def compare_all_with_previous(self, snapshot_date: str) -> dict[str, dict[str, Any] | None]:
         dates = self.list_snapshot_dates()
         if snapshot_date not in dates:

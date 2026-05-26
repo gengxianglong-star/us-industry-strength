@@ -797,6 +797,30 @@ def compute_and_store_stock_rs(
     perf_invalid_count = sum(1 for r in issues_map.values() if r == "perf_invalid")
 
     if not rows:
+        if incremental_mode and existing_rows:
+            storage.save_stock_rs_issues(snapshot_date, issues_map)
+            prev_meta = storage.get_stock_rs_meta(snapshot_date) or {}
+            preserved_count = len(existing_rows)
+            return {
+                "snapshot_date": snapshot_date,
+                "universe_count": len(universe),
+                "attempted_count": len(target_symbols),
+                "computed_count": preserved_count,
+                "watchlist_count": storage.count_stock_watchlist(snapshot_date),
+                "no_bars_count": no_bars_count,
+                "insufficient_history_count": insufficient_history_count,
+                "perf_invalid_count": perf_invalid_count,
+                "coverage_ratio": float(prev_meta.get("coverage_ratio", 0.0)),
+                "new_stock_leaderboard_count": int(
+                    prev_meta.get("new_stock_leaderboard_count", 0) or 0
+                ),
+                "new_stock_watchlist_added": int(
+                    prev_meta.get("new_stock_watchlist_added", 0) or 0
+                ),
+                "worker_errors": worker_errors,
+                "preserved_existing_rs": True,
+            }
+
         storage.save_stock_rs_snapshot(snapshot_date, [])
         storage.save_stock_rs_issues(snapshot_date, issues_map)
         new_stock_result = compute_and_store_new_stock_rs(

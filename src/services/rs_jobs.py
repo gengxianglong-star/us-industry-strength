@@ -28,6 +28,32 @@ class RsJobService:
     def _state_key(snapshot_date: str, job_kind: str) -> str:
         return f"{snapshot_date}:{job_kind}"
 
+    @staticmethod
+    def _job_timestamps(job: dict[str, Any]) -> tuple[float | None, float | None]:
+        started_ts = None
+        updated_ts = None
+        try:
+            if job.get("started_at"):
+                started_ts = datetime.fromisoformat(str(job["started_at"])).timestamp()
+            if job.get("updated_at"):
+                updated_ts = datetime.fromisoformat(str(job["updated_at"])).timestamp()
+        except ValueError:
+            pass
+        return started_ts, updated_ts
+
+    def _state_from_db_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        started_ts, updated_ts = self._job_timestamps(job)
+        return {
+            "status": job.get("status", "idle"),
+            "job_id": job.get("job_id"),
+            "processed": int(job.get("processed") or 0),
+            "total": int(job.get("total") or 0),
+            "started_at": started_ts,
+            "updated_at": updated_ts,
+            "result": job.get("result") or {},
+            "error": job.get("error"),
+        }
+
     def _set_progress(self, snapshot_date: str, job_kind: str, payload: dict[str, Any]) -> None:
         with self._lock:
             self._state[self._state_key(snapshot_date, job_kind)] = payload
@@ -44,6 +70,20 @@ class RsJobService:
         with self._lock:
             return bool(self._cancel_flags.get(self._state_key(snapshot_date, job_kind), False))
 
+    def _active_job_response(
+        self,
+        *,
+        snapshot_date: str,
+        job_kind: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "status": "running",
+            "snapshot_date": snapshot_date,
+            "job_kind": job_kind,
+            "job_id": state.get("job_id"),
+        }
+
     def _start_job(
         self,
         *,
@@ -54,65 +94,55 @@ class RsJobService:
         async_mode: bool,
         max_runtime_seconds: int,
     ) -> dict[str, Any]:
-        state = self._get_progress(snapshot_date, job_kind)
-        if state.get("status") in {"running", "cancelling"}:
-            updated = float(state.get("updated_at") or state.get("started_at") or 0)
-            if updated and (time.time() - updated) <= self.STALE_SECONDS:
-                return {
-                    "status": "running",
-                    "snapshot_date": snapshot_date,
-                    "job_kind": job_kind,
-                    "job_id": state.get("job_id"),
-                }
-            # 僵尸任务保护：超过阈值视为超时失效，允许新任务接管。
-            storage.upsert_rs_job_run(
-                str(state.get("job_id") or ""),
-                snapshot_date,
-                "error",
-                job_kind=job_kind,
-                processed=int(state.get("processed") or 0),
-                total=int(state.get("total") or 0),
-                error=f"stale job timeout>{self.STALE_SECONDS}s",
-                finished=True,
-            )
-            self._set_progress(
+        with self._lock:
+            state = dict(self._state.get(self._state_key(snapshot_date, job_kind)) or {})
+            if state.get("status") in {"running", "cancelling"}:
+                updated = float(state.get("updated_at") or state.get("started_at") or 0)
+                if updated and (time.time() - updated) <= self.STALE_SECONDS:
+                    return self._active_job_response(
+                        snapshot_date=snapshot_date,
+                        job_kind=job_kind,
+                        state=state,
+                    )
+
+            db_job = storage.get_latest_rs_job_run(snapshot_date, job_kind=job_kind)
+            if db_job and str(db_job.get("status") or "") in {"running", "cancelling"}:
+                db_state = self._state_from_db_job(db_job)
+                updated = float(db_state.get("updated_at") or db_state.get("started_at") or 0)
+                if updated and (time.time() - updated) <= self.STALE_SECONDS:
+                    self._state[self._state_key(snapshot_date, job_kind)] = db_state
+                    return self._active_job_response(
+                        snapshot_date=snapshot_date,
+                        job_kind=job_kind,
+                        state=db_state,
+                    )
+
+            start_ts = time.time()
+            job_id = f"{job_kind}-{snapshot_date}-{uuid4().hex[:10]}"
+            claimed, blocking = storage.claim_rs_job_run(
+                job_id,
                 snapshot_date,
                 job_kind,
-                {
-                    "status": "error",
-                    "job_id": state.get("job_id"),
-                    "processed": int(state.get("processed") or 0),
-                    "total": int(state.get("total") or 0),
-                    "started_at": state.get("started_at"),
-                    "updated_at": time.time(),
-                    "elapsed_seconds": None,
-                    "error": f"stale job timeout>{self.STALE_SECONDS}s",
-                },
+                stale_seconds=self.STALE_SECONDS,
             )
+            if not claimed and blocking:
+                blocked_state = self._state_from_db_job(blocking)
+                self._state[self._state_key(snapshot_date, job_kind)] = blocked_state
+                return self._active_job_response(
+                    snapshot_date=snapshot_date,
+                    job_kind=job_kind,
+                    state=blocked_state,
+                )
 
-        start_ts = time.time()
-        job_id = f"{job_kind}-{snapshot_date}-{uuid4().hex[:10]}"
-        self._set_progress(
-            snapshot_date,
-            job_kind,
-            {
+            self._state[self._state_key(snapshot_date, job_kind)] = {
                 "status": "running",
                 "job_id": job_id,
                 "processed": 0,
                 "total": 0,
                 "started_at": start_ts,
                 "updated_at": start_ts,
-            },
-        )
-        storage.upsert_rs_job_run(
-            job_id,
-            snapshot_date,
-            "running",
-            job_kind=job_kind,
-            processed=0,
-            total=0,
-        )
-        self._set_cancel_flag(snapshot_date, job_kind, False)
+            }
+            self._cancel_flags[self._state_key(snapshot_date, job_kind)] = False
 
         def _run_job() -> None:
             def _on_progress(processed: int, total: int) -> None:
@@ -297,26 +327,7 @@ class RsJobService:
         if not state:
             job = storage.get_latest_rs_job_run(snapshot_date, job_kind=job_kind)
             if job:
-                started_ts = None
-                updated_ts = None
-                try:
-                    if job.get("started_at"):
-                        started_ts = datetime.fromisoformat(str(job["started_at"])).timestamp()
-                    if job.get("updated_at"):
-                        updated_ts = datetime.fromisoformat(str(job["updated_at"])).timestamp()
-                except ValueError:
-                    started_ts = None
-                    updated_ts = None
-                state = {
-                    "status": job.get("status", "idle"),
-                    "job_id": job.get("job_id"),
-                    "processed": int(job.get("processed") or 0),
-                    "total": int(job.get("total") or 0),
-                    "started_at": started_ts,
-                    "updated_at": updated_ts,
-                    "result": job.get("result") or {},
-                    "error": job.get("error"),
-                }
+                state = self._state_from_db_job(job)
         if not state:
             return {"snapshot_date": snapshot_date, "status": "idle", "processed": 0, "total": 0}
         total = int(state.get("total") or 0)
@@ -339,6 +350,10 @@ class RsJobService:
 
     def request_cancel(self, snapshot_date: str, *, storage: Storage, job_kind: str = "main") -> dict[str, Any]:
         state = self._get_progress(snapshot_date, job_kind)
+        if not state:
+            job = storage.get_latest_rs_job_run(snapshot_date, job_kind=job_kind)
+            if job and str(job.get("status") or "") == "running":
+                state = self._state_from_db_job(job)
         if state.get("status") != "running":
             return {
                 "snapshot_date": snapshot_date,

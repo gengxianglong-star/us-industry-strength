@@ -61,20 +61,8 @@ BREADTH_SYNC_LOCK = threading.Lock()
 
 
 def _run_breadth_sync(full: bool) -> None:
-    started_at = time.time()
-    mode = "full" if full else "incremental"
     with BREADTH_SYNC_LOCK:
-        BREADTH_SYNC_STATE.update(
-            {
-                "status": "running",
-                "mode": mode,
-                "processed": 0,
-                "total": 0,
-                "started_at": started_at,
-                "updated_at": started_at,
-                "message": "starting",
-            }
-        )
+        started_at = float(BREADTH_SYNC_STATE.get("started_at") or time.time())
 
     def _on_progress(processed: int, total: int, gid: str) -> None:
         with BREADTH_SYNC_LOCK:
@@ -144,6 +132,19 @@ def sync_breadth(
         with BREADTH_SYNC_LOCK:
             if BREADTH_SYNC_STATE.get("status") == "running":
                 return {"status": "running", **BREADTH_SYNC_STATE}
+            started_at = time.time()
+            mode = "full" if full else "incremental"
+            BREADTH_SYNC_STATE.update(
+                {
+                    "status": "running",
+                    "mode": mode,
+                    "processed": 0,
+                    "total": 0,
+                    "started_at": started_at,
+                    "updated_at": started_at,
+                    "message": "starting",
+                }
+            )
         threading.Thread(target=_run_breadth_sync, args=(full,), daemon=True).start()
         return {"status": "started", "mode": "full" if full else "incremental"}
     result = sync_breadth_history(storage, full=full)
@@ -203,14 +204,32 @@ def update_config(body: ConfigUpdate) -> dict[str, Any]:
     )
     if weight_total <= 0:
         raise HTTPException(status_code=400, detail="权重总和必须大于 0")
-    if body.stock_rs.tier_b_score > body.stock_rs.tier_a_score:
-        raise HTTPException(
-            status_code=400,
-            detail="stock_rs.tier_b_score 不能大于 stock_rs.tier_a_score",
+    if body.stock_rs.tier_b_score is not None and body.stock_rs.tier_a_score is not None:
+        if body.stock_rs.tier_b_score > body.stock_rs.tier_a_score:
+            raise HTTPException(
+                status_code=400,
+                detail="stock_rs.tier_b_score 不能大于 stock_rs.tier_a_score",
+            )
+    elif body.stock_rs.tier_b_score is not None or body.stock_rs.tier_a_score is not None:
+        current_rs = config.get("stock_rs", {})
+        tier_a = float(
+            body.stock_rs.tier_a_score
+            if body.stock_rs.tier_a_score is not None
+            else current_rs.get("tier_a_score", 0.8)
         )
+        tier_b = float(
+            body.stock_rs.tier_b_score
+            if body.stock_rs.tier_b_score is not None
+            else current_rs.get("tier_b_score", 0.65)
+        )
+        if tier_b > tier_a:
+            raise HTTPException(
+                status_code=400,
+                detail="stock_rs.tier_b_score 不能大于 stock_rs.tier_a_score",
+            )
 
     try:
-        save_editable_config(body.to_payload(), DEFAULT_CONFIG_PATH)
+        save_editable_config(body.to_payload(), DEFAULT_CONFIG_PATH, base_config=config)
     except (ValueError, ValidationError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

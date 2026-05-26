@@ -16,6 +16,37 @@ PERF_FIELDS = ("perf_w", "perf_m", "perf_q", "perf_h", "perf_y")
 RANK_FIELDS = ("rank_w", "rank_m", "rank_q", "rank_h", "rank_y")
 
 EDITABLE_KEYS = ("weights", "thresholds", "stock_filters", "stock_rs")
+NESTED_EDITABLE_KEYS = frozenset({"stock_filters", "stock_rs"})
+
+
+def _deep_merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in patch.items():
+        if value is None:
+            continue
+        merged[key] = value
+    return merged
+
+
+def merge_editable_config(
+    existing: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge editable config; nested sections like stock_rs patch in-place."""
+    merged = deepcopy(existing)
+    for key in EDITABLE_KEYS:
+        if key not in payload:
+            continue
+        incoming = payload[key]
+        if key in NESTED_EDITABLE_KEYS and isinstance(incoming, dict):
+            current = merged.get(key)
+            if isinstance(current, dict):
+                merged[key] = _deep_merge_dict(current, incoming)
+            else:
+                merged[key] = deepcopy(incoming)
+        else:
+            merged[key] = deepcopy(incoming)
+    return merged
 
 
 def _normalize_weights(config: dict[str, Any]) -> None:
@@ -49,6 +80,8 @@ def get_editable_config(config: dict[str, Any]) -> dict[str, Any]:
 def save_editable_config(
     payload: dict[str, Any],
     path: Path | None = None,
+    *,
+    base_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Merge editable fields into config.yaml and return reloaded config."""
     config_path = path or DEFAULT_CONFIG_PATH
@@ -56,9 +89,10 @@ def save_editable_config(
     with config_path.open(encoding="utf-8") as f:
         existing = yaml.safe_load(f) or {}
 
+    current_editable = get_editable_config(base_config or existing)
+    merged_editable = merge_editable_config(current_editable, payload)
     for key in EDITABLE_KEYS:
-        if key in payload:
-            existing[key] = payload[key]
+        existing[key] = merged_editable[key]
 
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(

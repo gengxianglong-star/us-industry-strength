@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from src.scoring import top_strong_sort_key
 from src.storage import Storage
 
 
@@ -12,6 +13,8 @@ from src.storage import Storage
 class SnapshotIndustry:
     key: str
     score: float
+    rank_m: int
+    rank_q: int
     tags: list[str]
     excluded: bool
 
@@ -21,6 +24,8 @@ def to_snapshot_industries(rows: list[dict[str, Any]]) -> list[SnapshotIndustry]
         SnapshotIndustry(
             key=str(r["industry_key"]),
             score=float(r.get("score") or 0),
+            rank_m=int(r.get("rank_m") or 9999),
+            rank_q=int(r.get("rank_q") or 9999),
             tags=list(r.get("tags") or []),
             excluded=bool(r.get("excluded")),
         )
@@ -28,23 +33,31 @@ def to_snapshot_industries(rows: list[dict[str, Any]]) -> list[SnapshotIndustry]
     ]
 
 
-def scored_industries_from_rows(rows: list[dict[str, Any]]) -> list[SnapshotIndustry]:
-    return sorted(
-        [x for x in to_snapshot_industries(rows) if not x.excluded],
-        key=lambda x: (-x.score, x.key),
+def _row_top_sort_key(row: dict[str, Any]) -> tuple[float, int, int, str]:
+    return top_strong_sort_key(
+        float(row.get("score") or 0),
+        int(row.get("rank_m") or 9999),
+        int(row.get("rank_q") or 9999),
+        str(row.get("industry_key") or ""),
     )
 
 
-def top_strong_from_rows(rows: list[dict[str, Any]], *, top_n: int) -> list[SnapshotIndustry]:
+def scored_industries_from_rows(rows: list[dict[str, Any]]) -> list[SnapshotIndustry]:
     active = [x for x in to_snapshot_industries(rows) if not x.excluded]
-    active.sort(key=lambda x: (-x.score, x.key))
-    return active[:top_n]
+    active.sort(key=lambda x: top_strong_sort_key(x.score, x.rank_m, x.rank_q, x.key))
+    return active
+
+
+def top_strong_from_rows(rows: list[dict[str, Any]], *, top_n: int) -> list[SnapshotIndustry]:
+    active = [r for r in rows if not r.get("excluded")]
+    active.sort(key=_row_top_sort_key)
+    return to_snapshot_industries(active[:top_n])
 
 
 def core_strong_from_rows(rows: list[dict[str, Any]], *, top_n: int) -> list[SnapshotIndustry]:
     active = [x for x in to_snapshot_industries(rows) if not x.excluded]
     core = [x for x in active if "核心强势" in x.tags]
-    core.sort(key=lambda x: (-x.score, x.key))
+    core.sort(key=lambda x: top_strong_sort_key(x.score, x.rank_m, x.rank_q, x.key))
     return core[:top_n]
 
 
