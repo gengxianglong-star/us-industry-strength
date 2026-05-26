@@ -1,0 +1,8 @@
+# 美股收盘后更新（北京时间次日清晨示例；请按本机时区调整）
+# 安装：crontab -e ，粘贴下面一行并改 PROJECT 路径
+#
+# 周一–五 06:30 跑行业快照 + 宽度增量同步
+# 30 6 * * 1-5 cd /path/to/us-industry-strength && ./scripts/scheduled_daily.sh
+
+# 仅宽度增量（每小时，可选）
+# 5 * * * * cd /path/to/us-industry-strength && ./.venv/bin/python scripts/sync_breadth.py

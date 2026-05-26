@@ -1,27 +1,214 @@
-"""Fetch and parse Stockbee market breadth data."""
+"""Sync and analyze Stockbee market breadth history."""
 
 from __future__ import annotations
 
 import csv
 import io
+import re
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import requests
 
-BREADTH_CSV_URL = (
-    "https://docs.google.com/spreadsheets/u/0/d/"
-    "1O6OhS7ciA8zwfycBfGPbP2fWJnR0pn2UUvFZVDP9jpE/pub?output=csv"
-)
+from src.storage import Storage
+
+SHEET_ID = "1O6OhS7ciA8zwfycBfGPbP2fWJnR0pn2UUvFZVDP9jpE"
+SHEET_PUBHTML_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/pubhtml"
+SHEET_CSV_GID_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={{gid}}"
+# Market Monitor 主表（与用户提供的 Stockbee 链接 gid 一致）
+PRIMARY_MARKET_MONITOR_GID = "1082103394"
+# 增量同步时回刷最近 N 天，覆盖 Sheet 对已发布日期的修订（如 118→119）
+INCREMENTAL_LOOKBACK_DAYS = 120
+
+DEFAULT_THRESHOLDS: dict[str, float] = {
+    "trend10_overbought_min": 2.0,
+    "trend10_oversold_max": 0.5,
+    "trend5_overbought_min": 2.0,
+    "trend5_oversold_max": 0.5,
+    "t2108_red_max": 20.0,
+    "t2108_green_min": 60.0,
+    "ratio_green_anchor": 1.5,
+    "ratio_green_low_min": 1.0,
+    "ratio_green_high_max": 2.0,
+    "ratio_green_tier_count": 5.0,
+    "ratio_red_anchor": 0.75,
+    "ratio_red_low_min": 0.5,
+    "ratio_red_high_max": 1.0,
+    "ratio_red_tier_count": 5.0,
+}
+
+
+def validate_breadth_thresholds(cfg: dict[str, float]) -> None:
+    """校验阈值组合，非法时抛出 ValueError。"""
+    merged = dict(DEFAULT_THRESHOLDS)
+    merged.update(cfg)
+
+    def _check_range(low_key: str, anchor_key: str, high_key: str, label: str) -> None:
+        low = float(merged[low_key])
+        anchor = float(merged[anchor_key])
+        high = float(merged[high_key])
+        if not low < anchor < high:
+            raise ValueError(f"{label}：下限 < 锚点 < 上限")
+
+    def _check_tiers(key: str, label: str) -> None:
+        tiers = int(float(merged[key]))
+        if tiers < 2 or tiers > 10:
+            raise ValueError(f"{label}：档数须在 2–10 之间")
+
+    _check_range("ratio_green_low_min", "ratio_green_anchor", "ratio_green_high_max", "5/10日绿背景")
+    _check_range("ratio_red_low_min", "ratio_red_anchor", "ratio_red_high_max", "5/10日红背景")
+    _check_tiers("ratio_green_tier_count", "绿侧档数")
+    _check_tiers("ratio_red_tier_count", "红侧档数")
+
+    if float(merged["trend10_oversold_max"]) >= float(merged["trend10_overbought_min"]):
+        raise ValueError("10D：Oversold 上限须小于 Overbought 下限")
+    if float(merged["trend5_oversold_max"]) >= float(merged["trend5_overbought_min"]):
+        raise ValueError("5D：Oversold 上限须小于 Overbought 下限")
+    if float(merged["t2108_red_max"]) >= float(merged["t2108_green_min"]):
+        raise ValueError("T2108：Red 上限须小于 Green 下限")
+
+
+def resolve_ratio_bg_params(thresholds: dict[str, float]) -> dict[str, dict[str, float | int]]:
+    """解析 5/10 日趋势背景分档参数（供前端与说明文案共用）。"""
+    green_tiers = max(2, min(10, int(float(thresholds.get("ratio_green_tier_count", 5)))))
+    red_tiers = max(2, min(10, int(float(thresholds.get("ratio_red_tier_count", 5)))))
+    green_anchor = float(thresholds["ratio_green_anchor"])
+    green_low = float(thresholds["ratio_green_low_min"])
+    green_high = float(thresholds["ratio_green_high_max"])
+    red_anchor = float(thresholds["ratio_red_anchor"])
+    red_low = float(thresholds["ratio_red_low_min"])
+    red_high = float(thresholds["ratio_red_high_max"])
+    return {
+        "green": {
+            "anchor": green_anchor,
+            "low_min": green_low,
+            "high_max": green_high,
+            "tier_count": green_tiers,
+            "tier_max": green_tiers - 1,
+            "band_below": (green_anchor - green_low) / green_tiers,
+            "band_above": (green_high - green_anchor) / green_tiers,
+        },
+        "red": {
+            "anchor": red_anchor,
+            "low_min": red_low,
+            "high_max": red_high,
+            "tier_count": red_tiers,
+            "tier_max": red_tiers - 1,
+            "band_below": (red_anchor - red_low) / red_tiers,
+            "band_above": (red_high - red_anchor) / red_tiers,
+        },
+    }
+
+
+def build_cockpit_help(thresholds: dict[str, float]) -> list[dict[str, Any]]:
+    """驾驶舱模块触发条件与背景分档说明。"""
+    t10_ob = float(thresholds["trend10_overbought_min"])
+    t10_os = float(thresholds["trend10_oversold_max"])
+    t5_ob = float(thresholds["trend5_overbought_min"])
+    t5_os = float(thresholds["trend5_oversold_max"])
+    t_red = float(thresholds["t2108_red_max"])
+    t_green = float(thresholds["t2108_green_min"])
+    ratio = resolve_ratio_bg_params(thresholds)
+    g = ratio["green"]
+    r = ratio["red"]
+
+    def _fmt(v: float) -> str:
+        return f"{v:g}"
+
+    trend_bg_lines = [
+        f"绿灯背景锚点 {_fmt(g['anchor'])}（与季度/半季/月度/5-10交叉 绿灯一致）",
+        f"区间 [{_fmt(g['low_min'])}, {_fmt(g['high_max'])}]，锚点以下/以上各 {int(g['tier_count'])} 档（步长约 {_fmt(g['band_below'])} / {_fmt(g['band_above'])}）",
+        f"比值 < 锚点变浅，> 锚点加深；超出区间取最浅/最深档",
+        f"红灯背景锚点 {_fmt(r['anchor'])}（与四模块红灯一致）",
+        f"区间 [{_fmt(r['low_min'])}, {_fmt(r['high_max'])}]，锚点以下/以上各 {int(r['tier_count'])} 档（步长约 {_fmt(r['band_below'])} / {_fmt(r['band_above'])}）",
+        "比值 < 锚点加深，> 锚点变浅",
+    ]
+    trend_state_lines = [
+        f"≥ Overbought 下限 → OVERBOUGHT（绿灯）",
+        f"≤ Oversold 上限 → OVERSOLD（红灯）",
+        f"介于两者之间且 ≥ 1 → NORMAL（绿灯，强度随比值升高）",
+        f"< 1 且未 Oversold → NORMAL（红灯，强度随比值降低）",
+    ]
+
+    return [
+        {
+            "id": "quarter_trend",
+            "title": "季度趋势",
+            "lines": [
+                "Up25%Q > Down25%Q → 绿灯 BULL",
+                "否则 → 红灯 BEAR",
+                "背景：与对应灯色满强度一致",
+            ],
+        },
+        {
+            "id": "half_season_trend",
+            "title": "半季趋势",
+            "lines": [
+                "Up13%/34D > Down13%/34D → 绿灯 BULL",
+                "否则 → 红灯 BEAR",
+                "背景：与对应灯色满强度一致",
+            ],
+        },
+        {
+            "id": "monthly_trend",
+            "title": "月度趋势",
+            "lines": [
+                "Up25%M > Down25%M → 绿灯 BULLISH",
+                "否则 → 红灯 BEARISH",
+                "背景：与对应灯色满强度一致",
+            ],
+        },
+        {
+            "id": "cross_5_10",
+            "title": "5-10交叉",
+            "lines": [
+                "5日 ratio ≥ 10日 ratio → 绿灯 LONG",
+                "否则 → 红灯 SHORT",
+                "背景：与对应灯色满强度一致",
+            ],
+        },
+        {
+            "id": "trend_10d",
+            "title": "10日趋势",
+            "lines": [
+                f"10D Overbought ≥ {_fmt(t10_ob)}；Oversold ≤ {_fmt(t10_os)}",
+                *trend_state_lines,
+                *trend_bg_lines,
+            ],
+        },
+        {
+            "id": "trend_5d",
+            "title": "5日趋势",
+            "lines": [
+                f"5D Overbought ≥ {_fmt(t5_ob)}；Oversold ≤ {_fmt(t5_os)}",
+                *trend_state_lines,
+                *trend_bg_lines,
+            ],
+        },
+        {
+            "id": "extreme_alert",
+            "title": "极值提醒（T2108）",
+            "lines": [
+                f"≤ {_fmt(t_red)} → OVERSOLD（红灯，越深越低）",
+                f"≥ {_fmt(t_green)} → OVERBOUGHT（绿灯，越深越高）",
+                "介于两者之间 → NORMAL（白灯）",
+            ],
+        },
+    ]
 
 _CACHE_TTL_SECONDS = 300
 _CACHE_DATA: dict[str, Any] | None = None
 _CACHE_AT: float = 0.0
+_CACHE_SIGNATURE: str = ""
 
 
-def _to_number(value: str) -> float | None:
-    text = (value or "").strip().replace(",", "")
+def _to_number(value: str | float | int | None) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(",", "")
     if not text:
         return None
     try:
@@ -34,62 +221,449 @@ def _parse_date(value: str) -> str:
     text = (value or "").strip()
     if not text:
         return ""
+    for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.date().isoformat()
+        except ValueError:
+            continue
+    return text
+
+
+def _is_iso_date(value: str) -> bool:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or ""):
+        return False
     try:
-        dt = datetime.strptime(text, "%m/%d/%Y")
-        return dt.date().isoformat()
+        dt = datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError:
-        return text
+        return False
+    year = dt.year
+    return 2007 <= year <= (datetime.utcnow().year + 1)
 
 
-def _fetch_raw_rows() -> list[list[str]]:
-    resp = requests.get(BREADTH_CSV_URL, timeout=25)
-    resp.raise_for_status()
-    return list(csv.reader(io.StringIO(resp.text)))
+def _discover_sheet_gids() -> list[str]:
+    """仅同步 Market Monitor 主表，避免多 tab 合并覆盖或拉取过慢。"""
+    return [PRIMARY_MARKET_MONITOR_GID]
 
 
-def load_breadth_data(force_refresh: bool = False) -> dict[str, Any]:
-    global _CACHE_DATA, _CACHE_AT
-    now = time.time()
-    if not force_refresh and _CACHE_DATA and (now - _CACHE_AT) < _CACHE_TTL_SECONDS:
-        return _CACHE_DATA
-
-    rows = _fetch_raw_rows()
+def _fetch_gid_rows(gid: str) -> tuple[list[str], list[str], list[list[str]]]:
+    url = SHEET_CSV_GID_URL.format(gid=gid)
+    text = requests.get(url, timeout=25).text
+    rows = list(csv.reader(io.StringIO(text)))
     if len(rows) < 3:
-        raise ValueError("市场宽度数据格式异常：行数不足")
-
-    group_row = rows[0]
-    header_row = rows[1]
+        return [], [], []
+    group_row = [x.strip() for x in rows[0]]
+    header_row = [x.strip() for x in rows[1]]
     data_rows = rows[2:]
-    headers = [h.strip() for h in header_row]
+    return group_row, header_row, data_rows
 
-    normalized_rows: list[dict[str, Any]] = []
-    for row in data_rows:
+
+def _normalize_gid_rows(gid: str, sheet_name: str, rows: list[list[str]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
         if not row or not row[0].strip():
             continue
-        item: dict[str, Any] = {"date": _parse_date(row[0]), "raw_date": row[0].strip()}
-        for idx, header in enumerate(headers[1:], start=1):
-            key = f"c{idx}"
-            val = row[idx].strip() if idx < len(row) else ""
-            item[key] = val
-            item[f"{key}_num"] = _to_number(val)
-        normalized_rows.append(item)
+        trade_date = _parse_date(row[0].strip())
+        if not _is_iso_date(trade_date):
+            continue
+        raw_values = {}
+        item: dict[str, Any] = {
+            "trade_date": trade_date,
+            "raw_date": row[0].strip(),
+            "sheet_gid": gid,
+            "sheet_name": sheet_name,
+            "raw_values": raw_values,
+        }
+        for idx in range(1, 16):
+            text_val = row[idx].strip() if idx < len(row) else ""
+            raw_values[f"c{idx}"] = text_val
+            item[f"c{idx}"] = _to_number(text_val)
+        normalized.append(item)
+    return normalized
 
-    parsed = {
+
+def sync_breadth_history(
+    storage: Storage,
+    *,
+    full: bool = False,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    global _CACHE_DATA, _CACHE_AT, _CACHE_SIGNATURE
+    gids = _discover_sheet_gids()
+    existing_meta = storage.get_breadth_sheet_meta()
+    last_date_by_gid = {
+        str(item.get("sheet_gid")): str(item.get("last_date") or "")
+        for item in existing_meta
+    }
+    if full:
+        storage.clear_breadth_history()
+    all_rows: list[dict[str, Any]] = []
+    metas: list[dict[str, Any]] = []
+    kept_rows = 0
+    for i, gid in enumerate(gids, start=1):
+        group_row, header_row, data_rows = _fetch_gid_rows(gid)
+        sheet_name = f"gid_{gid}"
+        rows = _normalize_gid_rows(gid, sheet_name, data_rows)
+        if not rows:
+            if progress_callback:
+                progress_callback(i, len(gids), gid)
+            continue
+        source_dates = sorted([r["trade_date"] for r in rows])
+        if full:
+            rows_to_save = rows
+        else:
+            lookback_cutoff = (
+                datetime.now(timezone.utc).date() - timedelta(days=INCREMENTAL_LOOKBACK_DAYS)
+            ).isoformat()
+            last_date = last_date_by_gid.get(gid, "")
+            # 增量：新日期 + 最近窗口内全部重拉（Stockbee 会修订已发布单元格）
+            min_date = lookback_cutoff
+            if last_date and last_date < min_date:
+                min_date = last_date
+            rows_to_save = [r for r in rows if r["trade_date"] >= min_date]
+        all_rows.extend(rows_to_save)
+        kept_rows += len(rows_to_save)
+        dates = sorted([r["trade_date"] for r in rows])
+        metas.append(
+            {
+                "sheet_gid": gid,
+                "sheet_name": sheet_name,
+                "first_date": source_dates[0] if source_dates else None,
+                "last_date": source_dates[-1] if source_dates else None,
+                "row_count": len(rows),
+                "group_headers": group_row,
+                "headers": header_row,
+            }
+        )
+        if progress_callback:
+            progress_callback(i, len(gids), gid)
+
+    storage.save_breadth_raw_rows(all_rows)
+    storage.upsert_breadth_sheet_meta(metas)
+    merged_count = storage.rebuild_breadth_daily_from_raw()
+    _CACHE_DATA = None
+    _CACHE_AT = 0.0
+    _CACHE_SIGNATURE = ""
+    validation = validate_breadth_against_source(storage)
+    return {
+        "mode": "full" if full else "incremental",
+        "sheet_count": len(gids),
+        "raw_row_count": len(all_rows),
+        "kept_row_count": kept_rows,
+        "merged_row_count": merged_count,
+        "sheets": metas,
+        "validation": validation,
+    }
+
+
+def fetch_source_breadth_rows(gid: str = PRIMARY_MARKET_MONITOR_GID) -> list[dict[str, Any]]:
+    """从 Google Sheet 拉取并规范化 Market Monitor 行（用于校验）。"""
+    _, _, data_rows = _fetch_gid_rows(gid)
+    return _normalize_gid_rows(gid, f"gid_{gid}", data_rows)
+
+
+def validate_breadth_against_source(storage: Storage) -> dict[str, Any]:
+    """逐日逐列对比本地 breadth_daily 与 Sheet 源数据。"""
+    source_rows = {r["trade_date"]: r for r in fetch_source_breadth_rows()}
+    local_rows = {r["trade_date"]: r for r in storage.get_breadth_daily(limit=10000)}
+    mismatches: list[dict[str, Any]] = []
+    missing_local: list[str] = []
+    missing_source: list[str] = []
+
+    for trade_date, src in sorted(source_rows.items()):
+        loc = local_rows.get(trade_date)
+        if not loc:
+            missing_local.append(trade_date)
+            continue
+        for col in [f"c{i}" for i in range(1, 16)]:
+            sv = _to_number(src.get(col))
+            lv = _to_number(loc.get(col))
+            if sv is None and lv is None:
+                continue
+            if sv is None or lv is None or abs(sv - lv) > 1e-6:
+                mismatches.append(
+                    {
+                        "trade_date": trade_date,
+                        "column": col,
+                        "source": sv,
+                        "local": lv,
+                    }
+                )
+
+    for trade_date in sorted(local_rows.keys()):
+        if trade_date not in source_rows:
+            missing_source.append(trade_date)
+
+    return {
+        "source_row_count": len(source_rows),
+        "local_row_count": len(local_rows),
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches[:50],
+        "missing_local_count": len(missing_local),
+        "missing_local": missing_local[:20],
+        "missing_source_count": len(missing_source),
+        "missing_source": missing_source[:20],
+        "ok": (
+            not mismatches
+            and not missing_local
+            and len(local_rows) == len(source_rows)
+        ),
+    }
+
+
+def _pct_rank(values: list[float], x: float) -> float:
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    pos = sum(1 for v in sorted_vals if v <= x)
+    return round((pos / n) * 100, 2)
+
+
+def _ratio_trend_state(value: float, overbought_min: float, oversold_max: float) -> tuple[str, str, float]:
+    if value >= overbought_min:
+        intensity = min(1.0, max(0.0, (value - overbought_min) / max(0.8, overbought_min)))
+        return "OVERBOUGHT", "green", intensity
+    if value <= oversold_max:
+        intensity = min(1.0, max(0.0, (oversold_max - value) / max(0.1, oversold_max)))
+        return "OVERSOLD", "red", intensity
+    if value >= 1.0:
+        intensity = min(1.0, max(0.0, (value - 1.0) / max(0.1, overbought_min - 1.0)))
+        return "NORMAL", "green", intensity
+    intensity = min(1.0, max(0.0, (1.0 - value) / max(0.1, 1.0 - oversold_max)))
+    return "NORMAL", "red", intensity
+
+
+def _build_cards(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    latest = rows[0]
+    cards = [
+        ("up4", "Up 4% Daily", "c1"),
+        ("down4", "Down 4% Daily", "c2"),
+        ("ratio10", "10 Day Ratio", "c4"),
+        ("up25q", "Up 25% Quarter", "c5"),
+        ("down25q", "Down 25% Quarter", "c6"),
+        ("t2108", "T2108", "c14"),
+    ]
+    result = []
+    for key, label, col in cards:
+        values = [_to_number(r.get(col)) for r in rows]
+        series = [v for v in values if v is not None]
+        current = _to_number(latest.get(col))
+        if current is None:
+            continue
+        result.append(
+            {
+                "key": key,
+                "label": label,
+                "value": round(current, 3),
+                "history_percentile": _pct_rank(series, current),
+            }
+        )
+    return result
+
+
+def load_breadth_data(
+    storage: Storage,
+    force_refresh: bool = False,
+    limit: int = 180,
+) -> dict[str, Any]:
+    global _CACHE_DATA, _CACHE_AT, _CACHE_SIGNATURE
+    now = time.time()
+    if force_refresh:
+        sync_breadth_history(storage, full=False)
+    current_signature = storage.get_breadth_cache_signature()
+    if (
+        not force_refresh
+        and _CACHE_DATA
+        and _CACHE_SIGNATURE == current_signature
+        and (now - _CACHE_AT) < _CACHE_TTL_SECONDS
+    ):
+        payload = dict(_CACHE_DATA)
+        payload["rows"] = payload["rows"][:limit]
+        payload["limit"] = limit
+        return payload
+
+    rows = storage.get_breadth_daily(limit=6000)
+    if not rows:
+        sync_breadth_history(storage, full=True)
+        rows = storage.get_breadth_daily(limit=6000)
+    if not rows:
+        raise ValueError("市场宽度数据为空，请先同步")
+
+    thresholds = dict(DEFAULT_THRESHOLDS)
+    thresholds.update(storage.get_breadth_threshold_overrides())
+
+    latest = rows[0]
+    up_q = _to_number(latest.get("c5")) or 0.0
+    down_q = _to_number(latest.get("c6")) or 0.0
+    up_h = _to_number(latest.get("c11")) or 0.0
+    down_h = _to_number(latest.get("c12")) or 0.0
+    up_m = _to_number(latest.get("c7")) or 0.0
+    down_m = _to_number(latest.get("c8")) or 0.0
+    ratio10 = _to_number(latest.get("c4")) or 0.0
+    ratio5 = _to_number(latest.get("c3")) or 0.0
+    t2108 = _to_number(latest.get("c14")) or 0.0
+
+    quarter_state = "BULL" if up_q > down_q else "BEAR"
+    quarter_color = "green" if up_q > down_q else "red"
+    half_state = "BULL" if up_h > down_h else "BEAR"
+    half_color = "green" if up_h > down_h else "red"
+    month_state = "BULLISH" if up_m > down_m else "BEARISH"
+    month_color = "green" if up_m > down_m else "red"
+    cross_state = "LONG" if ratio5 >= ratio10 else "SHORT"
+    cross_color = "green" if ratio5 >= ratio10 else "red"
+
+    r10_state, r10_color, r10_intensity = _ratio_trend_state(
+        ratio10,
+        float(thresholds["trend10_overbought_min"]),
+        float(thresholds["trend10_oversold_max"]),
+    )
+    r5_state, r5_color, r5_intensity = _ratio_trend_state(
+        ratio5,
+        float(thresholds["trend5_overbought_min"]),
+        float(thresholds["trend5_oversold_max"]),
+    )
+
+    t_red = float(thresholds["t2108_red_max"])
+    t_green = float(thresholds["t2108_green_min"])
+    if t2108 <= t_red:
+        t_state = "OVERSOLD"
+        t_color = "red"
+        t_intensity = min(1.0, max(0.0, (t_red - t2108) / max(1.0, t_red)))
+    elif t2108 >= t_green:
+        t_state = "OVERBOUGHT"
+        t_color = "green"
+        t_intensity = min(1.0, max(0.0, (t2108 - t_green) / max(1.0, 100 - t_green)))
+    else:
+        t_state = "NORMAL"
+        t_color = "white"
+        t_intensity = 0.0
+
+    coverage = storage.get_breadth_coverage()
+    sheet_meta = storage.get_breadth_sheet_meta()
+
+    normalized_rows: list[dict[str, Any]] = []
+    for row in rows:
+        rv = row.get("raw_values") or {}
+        out = {
+            "date": row.get("trade_date"),
+            "raw_date": row.get("raw_date") or row.get("trade_date"),
+        }
+        for idx in range(1, 16):
+            key = f"c{idx}"
+            out[key] = str(rv.get(key) or "")
+            out[f"{key}_num"] = row.get(key)
+        normalized_rows.append(out)
+
+    payload = {
         "updated_at": datetime.utcnow().isoformat() + "Z",
-        "group_headers": [h.strip() for h in group_row],
-        "headers": headers,
+        "group_headers": [
+            "",
+            "Primary Breadth Indicators",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "Secondary Breadth Indicators",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ],
+        "headers": [
+            "Date",
+            "Number of stocks up 4% plus today",
+            "Number of stocks down 4% plus today",
+            "5 day ratio",
+            "10 day ratio",
+            "Number of stocks up 25% plus in a quarter",
+            "Number of stocks down 25% + in a quarter",
+            "Number of stocks up 25% + in a month",
+            "Number of stocks down 25% + in a month",
+            "Number of stocks up 50% + in a month",
+            "Number of stocks down 50% + in a month",
+            "Number of stocks up 13% + in 34 days",
+            "Number of stocks down 13% + in 34 days",
+            "Worden Common stock universe",
+            "T2108",
+            "S&P",
+        ],
         "rows": normalized_rows,
-        "source": BREADTH_CSV_URL,
+        "row_count": len(normalized_rows),
+        "source": f"https://docs.google.com/spreadsheets/d/{SHEET_ID}",
+        "coverage": coverage,
+        "sheet_meta": sheet_meta,
+        "thresholds": thresholds,
+        "ratio_bg": resolve_ratio_bg_params(thresholds),
+        "cockpit_help": build_cockpit_help(thresholds),
+        "status": {
+            "quarter_trend": {
+                "title": "季度趋势",
+                "state": quarter_state,
+                "color": quarter_color,
+                "intensity": 1.0,
+                "value": f"Up25Q {up_q:.0f} / Down25Q {down_q:.0f}",
+            },
+            "half_season_trend": {
+                "title": "半季趋势",
+                "state": half_state,
+                "color": half_color,
+                "intensity": 1.0,
+                "value": f"Up13/34D {up_h:.0f} / Down13/34D {down_h:.0f}",
+            },
+            "monthly_trend": {
+                "title": "月度趋势",
+                "state": month_state,
+                "color": month_color,
+                "intensity": 1.0,
+                "value": f"Up25M {up_m:.0f} / Down25M {down_m:.0f}",
+            },
+            "cross_5_10": {
+                "title": "5-10交叉",
+                "state": cross_state,
+                "color": cross_color,
+                "intensity": 1.0,
+                "value": f"5D {ratio5:.2f} / 10D {ratio10:.2f}",
+            },
+            "trend_10d": {
+                "title": "10日趋势",
+                "state": r10_state,
+                "color": r10_color,
+                "intensity": round(r10_intensity, 3),
+                "value": round(ratio10, 3),
+            },
+            "trend_5d": {
+                "title": "5日趋势",
+                "state": r5_state,
+                "color": r5_color,
+                "intensity": round(r5_intensity, 3),
+                "value": round(ratio5, 3),
+            },
+            "extreme_alert": {
+                "title": "极值提醒",
+                "state": t_state,
+                "color": t_color,
+                "intensity": round(t_intensity, 3),
+                "value": round(t2108, 2),
+            },
+        },
+        "percentile_cards": _build_cards(normalized_rows),
         "notes": {
             "indicators_explain_url": "https://stockbee.blogspot.com/2022/12/market-monitor-scans.html",
             "overview_url": "https://stockbee.blogspot.com/p/mm.html",
-            "sheet_public_url": (
-                "https://docs.google.com/spreadsheets/u/0/d/"
-                "1O6OhS7ciA8zwfycBfGPbP2fWJnR0pn2UUvFZVDP9jpE/pub?output=html&widget=true"
-            ),
-            "formula_note": "公开接口可读取指标数值，无法直接返回 Google Sheet 条件格式公式文本。",
         },
     }
-    _CACHE_DATA = parsed
+    _CACHE_DATA = payload
     _CACHE_AT = now
-    return parsed
+    _CACHE_SIGNATURE = current_signature
+    slim = dict(payload)
+    slim["rows"] = payload["rows"][:limit]
+    slim["limit"] = limit
+    return slim

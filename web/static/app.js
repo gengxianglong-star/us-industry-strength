@@ -2,6 +2,35 @@ let historyChart = null;
 let currentSnapshot = null;
 let selectedIndustryKey = null;
 let currentRsSnapshot = null;
+let autoRefreshBusy = false;
+let activeRsJob = null;
+
+const STRONG_MORNING_SYNC_HOUR_BJ = 6;
+
+function showToast(message, isError = false) {
+  let el = document.getElementById("globalToast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "globalToast";
+    el.style.position = "fixed";
+    el.style.right = "18px";
+    el.style.bottom = "18px";
+    el.style.maxWidth = "460px";
+    el.style.padding = "10px 14px";
+    el.style.borderRadius = "8px";
+    el.style.fontSize = "13px";
+    el.style.zIndex = "9999";
+    el.style.boxShadow = "0 6px 20px rgba(0,0,0,0.35)";
+    document.body.appendChild(el);
+  }
+  el.textContent = message;
+  el.style.background = isError ? "rgba(153,27,27,0.95)" : "rgba(30,58,138,0.95)";
+  el.style.color = "#fff";
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => {
+    if (el) el.textContent = "";
+  }, 4200);
+}
 
 const rankColors = {
   rank_w: "#60a5fa",
@@ -132,12 +161,25 @@ function getTopStrongIndustries(data) {
     .sort((a, b) => b.score - a.score);
 }
 
+let currentTopListCount = 15;
+
+function syncTopListLabels(count) {
+  currentTopListCount = Number(count) || 15;
+  const title = document.getElementById("coreTableTitle");
+  if (title) title.textContent = `强势行业 Top ${currentTopListCount}`;
+  const btn = document.getElementById("fetchCoreStocksBtn");
+  if (btn && !btn.disabled) {
+    btn.textContent = `刷新 Top ${currentTopListCount} 个股`;
+  }
+}
+
 function renderSummary(data) {
   const top = getTopStrongIndustries(data);
   const active = data.industries.filter((i) => !i.excluded);
+  syncTopListLabels(data.top_strong_count ?? top.length);
   document.getElementById("summary").innerHTML = `
     <div class="stat-card"><div class="value">${data.snapshot_date}</div><div class="label">快照日期</div></div>
-    <div class="stat-card"><div class="value">${top.length}</div><div class="label">强势行业 Top 10</div></div>
+    <div class="stat-card"><div class="value">${top.length}</div><div class="label">强势行业 Top ${currentTopListCount}</div></div>
     <div class="stat-card"><div class="value">${active.length}</div><div class="label">参与评分</div></div>
     <div class="stat-card"><div class="value">${top.reduce((n, i) => n + (i.stock_picks?.length || 0), 0)}</div><div class="label">筛选个股总数</div></div>
     <div class="stat-card"><div class="value">${data.rs_count ?? 0}</div><div class="label">RS样本数</div></div>
@@ -178,7 +220,7 @@ function renderWatchlistTable(payload) {
   );
   const rows = payload?.watchlist || [];
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="hint">暂无交叉观察名单（需先生成 RS 且 Top10 个股已抓取）</td></tr>';
+    tbody.innerHTML = `<tr><td colspan="4" class="hint">暂无交叉观察名单（需先生成 RS 且 Top${currentTopListCount} 行业个股已抓取）</td></tr>`;
     return;
   }
   tbody.innerHTML = rows
@@ -225,14 +267,54 @@ function renderCoveragePanel(snapshot, rsPayload) {
     target.innerHTML = '<span class="hint">覆盖率：暂无（请先刷新个股RS）</span>';
     return;
   }
-  const ratio = (Number(meta.coverage_ratio || 0) * 100).toFixed(1);
+  const newStockRsCount =
+    (meta.new_stock_m_count ?? 0) +
+    (meta.new_stock_q_count ?? 0) +
+    (meta.new_stock_h_count ?? 0) +
+    (meta.new_stock_3q_count ?? 0);
+  const covered = (meta.computed_count ?? 0) + newStockRsCount;
   target.innerHTML = `
     <span class="coverage-item">股票池 ${meta.universe_count}</span>
-    <span class="coverage-item">RS有效 ${meta.computed_count}</span>
-    <span class="coverage-item">覆盖率 ${ratio}%</span>
-    <span class="coverage-item">数据不足 ${meta.insufficient_history_count}</span>
+    <span class="coverage-item">覆盖率 ${covered}</span>
+    <span class="coverage-item">主RS ${meta.computed_count}</span>
+    <span class="coverage-item">新股RS ${newStockRsCount}</span>
+    <span class="coverage-item">新股榜 ${meta.new_stock_leaderboard_count ?? 0}</span>
     <span class="coverage-item">无数据 ${meta.no_bars_count}</span>
   `;
+}
+
+const NEW_STOCK_COHORT_LABEL = { M: "月度", Q: "季度", H: "半年", "3Q": "三季" };
+
+function fmtPerf(v) {
+  if (v == null || !Number.isFinite(Number(v))) return "—";
+  return `${Number(v).toFixed(1)}%`;
+}
+
+function renderNewStockLeaderboard(payload) {
+  const tbody = document.querySelector("#newStockTable tbody");
+  if (!tbody) return;
+  const rows = payload?.new_stock_leaderboard || [];
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="hint">暂无新股 RS 榜单（需刷新个股RS，且存在历史不足260日的股票）</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows
+    .map((row) => {
+      const cohort = NEW_STOCK_COHORT_LABEL[row.cohort] || row.cohort;
+      return `<tr>
+        <td>${cohort}</td>
+        <td><a class="industry-link" href="https://finviz.com/quote.ashx?t=${encodeURIComponent(row.symbol)}" target="_blank" rel="noreferrer">${row.symbol}</a></td>
+        <td>${row.bar_count ?? "—"}</td>
+        <td>${row.rs_score.toFixed(3)}</td>
+        <td>${row.tier}</td>
+        <td class="${Number(row.perf_w) >= 0 ? "pos" : "neg"}">${fmtPerf(row.perf_w)}</td>
+        <td class="${Number(row.perf_m) >= 0 ? "pos" : "neg"}">${fmtPerf(row.perf_m)}</td>
+        <td class="${Number(row.perf_q) >= 0 ? "pos" : "neg"}">${fmtPerf(row.perf_q)}</td>
+        <td class="${Number(row.perf_h) >= 0 ? "pos" : "neg"}">${fmtPerf(row.perf_h)}</td>
+        <td class="${Number(row.perf_tq) >= 0 ? "pos" : "neg"}">${fmtPerf(row.perf_tq)}</td>
+      </tr>`;
+    })
+    .join("");
 }
 
 function renderStockPicks(row) {
@@ -335,7 +417,7 @@ function renderAllTable(data, filter = "") {
       const status = row.excluded
         ? row.exclude_reason
         : row.is_top_strong
-          ? "Top 10"
+          ? `Top ${currentTopListCount}`
           : row.tier;
       return `<tr data-key="${row.industry_key}" class="${row.excluded ? "excluded" : ""}">
         <td>${row.name}</td>
@@ -403,13 +485,63 @@ async function loadSnapshot(date) {
   await loadHistoryChart();
 }
 
+function bjDateKey() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+function bjHourNow() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const hourPart = parts.find((p) => p.type === "hour");
+  return Number(hourPart?.value || 0);
+}
+
+async function autoMorningRefreshIfNeeded() {
+  const date = document.getElementById("dateSelect").value;
+  if (!date) return;
+  if (bjHourNow() < STRONG_MORNING_SYNC_HOUR_BJ) return;
+  const stampKey = `strong:auto-refresh:${bjDateKey()}:${date}`;
+  if (localStorage.getItem(stampKey) === "done") return;
+  if (autoRefreshBusy) return;
+  autoRefreshBusy = true;
+  setRsStatus("早间自动更新中：行业个股 + 观察名单…");
+  try {
+    await fetchCoreStocks();
+    const rsLite = await fetchJson(`/api/rs/${encodeURIComponent(date)}?limit=1&watchlist_limit=1`);
+    if (!(rsLite.rows || []).length) {
+      setRsStatus("早间自动更新中：检测到RS为空，自动补算RS…");
+      await computeRs();
+    }
+    localStorage.setItem(stampKey, "done");
+    setRsStatus("早间自动更新完成");
+  } catch (err) {
+    setRsStatus(`早间自动更新失败：${err.message}`, true);
+  } finally {
+    autoRefreshBusy = false;
+  }
+}
+
 async function loadRsSnapshot(date) {
   try {
     currentRsSnapshot = await fetchJson(`/api/rs/${encodeURIComponent(date)}?limit=120&watchlist_limit=120`);
   } catch (err) {
-    currentRsSnapshot = { snapshot_date: date, rows: [], watchlist: [] };
+    currentRsSnapshot = {
+      snapshot_date: date,
+      rows: [],
+      watchlist: [],
+      new_stock_leaderboard: [],
+    };
   }
   renderRsTable(currentRsSnapshot);
+  renderNewStockLeaderboard(currentRsSnapshot);
   renderWatchlistTable(currentRsSnapshot);
   renderWatchlistCharts(currentRsSnapshot);
 }
@@ -512,6 +644,76 @@ function setRsStatus(message, isError = false) {
   el.className = isError ? "inline-status error" : "inline-status";
 }
 
+function setCancelRsEnabled(enabled) {
+  const btn = document.getElementById("cancelRsBtn");
+  if (!btn) return;
+  btn.disabled = !enabled;
+}
+
+function rsKindLabel(kind) {
+  return kind === "new" ? "新股RS" : "RS";
+}
+
+async function pollRsProgress(date, kind = "main") {
+  const p = await fetchJson(
+    `/api/snapshots/${encodeURIComponent(date)}/rs-progress?kind=${encodeURIComponent(kind)}`
+  );
+  const label = rsKindLabel(kind);
+  if (p.status === "running" && p.total > 0) {
+    const pct = ((p.progress_ratio || 0) * 100).toFixed(1);
+    setRsStatus(`${label}计算中：${p.processed}/${p.total} (${pct}%)`);
+  } else if (p.status === "running") {
+    setRsStatus(`${label}计算中：准备任务与样本…`);
+  } else if (p.status === "cancelling") {
+    setRsStatus(`${label}任务取消中，等待收尾…`);
+  } else if (p.status === "cancelled") {
+    throw new Error(`${label}任务已取消`);
+  } else if (p.status === "error") {
+    throw new Error(p.error || `${label}计算失败`);
+  }
+  return p;
+}
+
+async function waitForRsDone(date, kind = "main") {
+  const timeoutMs = 2 * 60 * 60 * 1000;
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const p = await pollRsProgress(date, kind);
+    if (p.status === "done") return p;
+    if (p.status === "idle") {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      continue;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  throw new Error("RS 计算超时，请稍后查看进度");
+}
+
+async function cancelRs() {
+  if (!activeRsJob || !activeRsJob.date) {
+    setRsStatus("当前没有可取消的RS任务");
+    return;
+  }
+  const date = activeRsJob.date;
+  const kind = activeRsJob.kind || "main";
+  const label = rsKindLabel(kind);
+  try {
+    const ret = await fetchJson(
+      `/api/snapshots/${encodeURIComponent(date)}/rs-cancel?kind=${encodeURIComponent(kind)}`,
+      { method: "POST" }
+    );
+    if (ret.status === "cancelling") {
+      setRsStatus(`已发送${label}取消请求，等待任务收尾…`);
+    } else {
+      setRsStatus(`当前没有运行中的${label}任务`);
+      setCancelRsEnabled(false);
+    }
+  } catch (err) {
+    setRsStatus(`取消失败：${err.message}`, true);
+    showToast(err.message, true);
+  }
+}
+
 function updateWeightHint(weights, normalized) {
   const total = Object.values(weights).reduce((a, b) => a + b, 0);
   const parts = Object.entries(normalized || {})
@@ -534,7 +736,8 @@ function fillConfigForm(cfg) {
   document.getElementById("tierBScore").value = t.tier_b_score ?? 0.65;
   document.getElementById("coreRankMax").value = t.core_rank_max ?? 25;
   document.getElementById("maxRankSpread").value = t.max_rank_spread ?? 60;
-  document.getElementById("topListCount").value = t.top_list_count ?? 10;
+  document.getElementById("topListCount").value = t.top_list_count ?? 15;
+  syncTopListLabels(t.top_list_count ?? 15);
   document.getElementById("accelerationRankDelta").value = t.acceleration_rank_delta ?? 5;
   document.getElementById("pullbackMidtermRankMax").value = t.pullback_midterm_rank_max ?? 30;
   document.getElementById("pullbackWeekRankMin").value = t.pullback_week_rank_min ?? 40;
@@ -543,6 +746,8 @@ function fillConfigForm(cfg) {
   document.getElementById("stockPriceAboveSma20").value = sf.price_above_sma20 ?? "ta_sma20_pa";
   document.getElementById("stockSma20AboveSma50").value = sf.sma20_above_sma50 ?? "ta_sma50_sb20";
   document.getElementById("stockDollarVolumeMin").value = sf.dollar_volume_min ?? "sh_curvol_ousd100000";
+  document.getElementById("stockEpsGrowthQoq").value = sf.eps_growth_qoq_min ?? "fa_epsqoq_o10";
+  document.getElementById("stockSalesGrowthQoq").value = sf.sales_growth_qoq_min ?? "fa_salesqoq_o10";
 
   const rs = cfg.stock_rs || {};
   document.getElementById("rsTimeoutSeconds").value = rs.request_timeout_seconds ?? 20;
@@ -588,6 +793,8 @@ function readConfigForm() {
       price_above_sma20: document.getElementById("stockPriceAboveSma20").value.trim(),
       sma20_above_sma50: document.getElementById("stockSma20AboveSma50").value.trim(),
       dollar_volume_min: document.getElementById("stockDollarVolumeMin").value.trim(),
+      eps_growth_qoq_min: document.getElementById("stockEpsGrowthQoq").value.trim(),
+      sales_growth_qoq_min: document.getElementById("stockSalesGrowthQoq").value.trim(),
     },
     stock_rs: {
       request_timeout_seconds: parseInt(document.getElementById("rsTimeoutSeconds").value, 10),
@@ -673,15 +880,44 @@ async function fetchCoreStocks() {
   btn.disabled = true;
   btn.textContent = "抓取中…";
   try {
-    await fetchJson(`/api/snapshots/${encodeURIComponent(date)}/fetch-stocks`, {
+    const result = await fetchJson(`/api/snapshots/${encodeURIComponent(date)}/fetch-stocks`, {
       method: "POST",
     });
-    await loadSnapshot(date);
+    if (currentSnapshot && currentSnapshot.snapshot_date === date) {
+      const byKey = result.results || {};
+      currentSnapshot.industries = (currentSnapshot.industries || []).map((row) => {
+        const picked = byKey[row.industry_key];
+        if (!picked) return row;
+        return {
+          ...row,
+          stock_picks: picked.tickers || [],
+          stock_picks_error: picked.error || null,
+          stock_screener_url: picked.screener_url || row.stock_screener_url || null,
+        };
+      });
+      if (result.watchlist && result.watchlist.watchlist_count != null) {
+        currentSnapshot.rs_watchlist_count = result.watchlist.watchlist_count;
+      }
+      renderSummary(currentSnapshot);
+      renderCoreTable(currentSnapshot);
+      renderAllTable(currentSnapshot, document.getElementById("searchInput").value || "");
+      renderStrongCards(currentSnapshot);
+      await loadRsSnapshot(date);
+      renderCoveragePanel(currentSnapshot, currentRsSnapshot);
+    } else {
+      await loadSnapshot(date);
+    }
+    const wl = result.watchlist;
+    if (wl && !wl.skipped && wl.watchlist_count != null) {
+      setRsStatus(`行业个股已更新，交叉观察名单 ${wl.watchlist_count} 只`);
+    } else if (wl?.skipped) {
+      setRsStatus("行业个股已更新；观察名单需先完成个股 RS 计算", true);
+    }
   } catch (err) {
-    alert(err.message);
+    showToast(err.message, true);
   } finally {
     btn.disabled = false;
-    btn.textContent = "刷新 Top 10 个股";
+    syncTopListLabels(currentTopListCount);
   }
 }
 
@@ -690,56 +926,95 @@ async function computeRs() {
   if (!date) return;
   const btn = document.getElementById("computeRsBtn");
   const startAt = Date.now();
+  activeRsJob = { date, kind: "main" };
   btn.disabled = true;
+  setCancelRsEnabled(true);
   btn.textContent = "计算中…";
   setRsStatus("已开始计算，首次全量可能需要几分钟…");
-  let timer = null;
-
-  const pollProgress = async () => {
-    const p = await fetchJson(`/api/snapshots/${encodeURIComponent(date)}/rs-progress`);
-    if (p.status === "running" && p.total > 0) {
-      const pct = ((p.progress_ratio || 0) * 100).toFixed(1);
-      setRsStatus(`RS计算中：${p.processed}/${p.total} (${pct}%)`);
-    }
-  };
 
   try {
-    await pollProgress().catch(() => {});
-    timer = setInterval(() => {
-      pollProgress().catch(() => {});
-    }, 2000);
-    await fetchJson(`/api/snapshots/${encodeURIComponent(date)}/compute-rs`, {
+    const kick = await fetchJson(`/api/snapshots/${encodeURIComponent(date)}/compute-rs?async_mode=true`, {
       method: "POST",
     });
+    if (kick.status === "running") {
+      setRsStatus("检测到已有 RS 任务在运行，正在接管进度…");
+    } else {
+      setRsStatus("RS 任务已启动，正在计算…");
+    }
+    await waitForRsDone(date, "main");
     await loadSnapshot(date);
     const sec = ((Date.now() - startAt) / 1000).toFixed(1);
     setRsStatus(`计算完成，耗时 ${sec}s`);
   } catch (err) {
-    setRsStatus(`计算失败：${err.message}`, true);
-    alert(err.message);
+    if ((err.message || "").includes("已取消")) {
+      setRsStatus("RS任务已取消");
+    } else {
+      setRsStatus(`计算失败：${err.message}`, true);
+      showToast(err.message, true);
+    }
   } finally {
-    if (timer) clearInterval(timer);
+    activeRsJob = null;
+    setCancelRsEnabled(false);
     btn.disabled = false;
     btn.textContent = "刷新个股RS";
+  }
+}
+
+async function computeNewRs() {
+  const date = document.getElementById("dateSelect").value;
+  if (!date) return;
+  const btn = document.getElementById("computeNewRsBtn");
+  const startAt = Date.now();
+  activeRsJob = { date, kind: "new" };
+  btn.disabled = true;
+  setCancelRsEnabled(true);
+  btn.textContent = "计算中…";
+  setRsStatus("已开始计算新股RS，通常会快于主RS…");
+  try {
+    const kick = await fetchJson(
+      `/api/snapshots/${encodeURIComponent(date)}/compute-new-stock-rs?async_mode=true`,
+      { method: "POST" }
+    );
+    if (kick.status === "running") {
+      setRsStatus("检测到已有新股RS任务在运行，正在接管进度…");
+    } else {
+      setRsStatus("新股RS任务已启动，正在计算…");
+    }
+    await waitForRsDone(date, "new");
+    await loadSnapshot(date);
+    const sec = ((Date.now() - startAt) / 1000).toFixed(1);
+    setRsStatus(`新股RS计算完成，耗时 ${sec}s`);
+  } catch (err) {
+    if ((err.message || "").includes("已取消")) {
+      setRsStatus("新股RS任务已取消");
+    } else {
+      setRsStatus(`新股RS计算失败：${err.message}`, true);
+      showToast(err.message, true);
+    }
+  } finally {
+    activeRsJob = null;
+    setCancelRsEnabled(false);
+    btn.disabled = false;
+    btn.textContent = "刷新新股RS";
   }
 }
 
 async function init() {
   document.getElementById("refreshBtn").addEventListener("click", () => location.reload());
   document.getElementById("dateSelect").addEventListener("change", (e) => {
-    loadSnapshot(e.target.value).catch(alert);
+    loadSnapshot(e.target.value).catch((err) => showToast(err.message, true));
   });
   document.getElementById("industrySelect").addEventListener("change", (e) => {
     selectedIndustryKey = e.target.value;
-    loadHistoryChart().catch(alert);
+    loadHistoryChart().catch((err) => showToast(err.message, true));
   });
   document.getElementById("metricSelect").addEventListener("change", () => {
     if (!document.getElementById("multiRankToggle").checked) {
-      loadHistoryChart().catch(alert);
+      loadHistoryChart().catch((err) => showToast(err.message, true));
     }
   });
   document.getElementById("multiRankToggle").addEventListener("change", () => {
-    loadHistoryChart().catch(alert);
+    loadHistoryChart().catch((err) => showToast(err.message, true));
   });
   document.getElementById("searchInput").addEventListener("input", (e) => {
     if (currentSnapshot) renderAllTable(currentSnapshot, e.target.value);
@@ -750,14 +1025,19 @@ async function init() {
 
   bindConfigForm();
   document.getElementById("fetchCoreStocksBtn").addEventListener("click", () => {
-    fetchCoreStocks().catch(alert);
+    fetchCoreStocks().catch((err) => showToast(err.message, true));
   });
   document.getElementById("computeRsBtn").addEventListener("click", () => {
-    computeRs().catch(alert);
+    computeRs().catch((err) => showToast(err.message, true));
+  });
+  document.getElementById("computeNewRsBtn").addEventListener("click", () => {
+    computeNewRs().catch((err) => showToast(err.message, true));
+  });
+  document.getElementById("cancelRsBtn").addEventListener("click", () => {
+    cancelRs().catch((err) => showToast(err.message, true));
   });
 
   try {
-    await loadConfigForm();
     const dates = await loadDates();
     if (!dates.length) {
       document.getElementById("summary").innerHTML =
@@ -765,8 +1045,10 @@ async function init() {
       return;
     }
     await loadSnapshot(dates[0]);
+    await autoMorningRefreshIfNeeded();
+    loadConfigForm().catch((err) => setConfigStatus(err.message, true));
   } catch (err) {
-    alert(err.message);
+    showToast(err.message, true);
   }
 }
 

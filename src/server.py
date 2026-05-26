@@ -20,10 +20,21 @@ from src.config_loader import (
     save_editable_config,
 )
 from src.config_models import ConfigUpdate
-from src.breadth_data import load_breadth_data
+from src.breadth_data import (
+    DEFAULT_THRESHOLDS,
+    load_breadth_data,
+    sync_breadth_history,
+    validate_breadth_thresholds,
+)
 from src.rescore import rescore_snapshot
-from src.stock_rs import compute_and_store_stock_rs
+from src.services.snapshots import (
+    build_snapshot_response,
+    scored_industries_from_rows,
+    top_strong_from_rows,
+)
+from src.stock_rs import rebuild_stock_watchlist_for_snapshot
 from src.stock_picks import fetch_and_store_stock_picks
+from src.services.rs_jobs import RsJobService
 from src.storage import Storage
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -32,8 +43,71 @@ WEB_DIR = ROOT / "web"
 app = FastAPI(title="US Industry Strength")
 config = load_config()
 storage = Storage(db_path(config))
-RS_PROGRESS: dict[str, dict[str, Any]] = {}
-RS_PROGRESS_LOCK = threading.Lock()
+
+
+@app.on_event("startup")
+def _ensure_database_schema() -> None:
+    storage._init_db()
+RS_JOB_SERVICE = RsJobService()
+BREADTH_SYNC_STATE: dict[str, Any] = {
+    "status": "idle",
+    "mode": "incremental",
+    "processed": 0,
+    "total": 0,
+    "started_at": None,
+    "updated_at": None,
+}
+BREADTH_SYNC_LOCK = threading.Lock()
+
+
+def _run_breadth_sync(full: bool) -> None:
+    started_at = time.time()
+    mode = "full" if full else "incremental"
+    with BREADTH_SYNC_LOCK:
+        BREADTH_SYNC_STATE.update(
+            {
+                "status": "running",
+                "mode": mode,
+                "processed": 0,
+                "total": 0,
+                "started_at": started_at,
+                "updated_at": started_at,
+                "message": "starting",
+            }
+        )
+
+    def _on_progress(processed: int, total: int, gid: str) -> None:
+        with BREADTH_SYNC_LOCK:
+            BREADTH_SYNC_STATE["processed"] = processed
+            BREADTH_SYNC_STATE["total"] = total
+            BREADTH_SYNC_STATE["updated_at"] = time.time()
+            BREADTH_SYNC_STATE["message"] = f"processing gid={gid}"
+
+    try:
+        result = sync_breadth_history(storage, full=full, progress_callback=_on_progress)
+        ended_at = time.time()
+        with BREADTH_SYNC_LOCK:
+            BREADTH_SYNC_STATE.update(
+                {
+                    "status": "done",
+                    "result": result,
+                    "updated_at": ended_at,
+                    "elapsed_seconds": round(ended_at - started_at, 2),
+                    "message": "done",
+                }
+            )
+    except Exception as exc:  # pragma: no cover
+        ended_at = time.time()
+        with BREADTH_SYNC_LOCK:
+            BREADTH_SYNC_STATE.update(
+                {
+                    "status": "error",
+                    "error": str(exc),
+                    "updated_at": ended_at,
+                    "elapsed_seconds": round(ended_at - started_at, 2),
+                    "message": "error",
+                }
+            )
 
 
 def _reload_config() -> None:
@@ -56,15 +130,64 @@ def get_config() -> dict[str, Any]:
 @app.get("/api/breadth")
 def get_breadth_data(
     refresh: bool = Query(default=False),
-    limit: int = Query(default=180, ge=10, le=2000),
+    limit: int = Query(default=180, ge=10, le=10000),
 ) -> dict[str, Any]:
-    payload = load_breadth_data(force_refresh=refresh)
-    return {
-        **payload,
-        "rows": payload["rows"][:limit],
-        "row_count": len(payload["rows"]),
-        "limit": limit,
-    }
+    return load_breadth_data(storage, force_refresh=refresh, limit=limit)
+
+
+@app.post("/api/breadth/sync")
+def sync_breadth(
+    full: bool = Query(default=False),
+    async_mode: bool = Query(default=True),
+) -> dict[str, Any]:
+    if async_mode:
+        with BREADTH_SYNC_LOCK:
+            if BREADTH_SYNC_STATE.get("status") == "running":
+                return {"status": "running", **BREADTH_SYNC_STATE}
+        threading.Thread(target=_run_breadth_sync, args=(full,), daemon=True).start()
+        return {"status": "started", "mode": "full" if full else "incremental"}
+    result = sync_breadth_history(storage, full=full)
+    return {"status": "ok", "full": full, **result}
+
+
+@app.get("/api/breadth/sync-progress")
+def breadth_sync_progress() -> dict[str, Any]:
+    with BREADTH_SYNC_LOCK:
+        state = dict(BREADTH_SYNC_STATE)
+    processed = int(state.get("processed") or 0)
+    total = int(state.get("total") or 0)
+    progress_ratio = round((processed / total), 4) if total > 0 else 0.0
+    state["progress_ratio"] = progress_ratio
+    return state
+
+
+@app.get("/api/breadth/config")
+def get_breadth_config() -> dict[str, Any]:
+    cfg = dict(DEFAULT_THRESHOLDS)
+    cfg.update(storage.get_breadth_threshold_overrides())
+    return {"thresholds": cfg}
+
+
+@app.put("/api/breadth/config")
+def update_breadth_config(body: dict[str, Any]) -> dict[str, Any]:
+    payload = body.get("thresholds") if isinstance(body, dict) else None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="thresholds payload required")
+    allowed = set(DEFAULT_THRESHOLDS.keys())
+    sanitized = {k: float(v) for k, v in payload.items() if k in allowed}
+    if not sanitized:
+        raise HTTPException(status_code=400, detail="no valid breadth threshold keys")
+    merged = dict(DEFAULT_THRESHOLDS)
+    merged.update(storage.get_breadth_threshold_overrides())
+    merged.update(sanitized)
+    try:
+        validate_breadth_thresholds(merged)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    storage.save_breadth_threshold_overrides(sanitized)
+    cfg = dict(DEFAULT_THRESHOLDS)
+    cfg.update(storage.get_breadth_threshold_overrides())
+    return {"status": "ok", "thresholds": cfg}
 
 
 @app.put("/api/config")
@@ -139,79 +262,39 @@ def get_snapshot(snapshot_date: str) -> dict[str, Any]:
     rows = storage.get_snapshot(snapshot_date)
     if not rows:
         raise HTTPException(status_code=404, detail=f"未找到日期 {snapshot_date} 的快照")
-
-    active = [r for r in rows if not r["excluded"]]
-    core_keys = {x.key for x in filter_core_strong_from_rows(active)}
-    top_keys = {x.key for x in filter_top_strong_from_rows(active)}
-    stock_picks = storage.get_stock_picks_for_snapshot(snapshot_date)
-
-    for row in rows:
-        row["is_core"] = row["industry_key"] in core_keys
-        row["is_top_strong"] = row["industry_key"] in top_keys
-        delta = storage.compare_with_previous(snapshot_date, row["industry_key"])
-        row["vs_previous"] = delta
-        pick = stock_picks.get(row["industry_key"])
-        if pick:
-            row["stock_picks"] = pick["tickers"]
-            row["stock_screener_url"] = pick.get("screener_url")
-            row["stock_picks_error"] = pick.get("error")
-        else:
-            row["stock_picks"] = []
-            row["stock_screener_url"] = None
-            row["stock_picks_error"] = None
-
-    rs_count = storage.count_stock_rs(snapshot_date)
-    rs_watchlist_count = storage.count_stock_watchlist(snapshot_date)
-    rs_watchlist = storage.get_stock_watchlist(snapshot_date, limit=50)
-    rs_meta = storage.get_stock_rs_meta(snapshot_date)
-
-    return {
-        "snapshot_date": snapshot_date,
-        "industry_count": len(rows),
-        "core_count": len(core_keys),
-        "top_strong_count": len(top_keys),
-        "rs_count": rs_count,
-        "rs_watchlist_count": rs_watchlist_count,
-        "rs_meta": rs_meta,
-        "watchlist_preview": rs_watchlist,
-        "industries": rows,
-    }
-
-
-def filter_top_strong_from_rows(rows: list[dict[str, Any]]) -> list[Any]:
-    """Top N industries by score for the main dashboard."""
-    class Item:
-        def __init__(self, d: dict[str, Any]):
-            self.key = d["industry_key"]
-            self.score = float(d.get("score") or 0)
-            self.excluded = d.get("excluded", False)
-
-    active = sorted(
-        [Item(r) for r in rows if not r.get("excluded")],
-        key=lambda x: (-x.score, x.key),
+    top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
+    return build_snapshot_response(
+        storage=storage,
+        snapshot_date=snapshot_date,
+        rows=rows,
+        top_n=top_n,
     )
-    top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
-    return active[:top_n]
 
 
-def filter_core_strong_from_rows(rows: list[dict[str, Any]]) -> list[Any]:
-    """Reuse tag-based core filter for API responses."""
-    class Item:
-        def __init__(self, d: dict[str, Any]):
-            self.key = d["industry_key"]
-            self.tags = d.get("tags") or []
-            self.excluded = d.get("excluded", False)
-
-    items = [Item(r) for r in rows if not r.get("excluded")]
-    top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
-    core = [i for i in items if "核心强势" in i.tags]
-    return core[:top_n]
+@app.get("/api/snapshots/{snapshot_date}/run-status")
+def snapshot_run_status(snapshot_date: str) -> dict[str, Any]:
+    status = storage.get_snapshot_run(snapshot_date)
+    if not status:
+        if storage.get_snapshot(snapshot_date):
+            return {
+                "snapshot_date": snapshot_date,
+                "status": "completed",
+                "current_step": "legacy_snapshot",
+                "started_at": None,
+                "updated_at": None,
+                "finished_at": None,
+                "error": None,
+                "details": {},
+            }
+        raise HTTPException(status_code=404, detail=f"未找到日期 {snapshot_date} 的运行状态")
+    return status
 
 
 @app.post("/api/snapshots/{snapshot_date}/fetch-stocks")
 def fetch_snapshot_stocks(
     snapshot_date: str,
     top_only: bool = Query(default=True),
+    refresh_watchlist: bool = Query(default=True),
 ) -> dict[str, Any]:
     rows = storage.get_snapshot(snapshot_date)
     if not rows:
@@ -219,7 +302,8 @@ def fetch_snapshot_stocks(
 
     active = [r for r in rows if not r["excluded"]]
     if top_only:
-        keys = [x.key for x in filter_top_strong_from_rows(active)]
+        top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
+        keys = [x.key for x in top_strong_from_rows(active, top_n=top_n)]
     else:
         keys = [r["industry_key"] for r in active]
 
@@ -227,15 +311,26 @@ def fetch_snapshot_stocks(
         return {"status": "ok", "snapshot_date": snapshot_date, "fetched": 0, "results": {}}
 
     results = fetch_and_store_stock_picks(storage, snapshot_date, keys, config)
+    watchlist_info: dict[str, Any] | None = None
+    if refresh_watchlist:
+        watchlist_info = rebuild_stock_watchlist_for_snapshot(
+            storage,
+            snapshot_date,
+            scored_industries_from_rows(rows),
+            config,
+        )
     return {
         "status": "ok",
         "snapshot_date": snapshot_date,
         "fetched": len(results),
+        "watchlist": watchlist_info,
         "results": {
             key: {
                 "tickers": value.get("tickers", []),
                 "ticker_count": len(value.get("tickers", [])),
                 "error": value.get("error"),
+                "screener_url": value.get("screener_url"),
+                "filters": value.get("filters"),
             }
             for key, value in results.items()
         },
@@ -243,80 +338,61 @@ def fetch_snapshot_stocks(
 
 
 @app.post("/api/snapshots/{snapshot_date}/compute-rs")
-def compute_snapshot_rs(snapshot_date: str) -> dict[str, Any]:
+def compute_snapshot_rs(
+    snapshot_date: str,
+    async_mode: bool = Query(default=True),
+) -> dict[str, Any]:
     rows = storage.get_snapshot(snapshot_date)
     if not rows:
         raise HTTPException(status_code=404, detail=f"未找到日期 {snapshot_date} 的快照")
+    scored = scored_industries_from_rows(rows)
+    try:
+        return RS_JOB_SERVICE.start_compute_rs(
+            storage=storage,
+            snapshot_date=snapshot_date,
+            scored=scored,
+            config=config,
+            async_mode=async_mode,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    class SnapshotIndustry:
-        def __init__(self, d: dict[str, Any]):
-            self.key = d["industry_key"]
-            self.name = d["name"]
-            self.score = float(d.get("score") or 0)
-            self.excluded = bool(d.get("excluded"))
 
-    scored = sorted(
-        [SnapshotIndustry(r) for r in rows if not r.get("excluded")],
-        key=lambda x: (-x.score, x.key),
-    )
-    start_ts = time.time()
-    with RS_PROGRESS_LOCK:
-        RS_PROGRESS[snapshot_date] = {
-            "status": "running",
-            "processed": 0,
-            "total": 0,
-            "started_at": start_ts,
-            "updated_at": start_ts,
-        }
-
-    def _on_progress(processed: int, total: int) -> None:
-        with RS_PROGRESS_LOCK:
-            state = RS_PROGRESS.get(snapshot_date)
-            if not state:
-                return
-            state["processed"] = processed
-            state["total"] = total
-            state["updated_at"] = time.time()
-
-    result = compute_and_store_stock_rs(
-        storage,
-        snapshot_date,
-        scored,
-        config,
-        progress_callback=_on_progress,
-    )
-    end_ts = time.time()
-    with RS_PROGRESS_LOCK:
-        RS_PROGRESS[snapshot_date] = {
-            "status": "done",
-            "processed": result.get("attempted_count", 0),
-            "total": result.get("attempted_count", 0),
-            "started_at": start_ts,
-            "updated_at": end_ts,
-            "elapsed_seconds": round(end_ts - start_ts, 2),
-        }
-    return {"status": "ok", **result}
+@app.post("/api/snapshots/{snapshot_date}/compute-new-stock-rs")
+def compute_snapshot_new_stock_rs(
+    snapshot_date: str,
+    async_mode: bool = Query(default=False),
+) -> dict[str, Any]:
+    rows = storage.get_snapshot(snapshot_date)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"未找到日期 {snapshot_date} 的快照")
+    if not storage.get_stock_rs_raw(snapshot_date):
+        raise HTTPException(status_code=400, detail="请先完成主 RS 计算（刷新个股RS）")
+    try:
+        return RS_JOB_SERVICE.start_compute_new_rs(
+            storage=storage,
+            snapshot_date=snapshot_date,
+            config=config,
+            async_mode=async_mode,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/snapshots/{snapshot_date}/rs-progress")
-def rs_progress(snapshot_date: str) -> dict[str, Any]:
-    with RS_PROGRESS_LOCK:
-        state = dict(RS_PROGRESS.get(snapshot_date) or {})
-    if not state:
-        return {"snapshot_date": snapshot_date, "status": "idle", "processed": 0, "total": 0}
-    total = int(state.get("total") or 0)
-    processed = int(state.get("processed") or 0)
-    progress_ratio = (processed / total) if total > 0 else 0
-    return {
-        "snapshot_date": snapshot_date,
-        "status": state.get("status", "running"),
-        "processed": processed,
-        "total": total,
-        "progress_ratio": round(progress_ratio, 4),
-        "started_at": state.get("started_at"),
-        "updated_at": state.get("updated_at"),
-        "elapsed_seconds": state.get("elapsed_seconds"),
-    }
+def rs_progress(
+    snapshot_date: str,
+    kind: str = Query(default="main", pattern="^(main|new)$"),
+) -> dict[str, Any]:
+    return RS_JOB_SERVICE.get_progress(snapshot_date, storage=storage, job_kind=kind)
+
+
+@app.post("/api/snapshots/{snapshot_date}/rs-cancel")
+def rs_cancel(
+    snapshot_date: str,
+    kind: str = Query(default="main", pattern="^(main|new)$"),
+) -> dict[str, Any]:
+    return RS_JOB_SERVICE.request_cancel(snapshot_date, storage=storage, job_kind=kind)
 
 
 @app.get("/api/rs/latest")
@@ -345,6 +421,12 @@ def rs_snapshot(
         "rs_count": storage.count_stock_rs(snapshot_date),
         "rs_meta": storage.get_stock_rs_meta(snapshot_date),
         "rows": rs_rows,
+        "new_stock_rows": storage.get_stock_rs_new(snapshot_date, limit=500),
+        "new_stock_leaderboard": storage.get_stock_rs_new(
+            snapshot_date,
+            leaderboard_only=True,
+            limit=500,
+        ),
         "watchlist": watchlist,
     }
 

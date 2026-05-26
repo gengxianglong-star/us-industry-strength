@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>市场宽度监控</title>
-  <link rel="stylesheet" href="/static/styles.css" />
-  <link rel="stylesheet" href="/static/breadth.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260525-7" />
+  <link rel="stylesheet" href="/static/breadth.css?v=20260525-21" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -26,11 +26,33 @@
       <p class="subtitle">数据源：Stockbee Market Monitor（Google Sheet）</p>
     </div>
     <div class="header-actions">
-      <button id="refreshBreadthBtn" type="button">刷新宽度数据</button>
+      <button id="refreshBreadthBtn" type="button">增量同步今日数据</button>
     </div>
   </header>
 
   <main class="breadth-main">
+    <section class="panel">
+      <div class="panel-header-row">
+        <h2>市场状态驾驶舱</h2>
+        <span class="hint cockpit-link-hint">点击卡片联动下方图表</span>
+        <div class="sync-actions">
+          <span id="coverageInline" class="hint"></span>
+          <button id="syncBreadthBtn" type="button">全量同步历史</button>
+          <span id="syncProgressText" class="hint"></span>
+        </div>
+      </div>
+      <div id="breadthStatusCards" class="breadth-status-grid"></div>
+      <details class="cockpit-help-panel">
+        <summary>驾驶舱规则说明</summary>
+        <div id="cockpitHelpContent" class="cockpit-help-grid"></div>
+      </details>
+    </section>
+
+    <section class="panel">
+      <h2>历史分位卡（Time Series）</h2>
+      <div id="breadthPercentileCards" class="breadth-percentile-grid"></div>
+    </section>
+
     <section class="panel">
       <div class="panel-header-row">
         <h2>市场宽度总览</h2>
@@ -51,22 +73,33 @@
     <section class="panel chart-panel">
       <div class="panel-header-row">
         <h2>市场宽度图表</h2>
-        <label class="chart-width-control">
-          图表宽度
-          <input id="chartWidthRange" type="range" min="55" max="100" step="5" value="100" />
-          <span id="chartWidthValue">100%</span>
-        </label>
+        <div class="chart-header-actions">
+          <div class="chart-linkage-control" id="chartRangeGroup">
+            <button type="button" data-days="90">3M</button>
+            <button type="button" data-days="180">6M</button>
+            <button type="button" data-days="365" class="active">1Y</button>
+            <button type="button" data-days="1095">3Y</button>
+            <button type="button" data-days="1825">5Y</button>
+            <button type="button" data-days="3650">10Y</button>
+            <button type="button" data-days="0">ALL</button>
+          </div>
+          <label class="chart-width-control">
+            图表宽度
+            <input id="chartWidthRange" type="range" min="55" max="100" step="5" value="100" />
+            <span id="chartWidthValue">100%</span>
+          </label>
+        </div>
       </div>
       <div id="breadthCharts" class="breadth-charts adaptive-charts">
-        <article class="chart-card">
-          <h3>短线强弱比：5D / 10D + T2108</h3>
-          <p class="hint">用途：观察市场短线动能是否扩散。比值持续大于 1，且 T2108 回升，通常代表风险偏好增强。</p>
-          <div class="chart-wrap compact"><canvas id="ratioChart"></canvas></div>
-        </article>
         <article class="chart-card">
           <h3>日内极端波动：Up4% vs Down4%</h3>
           <p class="hint">用途：识别当天情绪偏向。上涨极值数量显著高于下跌极值，说明买盘广度更强。</p>
           <div class="chart-wrap compact"><canvas id="upDown4Chart"></canvas></div>
+        </article>
+        <article class="chart-card">
+          <h3>短线强弱比：5D / 10D + T2108</h3>
+          <p class="hint">用途：观察市场短线动能是否扩散。比值持续大于 1，且 T2108 回升，通常代表风险偏好增强。</p>
+          <div class="chart-wrap compact"><canvas id="ratioChart"></canvas></div>
         </article>
         <article class="chart-card">
           <h3>季度强弱分布：Up25%Q vs Down25%Q</h3>
@@ -79,19 +112,28 @@
           <div class="chart-wrap compact"><canvas id="month25Chart"></canvas></div>
         </article>
         <article class="chart-card">
-          <h3>极端涨跌：Up50%M vs Down50%M</h3>
-          <p class="hint">用途：观察高波动区间。Down50%突然抬升常对应市场风险阶段。</p>
-          <div class="chart-wrap compact"><canvas id="extreme50Chart"></canvas></div>
-        </article>
-        <article class="chart-card">
           <h3>34日强弱：Up13% vs Down13% + S&P</h3>
           <p class="hint">用途：对照指数判断“指数涨但广度弱”或“指数弱但广度先回暖”的背离。</p>
           <div class="chart-wrap compact"><canvas id="spxBreadthChart"></canvas></div>
         </article>
+        <article class="chart-card">
+          <h3>极端涨跌：Up50%M vs Down50%M</h3>
+          <p class="hint">用途：观察高波动区间。Down50%突然抬升常对应市场风险阶段。</p>
+          <div class="chart-wrap compact"><canvas id="extreme50Chart"></canvas></div>
+        </article>
       </div>
+      <details class="breadth-config-panel">
+        <summary>阈值与背景分档配置</summary>
+        <p class="hint config-intro">状态灯阈值影响 OVERBOUGHT / OVERSOLD；锚点与档数影响 5/10 日趋势卡片背景色阶。</p>
+        <div class="config-grid" id="breadthThresholdForm"></div>
+        <div class="config-actions">
+          <button id="saveBreadthConfigBtn" type="button">保存阈值</button>
+          <span id="breadthConfigStatus" class="hint"></span>
+        </div>
+      </details>
     </section>
   </main>
 
-  <script src="/static/breadth.js"></script>
+  <script src="/static/breadth.js?v=20260526-25"></script>
 </body>
 </html>

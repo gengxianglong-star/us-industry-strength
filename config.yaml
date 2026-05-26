@@ -9,7 +9,7 @@ thresholds:
   tier_b_score: 0.65
   core_rank_max: 25
   max_rank_spread: 60
-  top_list_count: 10
+  top_list_count: 15
   acceleration_rank_delta: 5
   pullback_midterm_rank_max: 30
   pullback_week_rank_min: 40
@@ -17,6 +17,8 @@ stock_filters:
   price_above_sma20: ta_sma20_pa
   sma20_above_sma50: ta_sma50_sb20
   dollar_volume_min: sh_curvol_ousd100000
+  eps_growth_qoq_min: fa_epsqoq_o10
+  sales_growth_qoq_min: fa_salesqoq_o10
 stock_rs:
   request_timeout_seconds: 20
   max_workers: 24
@@ -28,9 +30,14 @@ stock_rs:
   tier_b_score: 0.65
   cross_top_percent: 0.1
   universe_cap: 0
+  new_stock_enabled: true
 scraper:
-  user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36
-  request_delay_seconds: 1.0
+  user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+  request_delay_seconds: 1.5
+  stock_pick_workers: 3
+  request_retries: 3
+  stale_fallback_enabled: true
+  cookie_file: ""
 server:
   host: 127.0.0.1
   port: 8080

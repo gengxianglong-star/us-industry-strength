@@ -14,7 +14,10 @@ pip install -r requirements.txt
 
 MODE="${1:-serve}"
 if [ "$MODE" = "daily" ]; then
-  python run_daily.py
+  python scripts/precompute_daily.py
+elif [ "$MODE" = "breadth" ]; then
+  python scripts/sync_breadth.py
+  exit 0
 fi
 
 exec python -m uvicorn src.server:app --host 127.0.0.1 --port 8080

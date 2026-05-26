@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>美股行业强势筛选</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260525-1" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -38,14 +38,16 @@
       <div class="panel-header-row">
         <h2>决策中心：今日交易清单</h2>
         <div class="panel-header-actions">
-          <button type="button" id="fetchCoreStocksBtn">刷新 Top 10 个股</button>
+          <button type="button" id="fetchCoreStocksBtn">刷新 Top 15 个股</button>
           <button type="button" id="computeRsBtn">刷新个股RS</button>
+          <button type="button" id="computeNewRsBtn">刷新新股RS</button>
+          <button type="button" id="cancelRsBtn" disabled>取消RS</button>
           <span id="rsStatus" class="inline-status" aria-live="polite"></span>
         </div>
       </div>
       <div class="decision-grid">
         <div class="table-wrap decision-core-wrap">
-          <h3 class="subheading">强势行业 Top 10</h3>
+          <h3 class="subheading" id="coreTableTitle">强势行业 Top 15</h3>
           <table id="coreTable">
             <thead>
               <tr>
@@ -92,6 +94,27 @@
               <th>6M</th>
               <th>1Y</th>
               <th>Rank W/M/Q/H/Y</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="table-wrap table-scroll medium-scroll">
+        <h3 class="subheading">新股 RS 榜单（各档 Top 10%，与主 RS 分池）</h3>
+        <p class="hint">历史 22–259 个交易日分 M/Q/H/3Q 四档单独排名；仅档内 Top10% 可与 Top15 行业 Finviz 筛股交叉进入最终观察名单。</p>
+        <table id="newStockTable">
+          <thead>
+            <tr>
+              <th>档位</th>
+              <th>Symbol</th>
+              <th>Bar数</th>
+              <th>Score</th>
+              <th>Tier</th>
+              <th>1W</th>
+              <th>1M</th>
+              <th>3M</th>
+              <th>6M</th>
+              <th>3Q≈189D</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -184,7 +207,7 @@
             <label>B级得分 ≥ <span class="help-tip" data-tip="行业综合得分达到该值才算B级。应小于或等于A级阈值。">?</span><input type="number" id="tierBScore" step="0.01" min="0" max="1" required /></label>
             <label>核心排名上限 <span class="help-tip" data-tip="1月/3月/6月排名都需小于等于该值，才可能被标记为核心强势。">?</span><input type="number" id="coreRankMax" min="1" required /></label>
             <label>排名极差上限 <span class="help-tip" data-tip="五个周期排名的最大值减最小值。越小越强调多周期一致性。">?</span><input type="number" id="maxRankSpread" min="0" required /></label>
-            <label>主列表数量 <span class="help-tip" data-tip="首页强势行业列表显示的数量（当前建议10）。">?</span><input type="number" id="topListCount" min="1" required /></label>
+            <label>主列表数量 <span class="help-tip" data-tip="强势行业列表与 Finviz 筛股抓取的行业数（当前建议15）。">?</span><input type="number" id="topListCount" min="1" required /></label>
             <label>加速排名差 <span class="help-tip" data-tip="用于“加速”标签：本周排名需比1月排名至少好这么多名。">?</span><input type="number" id="accelerationRankDelta" min="0" required /></label>
             <label>回调-中期排名上限 <span class="help-tip" data-tip="用于“强势回调”标签：1月/3月/6月排名都要在该值以内。">?</span><input type="number" id="pullbackMidtermRankMax" min="1" required /></label>
             <label>回调-1周排名下限 <span class="help-tip" data-tip="用于“强势回调”标签：1周排名需大于等于该值，且1周涨幅为负。">?</span><input type="number" id="pullbackWeekRankMin" min="1" required /></label>
@@ -203,8 +226,11 @@
             <label>股价 &gt; SMA20 <input type="text" id="stockPriceAboveSma20" required /></label>
             <label>SMA50 &lt; SMA20 <input type="text" id="stockSma20AboveSma50" required /></label>
             <label>当日成交额 <input type="text" id="stockDollarVolumeMin" required /></label>
+            <label>EPS 增长 QoQ &gt;10% <input type="text" id="stockEpsGrowthQoq" required /></label>
+            <label>Sales 增长 QoQ &gt;10% <input type="text" id="stockSalesGrowthQoq" required /></label>
           </div>
-          <p class="hint">对应 Finviz：Price above SMA20、SMA50 below SMA20、Current Volume Over $100M（<code>sh_curvol_ousd100000</code>）</p>
+          <p class="hint">Finviz 代码示例：SMA20 上方 <code>ta_sma20_pa</code>、SMA50 在 SMA20 下 <code>ta_sma50_sb20</code>、成交额 <code>sh_curvol_ousd100000</code>、EPS QoQ <code>fa_epsqoq_o10</code>、Sales QoQ <code>fa_salesqoq_o10</code></p>
+          <p class="hint">若遇 Cloudflare 验证：在浏览器登录 Finviz 并完成验证后，将 Cookie 导出到 <code>config.yaml</code> 的 <code>scraper.cookie_file</code>（Netscape 格式），并适当增大 <code>request_delay_seconds</code>。</p>
         </fieldset>
 
         <fieldset>
@@ -250,6 +276,6 @@
     <p>数据来源：<a href="https://finviz.com/groups?g=industry&v=210&o=name" target="_blank" rel="noreferrer">Finviz Industry Groups</a>（延迟 15 分钟）· 仅供研究，非投资建议</p>
   </footer>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260526-13"></script>
 </body>
 </html>

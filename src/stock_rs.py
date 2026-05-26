@@ -31,6 +31,366 @@ PERF_KEY_MAP = {
     "year": "perf_y",
 }
 
+THREE_Q_OFFSET = 189
+NEW_STOCK_MIN_BARS = 22
+
+# 新股分档：互斥，仅 bar_count < min_price_rows（默认 260）
+NEW_STOCK_COHORTS: dict[str, dict[str, Any]] = {
+    "M": {"min_bars": 22, "max_bars": 63, "timeframes": ("week", "month")},
+    "Q": {"min_bars": 63, "max_bars": 126, "timeframes": ("week", "month", "quarter")},
+    "H": {"min_bars": 126, "max_bars": 189, "timeframes": ("week", "month", "quarter", "half")},
+    "3Q": {
+        "min_bars": 189,
+        "max_bars": 260,
+        "timeframes": ("week", "month", "quarter", "half", "three_q"),
+    },
+}
+
+
+def _perf_key_for_timeframe(tf: str) -> str:
+    if tf == "three_q":
+        return "perf_tq"
+    return PERF_KEY_MAP[tf]
+
+
+RANK_KEY_MAP = {
+    "week": "rank_w",
+    "month": "rank_m",
+    "quarter": "rank_q",
+    "half": "rank_h",
+    "three_q": "rank_tq",
+}
+
+
+def _rank_key_for_timeframe(tf: str) -> str:
+    return RANK_KEY_MAP[tf]
+
+
+def classify_new_stock_cohort(bar_count: int, min_main_rows: int) -> str | None:
+    if bar_count >= min_main_rows or bar_count < NEW_STOCK_MIN_BARS:
+        return None
+    for cohort, spec in NEW_STOCK_COHORTS.items():
+        if spec["min_bars"] <= bar_count < spec["max_bars"]:
+            return cohort
+    return None
+
+
+def _offsets_for_cohort(cohort: str) -> dict[str, int]:
+    spec = NEW_STOCK_COHORTS[cohort]
+    offsets: dict[str, int] = {}
+    for tf in spec["timeframes"]:
+        if tf == "three_q":
+            offsets[tf] = THREE_Q_OFFSET
+        else:
+            offsets[tf] = PERF_INDEX_OFFSETS[tf]
+    return offsets
+
+
+def _calc_performance_for_cohort(bars: list[dict[str, Any]], cohort: str) -> dict[str, float] | None:
+    offsets = _offsets_for_cohort(cohort)
+    need = max(offsets.values()) + 1
+    if len(bars) < need:
+        return None
+    closes = [float(bar["close"]) for bar in bars]
+    last = closes[-1]
+    if last <= 0:
+        return None
+    result: dict[str, float] = {}
+    for tf, offset in offsets.items():
+        prev = closes[-1 - offset]
+        if prev <= 0:
+            return None
+        result[_perf_key_for_timeframe(tf)] = (last / prev - 1.0) * 100.0
+    return result
+
+
+def _normalized_weights_for_timeframes(
+    config: dict[str, Any],
+    timeframes: tuple[str, ...],
+) -> dict[str, float]:
+    base = config.get("_normalized_weights") or {
+        "week": 0.05,
+        "month": 0.3,
+        "quarter": 0.4,
+        "half": 0.2,
+        "year": 0.05,
+    }
+    weight_map = {
+        "week": base["week"],
+        "month": base["month"],
+        "quarter": base["quarter"],
+        "half": base["half"],
+        "three_q": base["year"],
+    }
+    picked = {tf: float(weight_map[tf]) for tf in timeframes}
+    total = sum(picked.values())
+    if total <= 0:
+        n = len(timeframes)
+        return {tf: 1.0 / n for tf in timeframes}
+    return {tf: v / total for tf, v in picked.items()}
+
+
+def _score_new_stock_rows(
+    rows: list[dict[str, Any]],
+    cohort: str,
+    config: dict[str, Any],
+    tier_a: float,
+    tier_b: float,
+) -> None:
+    timeframes = NEW_STOCK_COHORTS[cohort]["timeframes"]
+    weights = _normalized_weights_for_timeframes(config, timeframes)
+    ranks = {
+        tf: _rank_by_key(rows, _perf_key_for_timeframe(tf)) for tf in timeframes
+    }
+    total = len(rows)
+    for row in rows:
+        for tf in timeframes:
+            rk = _rank_key_for_timeframe(tf)
+            row[rk] = ranks[tf][row["symbol"]]
+        row["rs_score"] = sum(
+            weights[tf] * _percentile(ranks[tf][row["symbol"]], total) for tf in timeframes
+        )
+        if row["rs_score"] >= tier_a:
+            row["tier"] = "A"
+        elif row["rs_score"] >= tier_b:
+            row["tier"] = "B"
+        else:
+            row["tier"] = "C"
+
+
+def _industry_pick_map(
+    storage: Storage,
+    snapshot_date: str,
+    top_keys: set[str],
+) -> dict[str, list[str]]:
+    picks = storage.get_stock_picks_for_snapshot(snapshot_date)
+    symbol_to_industries: dict[str, list[str]] = {}
+    for key, payload in picks.items():
+        if key not in top_keys:
+            continue
+        for symbol in payload.get("tickers", []):
+            symbol_to_industries.setdefault(symbol.upper(), []).append(key)
+    return symbol_to_industries
+
+
+def _cross_watchlist_candidates(
+    ranked_rows: list[dict[str, Any]],
+    symbol_to_industries: dict[str, list[str]],
+    cross_top_percent: float,
+) -> list[dict[str, Any]]:
+    if not ranked_rows:
+        return []
+    cutoff = max(1, int(len(ranked_rows) * cross_top_percent))
+    out: list[dict[str, Any]] = []
+    for row in ranked_rows[:cutoff]:
+        industries = symbol_to_industries.get(row["symbol"], [])
+        if not industries:
+            continue
+        out.append(
+            {
+                "symbol": row["symbol"],
+                "rs_score": float(row["rs_score"]),
+                "industries": sorted(industries),
+            }
+        )
+    return out
+
+
+def _merge_watchlists(
+    main_candidates: list[dict[str, Any]],
+    new_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_symbol: dict[str, dict[str, Any]] = {}
+    for row in main_candidates:
+        by_symbol[row["symbol"]] = row
+    for row in new_candidates:
+        if row["symbol"] in by_symbol:
+            continue
+        by_symbol[row["symbol"]] = row
+    merged = sorted(
+        by_symbol.values(),
+        key=lambda x: (-x["rs_score"], x["symbol"]),
+    )
+    for idx, row in enumerate(merged, start=1):
+        row["rs_rank"] = idx
+    return merged
+
+
+def backfill_new_stock_rs_for_snapshot(
+    storage: Storage,
+    snapshot_date: str,
+    config: dict[str, Any],
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    """仅对 insufficient_history 股票拉价并计算新股 RS，再与主 RS 观察名单合并。"""
+    rs_cfg = config.get("stock_rs", {})
+    min_price_rows = int(rs_cfg.get("min_price_rows", 260))
+    cross_top_percent = float(rs_cfg.get("cross_top_percent", 0.1))
+    cross_top_percent = max(0.01, min(1.0, cross_top_percent))
+    max_workers = max(4, min(64, int(rs_cfg.get("max_workers", 24))))
+    request_timeout = int(rs_cfg.get("request_timeout_seconds", 20))
+    prefer_stooq = bool(rs_cfg.get("prefer_stooq", False))
+
+    issues = storage.get_stock_rs_issues(snapshot_date)
+    symbols = sorted(s for s, r in issues.items() if r == "insufficient_history")
+    insufficient_bars: dict[str, list[dict[str, Any]]] = {}
+    user_agent = "Mozilla/5.0"
+    total = len(symbols)
+    processed = 0
+    if progress_callback:
+        progress_callback(0, total)
+
+    def _fetch_one(symbol: str) -> tuple[str, list[dict[str, Any]]]:
+        with requests.Session() as session:
+            session.headers.update({"User-Agent": user_agent})
+            bars: list[dict[str, Any]] = []
+            if prefer_stooq:
+                bars = fetch_stooq_daily_bars(symbol, session, timeout=request_timeout)
+            if not bars:
+                bars = fetch_yahoo_daily_bars(symbol, session, timeout=request_timeout)
+        return symbol, bars
+
+    if symbols:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_fetch_one, symbol) for symbol in symbols]
+            for future in as_completed(futures):
+                symbol, bars = future.result()
+                if bars and len(bars) < min_price_rows:
+                    insufficient_bars[symbol] = bars
+                processed += 1
+                if progress_callback and (processed % 20 == 0 or processed == total):
+                    progress_callback(processed, total)
+    elif progress_callback:
+        progress_callback(0, 0)
+
+    scored_rows = storage.get_snapshot(snapshot_date)
+
+    class _Industry:
+        def __init__(self, d: dict[str, Any]):
+            self.key = d["industry_key"]
+            self.name = d["name"]
+            self.score = float(d.get("score") or 0)
+            self.excluded = bool(d.get("excluded"))
+
+    scored = [_Industry(r) for r in scored_rows if not r.get("excluded")]
+    new_stock_result = compute_and_store_new_stock_rs(
+        storage,
+        snapshot_date,
+        insufficient_bars,
+        config,
+        min_price_rows,
+        cross_top_percent,
+        scored,
+    )
+
+    main_rows = storage.get_stock_rs_raw(snapshot_date)
+    top_industries = filter_top_strong(scored, config)
+    top_keys = {item.key for item in top_industries}
+    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
+    main_watch = _cross_watchlist_candidates(main_rows, symbol_to_industries, cross_top_percent)
+    watch_rows = _merge_watchlists(main_watch, new_stock_result["new_watch_candidates"])
+    storage.save_stock_watchlist(snapshot_date, watch_rows)
+
+    prev_meta = storage.get_stock_rs_meta(snapshot_date) or {}
+    storage.save_stock_rs_meta(
+        snapshot_date,
+        {
+            "universe_count": int(prev_meta.get("universe_count", 0)),
+            "computed_count": int(prev_meta.get("computed_count", 0)),
+            "no_bars_count": int(prev_meta.get("no_bars_count", 0)),
+            "insufficient_history_count": int(prev_meta.get("insufficient_history_count", 0)),
+            "perf_invalid_count": int(prev_meta.get("perf_invalid_count", 0)),
+            "coverage_ratio": float(prev_meta.get("coverage_ratio", 0.0)),
+            "new_stock_m_count": new_stock_result["new_stock_m_count"],
+            "new_stock_q_count": new_stock_result["new_stock_q_count"],
+            "new_stock_h_count": new_stock_result["new_stock_h_count"],
+            "new_stock_3q_count": new_stock_result["new_stock_3q_count"],
+            "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
+            "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
+        },
+    )
+
+    return {
+        **new_stock_result,
+        "fetched_symbols": len(symbols),
+        "bars_for_new_rs": len(insufficient_bars),
+        "watchlist_count": len(watch_rows),
+    }
+
+
+def compute_and_store_new_stock_rs(
+    storage: Storage,
+    snapshot_date: str,
+    insufficient_bars: dict[str, list[dict[str, Any]]],
+    config: dict[str, Any],
+    min_price_rows: int,
+    cross_top_percent: float,
+    scored_industries: list[ScoredIndustry],
+) -> dict[str, Any]:
+    rs_cfg = config.get("stock_rs", {})
+    tier_a = float(rs_cfg.get("tier_a_score", 0.8))
+    tier_b = float(rs_cfg.get("tier_b_score", 0.65))
+    if not bool(rs_cfg.get("new_stock_enabled", True)):
+        return {
+            "new_stock_m_count": 0,
+            "new_stock_q_count": 0,
+            "new_stock_h_count": 0,
+            "new_stock_3q_count": 0,
+            "new_stock_leaderboard_count": 0,
+            "new_stock_rows": [],
+            "new_watch_candidates": [],
+        }
+
+    cohort_rows: dict[str, list[dict[str, Any]]] = {k: [] for k in NEW_STOCK_COHORTS}
+    for symbol, bars in insufficient_bars.items():
+        cohort = classify_new_stock_cohort(len(bars), min_price_rows)
+        if not cohort:
+            continue
+        perf = _calc_performance_for_cohort(bars, cohort)
+        if not perf:
+            continue
+        row: dict[str, Any] = {
+            "symbol": symbol,
+            "cohort": cohort,
+            "bar_count": len(bars),
+            "in_leaderboard": False,
+        }
+        row.update(perf)
+        cohort_rows[cohort].append(row)
+
+    counts = {c: len(cohort_rows[c]) for c in NEW_STOCK_COHORTS}
+    all_scored: list[dict[str, Any]] = []
+    leaderboard: list[dict[str, Any]] = []
+
+    for cohort, rows in cohort_rows.items():
+        if not rows:
+            continue
+        _score_new_stock_rows(rows, cohort, config, tier_a, tier_b)
+        rows.sort(key=lambda x: (-x["rs_score"], x["symbol"]))
+        cutoff = max(1, int(len(rows) * cross_top_percent))
+        for row in rows:
+            row["in_leaderboard"] = False
+        for row in rows[:cutoff]:
+            row["in_leaderboard"] = True
+            leaderboard.append(row)
+        all_scored.extend(rows)
+
+    top_industries = filter_top_strong(scored_industries, config)
+    top_keys = {item.key for item in top_industries}
+    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
+    new_watch = _cross_watchlist_candidates(leaderboard, symbol_to_industries, 1.0)
+
+    storage.save_stock_rs_new_snapshot(snapshot_date, all_scored)
+    return {
+        "new_stock_m_count": counts["M"],
+        "new_stock_q_count": counts["Q"],
+        "new_stock_h_count": counts["H"],
+        "new_stock_3q_count": counts["3Q"],
+        "new_stock_leaderboard_count": len(leaderboard),
+        "new_stock_rows": all_scored,
+        "new_watch_candidates": new_watch,
+    }
+
 
 def _percentile(rank: int, total: int) -> float:
     if total <= 1:
@@ -355,6 +715,7 @@ def compute_and_store_stock_rs(
 
     perf_map = dict(existing_perf_map)
     issues_map = dict(existing_issues)
+    insufficient_bars: dict[str, list[dict[str, Any]]] = {}
 
     worker_errors: list[str] = []
 
@@ -382,6 +743,7 @@ def compute_and_store_stock_rs(
                 "symbol": symbol,
                 "status": "insufficient_history",
                 "reason": "insufficient_history",
+                "bars": bars,
             }
         perf = _calc_performance(bars)
         if not perf:
@@ -417,7 +779,10 @@ def compute_and_store_stock_rs(
                     perf_map[symbol] = {"symbol": symbol, **payload["perf"]}
                     issues_map.pop(symbol, None)
                 elif symbol:
-                    issues_map[symbol] = str(payload.get("reason") or "no_bars")
+                    reason = str(payload.get("reason") or "no_bars")
+                    issues_map[symbol] = reason
+                    if reason == "insufficient_history" and payload.get("bars"):
+                        insufficient_bars[symbol] = payload["bars"]
 
                 processed += 1
                 if progress_callback and (processed % 25 == 0 or processed == total_symbols):
@@ -433,8 +798,18 @@ def compute_and_store_stock_rs(
 
     if not rows:
         storage.save_stock_rs_snapshot(snapshot_date, [])
-        storage.save_stock_watchlist(snapshot_date, [])
         storage.save_stock_rs_issues(snapshot_date, issues_map)
+        new_stock_result = compute_and_store_new_stock_rs(
+            storage,
+            snapshot_date,
+            insufficient_bars,
+            config,
+            min_price_rows,
+            cross_top_percent,
+            scored_industries,
+        )
+        watch_rows = _merge_watchlists([], new_stock_result["new_watch_candidates"])
+        storage.save_stock_watchlist(snapshot_date, watch_rows)
         storage.save_stock_rs_meta(
             snapshot_date,
             {
@@ -444,6 +819,12 @@ def compute_and_store_stock_rs(
                 "insufficient_history_count": insufficient_history_count,
                 "perf_invalid_count": perf_invalid_count,
                 "coverage_ratio": coverage_ratio,
+                "new_stock_m_count": new_stock_result["new_stock_m_count"],
+                "new_stock_q_count": new_stock_result["new_stock_q_count"],
+                "new_stock_h_count": new_stock_result["new_stock_h_count"],
+                "new_stock_3q_count": new_stock_result["new_stock_3q_count"],
+                "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
+                "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
             },
         )
         return {
@@ -451,11 +832,13 @@ def compute_and_store_stock_rs(
             "universe_count": len(universe),
             "attempted_count": len(target_symbols),
             "computed_count": 0,
-            "watchlist_count": 0,
+            "watchlist_count": len(watch_rows),
             "no_bars_count": no_bars_count,
             "insufficient_history_count": insufficient_history_count,
             "perf_invalid_count": perf_invalid_count,
             "coverage_ratio": coverage_ratio,
+            "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
+            "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
             "worker_errors": worker_errors,
         }
 
@@ -491,28 +874,19 @@ def compute_and_store_stock_rs(
 
     top_industries = filter_top_strong(scored_industries, config)
     top_keys = {item.key for item in top_industries}
-    picks = storage.get_stock_picks_for_snapshot(snapshot_date)
-    symbol_to_industries: dict[str, list[str]] = {}
-    for key, payload in picks.items():
-        if key not in top_keys:
-            continue
-        for symbol in payload.get("tickers", []):
-            symbol_to_industries.setdefault(symbol.upper(), []).append(key)
+    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
 
-    cutoff = max(1, int(total * cross_top_percent))
-    watch_rows: list[dict[str, Any]] = []
-    for idx, row in enumerate(rows[:cutoff], start=1):
-        industries = symbol_to_industries.get(row["symbol"], [])
-        if not industries:
-            continue
-        watch_rows.append(
-            {
-                "symbol": row["symbol"],
-                "rs_score": row["rs_score"],
-                "rs_rank": idx,
-                "industries": sorted(industries),
-            }
-        )
+    main_watch_candidates = _cross_watchlist_candidates(rows, symbol_to_industries, cross_top_percent)
+    new_stock_result = compute_and_store_new_stock_rs(
+        storage,
+        snapshot_date,
+        insufficient_bars,
+        config,
+        min_price_rows,
+        cross_top_percent,
+        scored_industries,
+    )
+    watch_rows = _merge_watchlists(main_watch_candidates, new_stock_result["new_watch_candidates"])
     storage.save_stock_watchlist(snapshot_date, watch_rows)
     storage.save_stock_rs_meta(
         snapshot_date,
@@ -523,6 +897,12 @@ def compute_and_store_stock_rs(
             "insufficient_history_count": insufficient_history_count,
             "perf_invalid_count": perf_invalid_count,
             "coverage_ratio": coverage_ratio,
+            "new_stock_m_count": new_stock_result["new_stock_m_count"],
+            "new_stock_q_count": new_stock_result["new_stock_q_count"],
+            "new_stock_h_count": new_stock_result["new_stock_h_count"],
+            "new_stock_3q_count": new_stock_result["new_stock_3q_count"],
+            "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
+            "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
         },
     )
 
@@ -536,5 +916,61 @@ def compute_and_store_stock_rs(
         "insufficient_history_count": insufficient_history_count,
         "perf_invalid_count": perf_invalid_count,
         "coverage_ratio": coverage_ratio,
+        "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
+        "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
         "worker_errors": worker_errors,
+    }
+
+
+def rebuild_stock_watchlist_for_snapshot(
+    storage: Storage,
+    snapshot_date: str,
+    scored_industries: list[ScoredIndustry],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Rebuild cross watchlist from existing RS rows and latest industry stock picks."""
+    rs_cfg = config.get("stock_rs", {})
+    cross_top_percent = float(rs_cfg.get("cross_top_percent", 0.1))
+    cross_top_percent = max(0.01, min(1.0, cross_top_percent))
+
+    rows = storage.get_stock_rs_raw(snapshot_date)
+    if not rows:
+        return {
+            "snapshot_date": snapshot_date,
+            "watchlist_count": 0,
+            "skipped": True,
+            "reason": "no_rs_rows",
+        }
+
+    top_industries = filter_top_strong(scored_industries, config)
+    top_keys = {item.key for item in top_industries}
+    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
+
+    main_watch = _cross_watchlist_candidates(rows, symbol_to_industries, cross_top_percent)
+
+    leaderboard = storage.get_stock_rs_new(
+        snapshot_date,
+        leaderboard_only=True,
+        limit=5000,
+    )
+    new_watch_rows = [
+        {"symbol": row["symbol"], "rs_score": float(row["rs_score"])}
+        for row in leaderboard
+    ]
+    new_watch = _cross_watchlist_candidates(new_watch_rows, symbol_to_industries, 1.0)
+
+    watch_rows = _merge_watchlists(main_watch, new_watch)
+    storage.save_stock_watchlist(snapshot_date, watch_rows)
+
+    meta = storage.get_stock_rs_meta(snapshot_date)
+    if meta:
+        updated = dict(meta)
+        updated["new_stock_watchlist_added"] = len(new_watch)
+        storage.save_stock_rs_meta(snapshot_date, updated)
+
+    return {
+        "snapshot_date": snapshot_date,
+        "watchlist_count": len(watch_rows),
+        "top_industry_count": len(top_keys),
+        "skipped": False,
     }

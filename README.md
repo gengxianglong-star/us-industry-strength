@@ -24,8 +24,27 @@
 默认会自动创建虚拟环境、安装依赖并启动 Web（`http://127.0.0.1:8080`）。
 
 如需先抓取当日快照再启动：
-- macOS / Linux：`./run.sh daily`
+- macOS / Linux：`./run.sh daily`（调用 `scripts/precompute_daily.py`：行业快照 + Top行业个股 + RS + 宽度）
 - Windows：`run.bat daily`
+
+仅同步市场宽度（不启动 Web）：
+- macOS / Linux：`./run.sh breadth`
+- Windows：`run.bat breadth`
+
+## 定时同步（cron / launchd）
+
+工作日自动跑「每日预计算（行业 + 个股 + RS + 宽度）」：
+
+```bash
+chmod +x scripts/scheduled_daily.sh scripts/install-macos-schedule.sh
+./scripts/install-macos-schedule.sh   # macOS：工作日 06:30，日志在 logs/
+```
+
+或参考 `scripts/crontab.example` 自行配置 cron。手动执行一次：
+
+```bash
+./scripts/scheduled_daily.sh
+```
 
 ### 方式 B：手动命令
 
@@ -34,7 +53,7 @@
   python3 -m venv .venv
   source .venv/bin/activate
   pip install -r requirements.txt
-  python run_daily.py
+  python scripts/precompute_daily.py
   python -m uvicorn src.server:app --host 127.0.0.1 --port 8080
   ```
 
@@ -43,7 +62,7 @@
   py -3 -m venv .venv
   .venv\Scripts\activate
   pip install -r requirements.txt
-  python run_daily.py
+  python scripts\precompute_daily.py
   python -m uvicorn src.server:app --host 127.0.0.1 --port 8080
   ```
 
@@ -53,8 +72,22 @@
 
 - `weights`：1W/1M/3M/6M/1Y 权重（自动归一化）
 - `thresholds`：行业评分阈值、趋势参数
-- `stock_filters`：Finviz 个股筛选条件（默认含 $100M 成交额过滤）
+- `stock_filters`：Finviz 个股筛选（SMA、成交额、EPS/Sales QoQ>10% 等，见 `fa_epsqoq_o10` / `fa_salesqoq_o10`）
+- `scraper.stock_pick_workers`：行业个股抓取并发（建议 2–4，默认 3）
+- `thresholds.top_list_count`：强势行业数量（默认 15）
+- `scraper.cookie_file`：可选，浏览器导出 Cookie 以绕过 Cloudflare 验证页
 - `stock_rs`：个股 RS 抓取与交叉参数
+
+市场宽度页的驾驶舱阈值、5/10 日背景分档、API 与联动逻辑见 **[docs/breadth.md](docs/breadth.md)**（与页面「驾驶舱规则说明」一致，适合长期留存）。
+
+个股 RS、新股四档分池与观察名单合并规则见 **[docs/stock_rs.md](docs/stock_rs.md)**。
+
+### 市场宽度与驾驶舱（摘要）
+
+- **页面**：`http://127.0.0.1:8080/breadth` — Stockbee Sheet 同步、宽表、7 格驾驶舱、历史分位、图表。
+- **驾驶舱**：季度/半季/月度/5-10 交叉（涨跌对比 → 红绿 BULL/LONG 等）；5 日/10 日 ratio 状态灯 + **背景按锚点分档**（绿锚 1.5、红锚 0.75，两侧各 5 档）；T2108 极值白/红/绿。
+- **配置**：页面底部或 `PUT /api/breadth/config`；持久化在 SQLite `breadth_threshold_config`。
+- **联动**：点击驾驶舱卡片高亮对应图表曲线（详见 [docs/breadth.md](docs/breadth.md)）。
 
 ## GitHub 上传与跨平台维护建议
 
@@ -94,6 +127,12 @@ config.yaml
 run_daily.py
 run.sh
 run.bat
+docs/
+  breadth.md          # 市场宽度与驾驶舱完整说明
+scripts/
+  precompute_daily.py # 每日预计算：行业+个股+RS+宽度
+  sync_breadth.py     # 宽度增量同步
+  scheduled_daily.sh  # 定时触发 precompute_daily.py
 src/
 web/
 data/                # SQLite（已 gitignore）

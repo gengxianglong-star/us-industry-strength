@@ -28,6 +28,8 @@ class StockFiltersConfig(BaseModel):
     price_above_sma20: str = "ta_sma20_pa"
     sma20_above_sma50: str = "ta_sma50_sb20"
     dollar_volume_min: str = "sh_curvol_ousd100000"
+    eps_growth_qoq_min: str = "fa_epsqoq_o10"
+    sales_growth_qoq_min: str = "fa_salesqoq_o10"
 
 
 class StockRsConfig(BaseModel):
@@ -41,6 +43,7 @@ class StockRsConfig(BaseModel):
     tier_b_score: float = Field(default=0.65, ge=0, le=1)
     cross_top_percent: float = Field(default=0.1, ge=0.01, le=1.0)
     universe_cap: int = Field(default=0, ge=0, le=12000)
+    new_stock_enabled: bool = True
 
 
 class ConfigUpdate(BaseModel):
