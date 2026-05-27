@@ -11,6 +11,7 @@ from src.finviz_stock_screener import (
     build_screener_filters,
     build_screener_url,
     fetch_industry_tickers,
+    prepare_finviz_session,
 )
 from src.scoring import ScoredIndustry, filter_top_strong
 from src.storage import Storage
@@ -100,9 +101,17 @@ def fetch_and_store_stock_picks(
     max_workers = int(scraper_cfg.get("stock_pick_workers", 3))
     max_workers = max(1, min(6, max_workers))
 
+    shared_session, session_lock = prepare_finviz_session(config)
+
     def _fetch_one(key: str, cfg: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         try:
-            payload = fetch_industry_tickers(key, cfg)
+            payload = fetch_industry_tickers(
+                key,
+                cfg,
+                session=shared_session,
+                session_lock=session_lock,
+                skip_warmup=True,
+            )
             storage.save_industry_stock_picks(
                 snapshot_date,
                 key,
@@ -121,11 +130,15 @@ def fetch_and_store_stock_picks(
             )
             return key, payload
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_fetch_one, key, config) for key in industry_keys]
-        for future in as_completed(futures):
-            key, payload = future.result()
-            results[key] = payload
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_fetch_one, key, config) for key in industry_keys]
+            for future in as_completed(futures):
+                key, payload = future.result()
+                results[key] = payload
+    finally:
+        if shared_session is not None:
+            shared_session.close()
 
     # 动态限速回补：若出现 Cloudflare/连接类错误，则降并发+增延时重试失败行业。
     retry_keys: list[str] = []

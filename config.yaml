@@ -30,6 +30,8 @@ stock_rs:
   tier_b_score: 0.65
   cross_top_percent: 0.1
   universe_cap: 0
+  universe_cache_hours: 24
+  yahoo_batch_size: 100
   new_stock_enabled: true
 scraper:
   user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
@@ -38,6 +40,19 @@ scraper:
   request_retries: 3
   stale_fallback_enabled: true
   cookie_file: ""
+breadth:
+  connect_timeout_seconds: 20
+  read_timeout_seconds: 120
+  request_retries: 5
+  proxy_url: ""
+  use_system_proxy: true
+  prefer_curl: true
+  curl_only: true
+  validate_after_sync: false
+  verify_ssl: true
+  cookie_file: ""
+  local_csv_path: ""
+  offline_only: false
 server:
   host: 127.0.0.1
   port: 8080

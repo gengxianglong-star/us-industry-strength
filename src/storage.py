@@ -252,6 +252,8 @@ class Storage:
             ("new_stock_3q_count", "INTEGER NOT NULL DEFAULT 0"),
             ("new_stock_leaderboard_count", "INTEGER NOT NULL DEFAULT 0"),
             ("new_stock_watchlist_added", "INTEGER NOT NULL DEFAULT 0"),
+            ("worker_error_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("worker_error_sample", "TEXT"),
         ]
         for name, typedef in additions:
             if name not in cols:
@@ -703,42 +705,36 @@ class Storage:
         return result
 
     def upsert_stock_universe(self, rows: list[dict[str, Any]], source: str) -> None:
+        from src.stores.universe_store import upsert_stock_universe as _upsert
+
         if not rows:
             return
-        updated_at = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
-            conn.executemany(
-                """
-                INSERT INTO stock_universe(symbol, name, exchange, source, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(symbol) DO UPDATE SET
-                    name=excluded.name,
-                    exchange=excluded.exchange,
-                    source=excluded.source,
-                    updated_at=excluded.updated_at
-                """,
-                [
-                    (
-                        str(row.get("symbol", "")).upper(),
-                        row.get("name") or "",
-                        row.get("exchange") or "",
-                        source,
-                        updated_at,
-                    )
-                    for row in rows
-                    if row.get("symbol")
-                ],
-            )
+            _upsert(conn, rows, source)
 
     def list_stock_universe_symbols(self) -> list[str]:
+        from src.stores.universe_store import list_stock_universe_symbols as _list
+
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT symbol FROM stock_universe
-                ORDER BY symbol ASC
-                """
-            ).fetchall()
-        return [str(row["symbol"]) for row in rows]
+            return _list(conn)
+
+    def count_stock_universe(self) -> int:
+        from src.stores.universe_store import count_stock_universe as _count
+
+        with self._connect() as conn:
+            return _count(conn)
+
+    def get_stock_universe_freshness(self) -> dict[str, Any] | None:
+        from src.stores.universe_store import get_stock_universe_freshness as _freshness
+
+        with self._connect() as conn:
+            return _freshness(conn)
+
+    def list_stock_universe(self) -> list[dict[str, Any]]:
+        from src.stores.universe_store import list_stock_universe as _list
+
+        with self._connect() as conn:
+            return _list(conn)
 
     def replace_stock_price_history(
         self,
@@ -907,6 +903,7 @@ class Storage:
 
     def save_stock_rs_meta(self, snapshot_date: str, meta: dict[str, Any]) -> None:
         updated_at = datetime.now(timezone.utc).isoformat()
+        sample = meta.get("worker_error_sample") or []
         with self._connect() as conn:
             self._migrate_stock_rs_meta(conn)
             conn.execute(
@@ -916,8 +913,9 @@ class Storage:
                     insufficient_history_count, perf_invalid_count, coverage_ratio,
                     new_stock_m_count, new_stock_q_count, new_stock_h_count,
                     new_stock_3q_count, new_stock_leaderboard_count,
-                    new_stock_watchlist_added, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    new_stock_watchlist_added, worker_error_count, worker_error_sample,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot_date,
@@ -933,6 +931,8 @@ class Storage:
                     int(meta.get("new_stock_3q_count", 0)),
                     int(meta.get("new_stock_leaderboard_count", 0)),
                     int(meta.get("new_stock_watchlist_added", 0)),
+                    int(meta.get("worker_error_count", 0) or 0),
+                    json.dumps(sample, ensure_ascii=False),
                     updated_at,
                 ),
             )
@@ -1032,7 +1032,14 @@ class Storage:
                 """,
                 (snapshot_date,),
             ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        data = dict(row)
+        try:
+            data["worker_error_sample"] = json.loads(data.get("worker_error_sample") or "[]")
+        except json.JSONDecodeError:
+            data["worker_error_sample"] = []
+        return data
 
     def save_stock_rs_issues(self, snapshot_date: str, issues: dict[str, str]) -> None:
         updated_at = datetime.now(timezone.utc).isoformat()

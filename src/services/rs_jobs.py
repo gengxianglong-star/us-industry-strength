@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
+from src.jobs.claim import claim_background_job
 from src.stock_rs import backfill_new_stock_rs_for_snapshot, compute_and_store_stock_rs
 from src.storage import Storage
 
@@ -119,10 +120,11 @@ class RsJobService:
 
             start_ts = time.time()
             job_id = f"{job_kind}-{snapshot_date}-{uuid4().hex[:10]}"
-            claimed, blocking = storage.claim_rs_job_run(
-                job_id,
-                snapshot_date,
-                job_kind,
+            claimed, blocking = claim_background_job(
+                storage,
+                scope=snapshot_date,
+                kind=job_kind,
+                job_id=job_id,
                 stale_seconds=self.STALE_SECONDS,
             )
             if not claimed and blocking:

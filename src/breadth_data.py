@@ -5,12 +5,18 @@ from __future__ import annotations
 import csv
 import io
 import re
+import shutil
+import subprocess
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
 
+from src.config_loader import load_config
+from src.proxy_util import resolve_proxy_url
 from src.storage import Storage
 
 SHEET_ID = "1O6OhS7ciA8zwfycBfGPbP2fWJnR0pn2UUvFZVDP9jpE"
@@ -201,6 +207,7 @@ _CACHE_TTL_SECONDS = 300
 _CACHE_DATA: dict[str, Any] | None = None
 _CACHE_AT: float = 0.0
 _CACHE_SIGNATURE: str = ""
+_CACHE_LOCK = threading.Lock()
 
 
 def _to_number(value: str | float | int | None) -> float | None:
@@ -246,9 +253,121 @@ def _discover_sheet_gids() -> list[str]:
     return [PRIMARY_MARKET_MONITOR_GID]
 
 
-def _fetch_gid_rows(gid: str) -> tuple[list[str], list[str], list[list[str]]]:
-    url = SHEET_CSV_GID_URL.format(gid=gid)
-    text = requests.get(url, timeout=25).text
+def _breadth_settings(config: dict[str, Any] | None) -> dict[str, Any]:
+    cfg = dict((config or load_config()).get("breadth") or {})
+    scraper = dict((config or load_config()).get("scraper") or {})
+    read_timeout = int(cfg.get("read_timeout_seconds", cfg.get("request_timeout_seconds", 120)))
+    explicit_proxy = str(cfg.get("proxy_url") or "").strip()
+    use_system_proxy = bool(cfg.get("use_system_proxy", True))
+    resolved_proxy, proxy_source = resolve_proxy_url(
+        explicit=explicit_proxy,
+        use_system_proxy=use_system_proxy,
+    )
+    cookie_file = str(cfg.get("cookie_file") or scraper.get("cookie_file") or "").strip()
+    prefer_curl = cfg.get("prefer_curl")
+    if prefer_curl is None:
+        prefer_curl = True
+    curl_only = cfg.get("curl_only")
+    if curl_only is None:
+        curl_only = True
+    return {
+        "connect_timeout_seconds": int(cfg.get("connect_timeout_seconds", 20)),
+        "read_timeout_seconds": read_timeout,
+        "request_timeout_seconds": read_timeout,
+        "request_retries": int(cfg.get("request_retries", 5)),
+        "proxy_url": resolved_proxy or "",
+        "proxy_source": proxy_source,
+        "explicit_proxy_url": explicit_proxy,
+        "use_system_proxy": use_system_proxy,
+        "verify_ssl": bool(cfg.get("verify_ssl", True)),
+        "prefer_curl": bool(prefer_curl),
+        "curl_only": bool(curl_only),
+        "validate_after_sync": bool(cfg.get("validate_after_sync", False)),
+        "cookie_file": cookie_file,
+        "local_csv_path": str(cfg.get("local_csv_path") or "").strip(),
+        "offline_only": bool(cfg.get("offline_only", False)),
+        "user_agent": str(
+            cfg.get("user_agent")
+            or scraper.get("user_agent")
+            or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+    }
+
+
+def _breadth_http_session(settings: dict[str, Any]) -> requests.Session:
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    session = requests.Session()
+    session.trust_env = bool(settings.get("use_system_proxy", True))
+    proxy_url = str(settings.get("proxy_url") or "").strip()
+    if proxy_url:
+        session.proxies.update({"http": proxy_url, "https": proxy_url})
+    verify_ssl = bool(settings.get("verify_ssl", True))
+    session.verify = verify_ssl
+    retry = Retry(
+        total=0,
+        connect=0,
+        read=0,
+        redirect=0,
+        status=0,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=2, pool_maxsize=2)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update(
+        {
+            "User-Agent": settings["user_agent"],
+            "Accept": "text/csv,text/plain,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Connection": "close",
+        }
+    )
+    return session
+
+
+def _is_google_sheet_fetch_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        token in lowered
+        for token in (
+            "docs.google.com",
+            "googleusercontent.com",
+            "ssl",
+            "ssleoferror",
+            "unexpected_eof",
+            "connection",
+            "timeout",
+        )
+    )
+
+
+def _format_breadth_fetch_error(exc: Exception, settings: dict[str, Any]) -> str:
+    message = str(exc)
+    if not _is_google_sheet_fetch_error(message):
+        return message
+    hints = [
+        "浏览器能打开 Google Sheet，但 Python 同步默认不会自动走「系统设置」里的代理。",
+        "本程序已尝试：读取 macOS 系统代理 + 使用 curl 下载（与浏览器更接近）。",
+        "若仍失败，请任选：",
+        "1) 在 config.yaml 填写 breadth.proxy_url（与浏览器代理端口一致，如 http://127.0.0.1:7890）；",
+        "2) 改用 SOCKS5：socks5h://127.0.0.1:7891；",
+        "3) breadth.verify_ssl: false（仅当代理做 HTTPS 解密时）；",
+        "4) 浏览器导出 CSV → breadth.local_csv_path + offline_only: true。",
+    ]
+    proxy = settings.get("proxy_url") or ""
+    source = settings.get("proxy_source") or "none"
+    if proxy:
+        hints.append(f"当前使用代理：{proxy}（来源 {source}）")
+    else:
+        hints.append("当前未检测到可用代理（proxy_source=none）")
+    if settings.get("prefer_curl"):
+        hints.append("prefer_curl=true（优先 curl）")
+    return "\n".join(hints) + f"\n原始错误：{message}"
+
+
+def _parse_csv_export(text: str) -> tuple[list[str], list[str], list[list[str]]]:
     rows = list(csv.reader(io.StringIO(text)))
     if len(rows) < 3:
         return [], [], []
@@ -256,6 +375,168 @@ def _fetch_gid_rows(gid: str) -> tuple[list[str], list[str], list[list[str]]]:
     header_row = [x.strip() for x in rows[1]]
     data_rows = rows[2:]
     return group_row, header_row, data_rows
+
+
+def _read_local_csv_export(path: Path) -> tuple[list[str], list[str], list[list[str]]]:
+    text = path.read_text(encoding="utf-8-sig")
+    parsed = _parse_csv_export(text)
+    if not parsed[2]:
+        raise ValueError(f"本地 CSV 无有效数据行：{path}")
+    return parsed
+
+
+def _curl_binary() -> str:
+    for candidate in ("/usr/bin/curl", shutil.which("curl")):
+        if candidate and Path(candidate).is_file():
+            return candidate
+    raise RuntimeError("未找到 curl（需要 macOS 自带 /usr/bin/curl）")
+
+
+def _download_csv_via_curl(url: str, settings: dict[str, Any], *, proxy: str | None = None) -> str:
+    read_timeout = int(settings["read_timeout_seconds"])
+    cmd = [
+        _curl_binary(),
+        "-fsSL",
+        "--http1.1",
+        "--max-time",
+        str(read_timeout),
+        "-A",
+        settings["user_agent"],
+        "-H",
+        "Accept: text/csv,text/plain,*/*",
+    ]
+    proxy = proxy if proxy is not None else str(settings.get("proxy_url") or "").strip() or None
+    if proxy:
+        cmd.extend(["--proxy", proxy])
+    if not settings.get("verify_ssl", True):
+        cmd.append("--insecure")
+    cookie_file = str(settings.get("cookie_file") or "").strip()
+    if cookie_file and Path(cookie_file).is_file():
+        cmd.extend(["-b", cookie_file])
+    cmd.append(url)
+    result = subprocess.run(cmd, capture_output=True, check=False)
+    if result.returncode != 0:
+        stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+        hint = f" [proxy={proxy or 'none'}]" if proxy else " [proxy=none]"
+        raise RuntimeError((stderr or f"curl exit {result.returncode}") + hint)
+    payload = result.stdout
+    if not payload.strip():
+        raise ValueError("curl 返回空内容")
+    return payload.decode("utf-8-sig", errors="replace")
+
+
+def _download_csv_via_curl_with_fallbacks(url: str, settings: dict[str, Any]) -> str:
+    from src.proxy_util import detect_macos_system_proxy
+
+    proxies: list[str | None] = []
+    primary = str(settings.get("proxy_url") or "").strip()
+    if primary:
+        proxies.append(primary)
+    mac = detect_macos_system_proxy()
+    if mac and mac not in proxies:
+        proxies.append(mac)
+    explicit = str(settings.get("explicit_proxy_url") or "").strip()
+    if explicit and explicit not in proxies:
+        proxies.append(explicit)
+
+    errors: list[str] = []
+    for proxy in proxies or [None]:
+        try:
+            return _download_csv_via_curl(url, settings, proxy=proxy)
+        except (RuntimeError, ValueError, OSError) as exc:
+            errors.append(str(exc))
+    raise RuntimeError("; ".join(errors[-3:]))
+
+
+def _download_csv_text(session: requests.Session, url: str, settings: dict[str, Any]) -> str:
+    connect_timeout = int(settings["connect_timeout_seconds"])
+    read_timeout = int(settings["read_timeout_seconds"])
+    timeout = (connect_timeout, read_timeout)
+    verify_ssl = bool(settings.get("verify_ssl", True))
+    with session.get(url, timeout=timeout, verify=verify_ssl, stream=True, allow_redirects=True) as response:
+        response.raise_for_status()
+        chunks: list[bytes] = []
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if chunk:
+                chunks.append(chunk)
+    payload = b"".join(chunks)
+    if not payload.strip():
+        raise ValueError("Google Sheet 返回空内容")
+    return payload.decode("utf-8-sig", errors="replace")
+
+
+def _fetch_gid_rows_remote(gid: str, settings: dict[str, Any]) -> tuple[list[str], list[str], list[list[str]]]:
+    urls = [
+        SHEET_CSV_GID_URL.format(gid=gid),
+        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&gid={gid}",
+    ]
+    retries = max(1, int(settings["request_retries"]))
+    curl_only = bool(settings.get("curl_only", True))
+    try:
+        _curl_binary()
+        use_curl = bool(settings.get("prefer_curl", True))
+    except RuntimeError:
+        use_curl = False
+    last_exc: Exception | None = None
+
+    for url_idx, url in enumerate(urls):
+        for attempt in range(retries):
+            try:
+                if use_curl:
+                    text = _download_csv_via_curl_with_fallbacks(url, settings)
+                else:
+                    session = _breadth_http_session(settings)
+                    text = _download_csv_text(session, url, settings)
+                parsed = _parse_csv_export(text)
+                if not parsed[2]:
+                    raise ValueError("CSV 解析后无数据行")
+                return parsed
+            except Exception as exc:
+                last_exc = exc
+                if not curl_only and use_curl:
+                    try:
+                        session = _breadth_http_session(settings)
+                        text = _download_csv_text(session, url, settings)
+                        parsed = _parse_csv_export(text)
+                        if parsed[2]:
+                            return parsed
+                    except Exception as req_exc:
+                        last_exc = req_exc
+                if attempt + 1 < retries:
+                    time.sleep(min(2**attempt, 10))
+                    continue
+                if url_idx + 1 < len(urls):
+                    break
+    raise RuntimeError(_format_breadth_fetch_error(last_exc or RuntimeError("fetch failed"), settings)) from last_exc
+
+
+def _fetch_gid_rows(
+    gid: str,
+    config: dict[str, Any] | None = None,
+) -> tuple[list[str], list[str], list[list[str]]]:
+    settings = _breadth_settings(config)
+    local_path = (
+        Path(settings["local_csv_path"]).expanduser()
+        if settings.get("local_csv_path")
+        else None
+    )
+    offline_only = bool(settings.get("offline_only", False))
+
+    if not offline_only:
+        try:
+            return _fetch_gid_rows_remote(gid, settings)
+        except Exception as exc:
+            if local_path and local_path.is_file():
+                return _read_local_csv_export(local_path)
+            if isinstance(exc, RuntimeError):
+                raise
+            raise RuntimeError(_format_breadth_fetch_error(exc, settings)) from exc
+
+    if local_path and local_path.is_file():
+        return _read_local_csv_export(local_path)
+    raise RuntimeError(
+        "breadth.offline_only=true 但未配置可用的 breadth.local_csv_path"
+    )
 
 
 def _normalize_gid_rows(gid: str, sheet_name: str, rows: list[list[str]]) -> list[dict[str, Any]]:
@@ -287,8 +568,10 @@ def sync_breadth_history(
     *,
     full: bool = False,
     progress_callback: Any | None = None,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     global _CACHE_DATA, _CACHE_AT, _CACHE_SIGNATURE
+    cfg = config or load_config()
     gids = _discover_sheet_gids()
     existing_meta = storage.get_breadth_sheet_meta()
     last_date_by_gid = {
@@ -301,7 +584,7 @@ def sync_breadth_history(
     metas: list[dict[str, Any]] = []
     kept_rows = 0
     for i, gid in enumerate(gids, start=1):
-        group_row, header_row, data_rows = _fetch_gid_rows(gid)
+        group_row, header_row, data_rows = _fetch_gid_rows(gid, cfg)
         sheet_name = f"gid_{gid}"
         rows = _normalize_gid_rows(gid, sheet_name, data_rows)
         if not rows:
@@ -344,7 +627,12 @@ def sync_breadth_history(
     _CACHE_DATA = None
     _CACHE_AT = 0.0
     _CACHE_SIGNATURE = ""
-    validation = validate_breadth_against_source(storage)
+    validation: dict[str, Any] = {"ok": True, "skipped": True}
+    if cfg.get("validate_after_sync", False):
+        try:
+            validation = validate_breadth_against_source(storage, config=cfg)
+        except Exception as exc:  # noqa: BLE001
+            validation = {"ok": False, "skipped": False, "warning": str(exc)}
     return {
         "mode": "full" if full else "incremental",
         "sheet_count": len(gids),
@@ -356,15 +644,23 @@ def sync_breadth_history(
     }
 
 
-def fetch_source_breadth_rows(gid: str = PRIMARY_MARKET_MONITOR_GID) -> list[dict[str, Any]]:
+def fetch_source_breadth_rows(
+    gid: str = PRIMARY_MARKET_MONITOR_GID,
+    *,
+    config: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """从 Google Sheet 拉取并规范化 Market Monitor 行（用于校验）。"""
-    _, _, data_rows = _fetch_gid_rows(gid)
+    _, _, data_rows = _fetch_gid_rows(gid, config)
     return _normalize_gid_rows(gid, f"gid_{gid}", data_rows)
 
 
-def validate_breadth_against_source(storage: Storage) -> dict[str, Any]:
+def validate_breadth_against_source(
+    storage: Storage,
+    *,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """逐日逐列对比本地 breadth_daily 与 Sheet 源数据。"""
-    source_rows = {r["trade_date"]: r for r in fetch_source_breadth_rows()}
+    source_rows = {r["trade_date"]: r for r in fetch_source_breadth_rows(config=config)}
     local_rows = {r["trade_date"]: r for r in storage.get_breadth_daily(limit=10000)}
     mismatches: list[dict[str, Any]] = []
     missing_local: list[str] = []
@@ -468,26 +764,29 @@ def load_breadth_data(
     storage: Storage,
     force_refresh: bool = False,
     limit: int = 180,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     global _CACHE_DATA, _CACHE_AT, _CACHE_SIGNATURE
+    cfg = config or load_config()
     now = time.time()
     if force_refresh:
-        sync_breadth_history(storage, full=False)
+        sync_breadth_history(storage, full=False, config=cfg)
     current_signature = storage.get_breadth_cache_signature()
-    if (
-        not force_refresh
-        and _CACHE_DATA
-        and _CACHE_SIGNATURE == current_signature
-        and (now - _CACHE_AT) < _CACHE_TTL_SECONDS
-    ):
-        payload = dict(_CACHE_DATA)
-        payload["rows"] = payload["rows"][:limit]
-        payload["limit"] = limit
-        return payload
+    with _CACHE_LOCK:
+        if (
+            not force_refresh
+            and _CACHE_DATA
+            and _CACHE_SIGNATURE == current_signature
+            and (now - _CACHE_AT) < _CACHE_TTL_SECONDS
+        ):
+            payload = dict(_CACHE_DATA)
+            payload["rows"] = payload["rows"][:limit]
+            payload["limit"] = limit
+            return payload
 
     rows = storage.get_breadth_daily(limit=6000)
     if not rows:
-        sync_breadth_history(storage, full=True)
+        sync_breadth_history(storage, full=True, config=cfg)
         rows = storage.get_breadth_daily(limit=6000)
     if not rows:
         raise ValueError("市场宽度数据为空，请先同步")
@@ -660,9 +959,10 @@ def load_breadth_data(
             "overview_url": "https://stockbee.blogspot.com/p/mm.html",
         },
     }
-    _CACHE_DATA = payload
-    _CACHE_AT = now
-    _CACHE_SIGNATURE = current_signature
+    with _CACHE_LOCK:
+        _CACHE_DATA = payload
+        _CACHE_AT = now
+        _CACHE_SIGNATURE = current_signature
     slim = dict(payload)
     slim["rows"] = payload["rows"][:limit]
     slim["limit"] = limit

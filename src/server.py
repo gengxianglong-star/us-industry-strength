@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -23,7 +22,6 @@ from src.config_models import ConfigUpdate
 from src.breadth_data import (
     DEFAULT_THRESHOLDS,
     load_breadth_data,
-    sync_breadth_history,
     validate_breadth_thresholds,
 )
 from src.rescore import rescore_snapshot
@@ -34,6 +32,7 @@ from src.services.snapshots import (
 )
 from src.stock_rs import rebuild_stock_watchlist_for_snapshot
 from src.stock_picks import fetch_and_store_stock_picks
+from src.services.breadth_jobs import BreadthSyncService
 from src.services.rs_jobs import RsJobService
 from src.storage import Storage
 
@@ -48,54 +47,10 @@ storage = Storage(db_path(config))
 @app.on_event("startup")
 def _ensure_database_schema() -> None:
     storage._init_db()
+
+
 RS_JOB_SERVICE = RsJobService()
-BREADTH_SYNC_STATE: dict[str, Any] = {
-    "status": "idle",
-    "mode": "incremental",
-    "processed": 0,
-    "total": 0,
-    "started_at": None,
-    "updated_at": None,
-}
-BREADTH_SYNC_LOCK = threading.Lock()
-
-
-def _run_breadth_sync(full: bool) -> None:
-    with BREADTH_SYNC_LOCK:
-        started_at = float(BREADTH_SYNC_STATE.get("started_at") or time.time())
-
-    def _on_progress(processed: int, total: int, gid: str) -> None:
-        with BREADTH_SYNC_LOCK:
-            BREADTH_SYNC_STATE["processed"] = processed
-            BREADTH_SYNC_STATE["total"] = total
-            BREADTH_SYNC_STATE["updated_at"] = time.time()
-            BREADTH_SYNC_STATE["message"] = f"processing gid={gid}"
-
-    try:
-        result = sync_breadth_history(storage, full=full, progress_callback=_on_progress)
-        ended_at = time.time()
-        with BREADTH_SYNC_LOCK:
-            BREADTH_SYNC_STATE.update(
-                {
-                    "status": "done",
-                    "result": result,
-                    "updated_at": ended_at,
-                    "elapsed_seconds": round(ended_at - started_at, 2),
-                    "message": "done",
-                }
-            )
-    except Exception as exc:  # pragma: no cover
-        ended_at = time.time()
-        with BREADTH_SYNC_LOCK:
-            BREADTH_SYNC_STATE.update(
-                {
-                    "status": "error",
-                    "error": str(exc),
-                    "updated_at": ended_at,
-                    "elapsed_seconds": round(ended_at - started_at, 2),
-                    "message": "error",
-                }
-            )
+BREADTH_SYNC_SERVICE = BreadthSyncService()
 
 
 def _reload_config() -> None:
@@ -120,7 +75,7 @@ def get_breadth_data(
     refresh: bool = Query(default=False),
     limit: int = Query(default=180, ge=10, le=10000),
 ) -> dict[str, Any]:
-    return load_breadth_data(storage, force_refresh=refresh, limit=limit)
+    return load_breadth_data(storage, force_refresh=refresh, limit=limit, config=config)
 
 
 @app.post("/api/breadth/sync")
@@ -128,33 +83,62 @@ def sync_breadth(
     full: bool = Query(default=False),
     async_mode: bool = Query(default=True),
 ) -> dict[str, Any]:
-    if async_mode:
-        with BREADTH_SYNC_LOCK:
-            if BREADTH_SYNC_STATE.get("status") == "running":
-                return {"status": "running", **BREADTH_SYNC_STATE}
-            started_at = time.time()
-            mode = "full" if full else "incremental"
-            BREADTH_SYNC_STATE.update(
-                {
-                    "status": "running",
-                    "mode": mode,
-                    "processed": 0,
-                    "total": 0,
-                    "started_at": started_at,
-                    "updated_at": started_at,
-                    "message": "starting",
-                }
-            )
-        threading.Thread(target=_run_breadth_sync, args=(full,), daemon=True).start()
-        return {"status": "started", "mode": "full" if full else "incremental"}
-    result = sync_breadth_history(storage, full=full)
-    return {"status": "ok", "full": full, **result}
+    try:
+        return BREADTH_SYNC_SERVICE.start_sync(storage, full=full, async_mode=async_mode)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/breadth/ping")
+def breadth_ping() -> dict[str, Any]:
+    """Instant check: server up + proxy config (no Google download)."""
+    from src.breadth_data import _breadth_settings
+
+    settings = _breadth_settings(config)
+    return {
+        "status": "ok",
+        "proxy_url": settings.get("proxy_url") or "",
+        "proxy_source": settings.get("proxy_source") or "none",
+        "curl_only": settings.get("curl_only"),
+        "prefer_curl": settings.get("prefer_curl"),
+    }
+
+
+@app.get("/api/breadth/fetch-test")
+def breadth_fetch_test(quick: bool = Query(default=False)) -> dict[str, Any]:
+    """Test Google Sheet download (curl + system proxy). ?quick=true skips download."""
+    from src.breadth_data import (
+        PRIMARY_MARKET_MONITOR_GID,
+        _breadth_settings,
+        _fetch_gid_rows_remote,
+    )
+
+    settings = _breadth_settings(config)
+    if quick:
+        return {
+            "ok": True,
+            "quick": True,
+            "message": "服务正常；未下载 Google Sheet。去掉 ?quick=true 可测完整拉取。",
+            "proxy_url": settings.get("proxy_url") or "",
+            "proxy_source": settings.get("proxy_source") or "none",
+            "curl_only": settings.get("curl_only"),
+        }
+    try:
+        _, _, data_rows = _fetch_gid_rows_remote(PRIMARY_MARKET_MONITOR_GID, settings)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "row_count": len(data_rows),
+        "proxy_url": settings.get("proxy_url") or "",
+        "proxy_source": settings.get("proxy_source") or "none",
+        "curl_only": settings.get("curl_only"),
+    }
 
 
 @app.get("/api/breadth/sync-progress")
 def breadth_sync_progress() -> dict[str, Any]:
-    with BREADTH_SYNC_LOCK:
-        state = dict(BREADTH_SYNC_STATE)
+    state = BREADTH_SYNC_SERVICE.get_progress_state(storage)
     processed = int(state.get("processed") or 0)
     total = int(state.get("total") or 0)
     progress_ratio = round((processed / total), 4) if total > 0 else 0.0
@@ -252,14 +236,16 @@ def recompute_latest_snapshot(
         raise HTTPException(status_code=404, detail="尚无快照可重新计算")
 
     try:
-        count = rescore_snapshot(storage, date_key, config)
+        result = rescore_snapshot(storage, date_key, config, rebuild_watchlist=True)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return {
         "status": "ok",
         "snapshot_date": date_key,
-        "industry_count": count,
+        "industry_count": result["industry_count"],
+        "watchlist_rebuilt": result.get("watchlist_count") is not None,
+        "watchlist_count": result.get("watchlist_count"),
     }
 
 
@@ -557,3 +543,8 @@ def strong_page() -> FileResponse:
 @app.get("/breadth")
 def breadth_page() -> FileResponse:
     return FileResponse(WEB_DIR / "breadth.html")
+
+
+@app.get("/breadth/network-test")
+def breadth_network_test_page() -> FileResponse:
+    return FileResponse(WEB_DIR / "breadth_network_test.html")

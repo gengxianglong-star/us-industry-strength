@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -170,7 +171,24 @@ def _parse_tickers(html: str) -> list[str]:
     return unique
 
 
-def fetch_industry_tickers(industry_key: str, config: dict[str, Any]) -> dict[str, Any]:
+def prepare_finviz_session(
+    config: dict[str, Any],
+) -> tuple[requests.Session | None, threading.Lock]:
+    user_agent, _, cookie_file = _scraper_settings(config)
+    try:
+        return _prepare_session(user_agent, cookie_file), threading.Lock()
+    except (requests.RequestException, OSError):
+        return None, threading.Lock()
+
+
+def fetch_industry_tickers(
+    industry_key: str,
+    config: dict[str, Any],
+    *,
+    session: requests.Session | None = None,
+    session_lock: threading.Lock | None = None,
+    skip_warmup: bool = False,
+) -> dict[str, Any]:
     user_agent, delay, cookie_file = _scraper_settings(config)
     per_page = 20
 
@@ -178,12 +196,20 @@ def fetch_industry_tickers(industry_key: str, config: dict[str, Any]) -> dict[st
     all_tickers: list[str] = []
     start = 1
     total = 0
-    session: requests.Session | None = None
-    try:
-        session = _prepare_session(user_agent, cookie_file)
-    except (requests.RequestException, OSError):
-        # 预热失败时不要直接终止，让后续 _fetch_html 走 curl 回退链路。
-        session = None
+    owns_session = False
+    active_session = session
+    if active_session is None and not skip_warmup:
+        try:
+            active_session = _prepare_session(user_agent, cookie_file)
+            owns_session = True
+        except (requests.RequestException, OSError):
+            active_session = None
+
+    def _fetch_page(url: str) -> str:
+        if active_session is not None and session_lock is not None:
+            with session_lock:
+                return _fetch_html(url, config, session=active_session)
+        return _fetch_html(url, config, session=active_session)
 
     request_retries = int(config.get("scraper", {}).get("request_retries", 3))
     request_retries = max(1, min(6, request_retries))
@@ -194,17 +220,18 @@ def fetch_industry_tickers(industry_key: str, config: dict[str, Any]) -> dict[st
             last_error: Exception | None = None
             for attempt in range(request_retries):
                 try:
-                    html = _fetch_html(url, config, session=session)
+                    html = _fetch_page(url)
                     last_error = None
                     break
                 except Exception as exc:  # noqa: BLE001
                     last_error = exc
-                    if session is not None:
+                    if owns_session and active_session is not None:
                         try:
-                            session.close()
+                            active_session.close()
                         except Exception:
                             pass
-                        session = None
+                        active_session = None
+                        owns_session = False
                     time.sleep(min(5.0, delay * (attempt + 1)))
             if last_error is not None:
                 raise RuntimeError(f"抓取 Finviz screener 失败（重试{request_retries}次）: {last_error}")
@@ -230,8 +257,8 @@ def fetch_industry_tickers(industry_key: str, config: dict[str, Any]) -> dict[st
             start += per_page
             time.sleep(delay)
     finally:
-        if session is not None:
-            session.close()
+        if owns_session and active_session is not None:
+            active_session.close()
 
     return {
         "industry_key": industry_key,

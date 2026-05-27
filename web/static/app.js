@@ -7,31 +7,6 @@ let activeRsJob = null;
 
 const STRONG_MORNING_SYNC_HOUR_BJ = 6;
 
-function showToast(message, isError = false) {
-  let el = document.getElementById("globalToast");
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "globalToast";
-    el.style.position = "fixed";
-    el.style.right = "18px";
-    el.style.bottom = "18px";
-    el.style.maxWidth = "460px";
-    el.style.padding = "10px 14px";
-    el.style.borderRadius = "8px";
-    el.style.fontSize = "13px";
-    el.style.zIndex = "9999";
-    el.style.boxShadow = "0 6px 20px rgba(0,0,0,0.35)";
-    document.body.appendChild(el);
-  }
-  el.textContent = message;
-  el.style.background = isError ? "rgba(153,27,27,0.95)" : "rgba(30,58,138,0.95)";
-  el.style.color = "#fff";
-  clearTimeout(el._timer);
-  el._timer = setTimeout(() => {
-    if (el) el.textContent = "";
-  }, 4200);
-}
-
 const rankColors = {
   rank_w: "#60a5fa",
   rank_m: "#34d399",
@@ -73,22 +48,6 @@ const thresholdPresets = {
     pullback_week_rank_min: 35,
   },
 };
-
-async function fetchJson(url, options = {}) {
-  const res = await fetch(url, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const detail = err.detail;
-    const message = Array.isArray(detail)
-      ? detail.map((d) => d.msg).join("; ")
-      : detail || res.statusText;
-    throw new Error(message);
-  }
-  return res.json();
-}
 
 function pct(v) {
   const sign = v > 0 ? "+" : "";
@@ -483,25 +442,6 @@ async function loadSnapshot(date) {
   renderCoveragePanel(currentSnapshot, currentRsSnapshot);
   populateIndustrySelect(currentSnapshot);
   await loadHistoryChart();
-}
-
-function bjDateKey() {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
-}
-
-function bjHourNow() {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Shanghai",
-    hour: "2-digit",
-    hour12: false,
-  }).formatToParts(new Date());
-  const hourPart = parts.find((p) => p.type === "hour");
-  return Number(hourPart?.value || 0);
 }
 
 async function autoMorningRefreshIfNeeded() {

@@ -3,35 +3,11 @@ let chartByCanvas = {};
 let currentChartDays = 365;
 let latestPayload = null;
 let syncPollingTimer = null;
+let syncAwaiting = false;
 let ratioBg = null;
 let activeCockpitKey = null;
 let cockpitClickBound = false;
 const BREADTH_MORNING_SYNC_HOUR_BJ = 6;
-
-function showToast(message, isError = false) {
-  let el = document.getElementById("globalToast");
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "globalToast";
-    el.style.position = "fixed";
-    el.style.right = "18px";
-    el.style.bottom = "18px";
-    el.style.maxWidth = "460px";
-    el.style.padding = "10px 14px";
-    el.style.borderRadius = "8px";
-    el.style.fontSize = "13px";
-    el.style.zIndex = "9999";
-    el.style.boxShadow = "0 6px 20px rgba(0,0,0,0.35)";
-    document.body.appendChild(el);
-  }
-  el.textContent = message;
-  el.style.background = isError ? "rgba(153,27,27,0.95)" : "rgba(30,58,138,0.95)";
-  el.style.color = "#fff";
-  clearTimeout(el._timer);
-  el._timer = setTimeout(() => {
-    if (el) el.textContent = "";
-  }, 4200);
-}
 
 /** 驾驶舱卡片 → 图表 canvas 与要高亮的序列 */
 const COCKPIT_CHART_LINK = {
@@ -47,18 +23,6 @@ const COCKPIT_CHART_LINK = {
 function toNum(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
-}
-
-async function fetchJson(url, options = {}) {
-  const res = await fetch(url, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || res.statusText);
-  }
-  return res.json();
 }
 
 function heatClass(index, row) {
@@ -639,7 +603,7 @@ async function saveBreadthConfig() {
 
 async function pollSyncProgress() {
   const txt = document.getElementById("syncProgressText");
-  if (!txt) return;
+  if (!txt) return !syncAwaiting;
   const p = await fetchJson("/api/breadth/sync-progress");
   if (p.status === "running") {
     const done = Number(p.processed || 0);
@@ -650,11 +614,18 @@ async function pollSyncProgress() {
   }
   if (p.status === "done") {
     txt.textContent = `同步完成（${p.mode || ""}，${p.elapsed_seconds || 0}s）`;
+    syncAwaiting = false;
     return true;
   }
   if (p.status === "error") {
     txt.textContent = `同步失败：${p.error || "unknown"}`;
+    syncAwaiting = false;
+    showToast(p.error || "市场宽度同步失败", true);
     return true;
+  }
+  if (syncAwaiting) {
+    txt.textContent = "等待同步启动…";
+    return false;
   }
   txt.textContent = "";
   return true;
@@ -669,18 +640,68 @@ function stopSyncPolling() {
 
 function startSyncPolling(onDone) {
   stopSyncPolling();
+  syncAwaiting = true;
+  pollSyncProgress().catch(() => {});
   syncPollingTimer = setInterval(async () => {
     try {
       const done = await pollSyncProgress();
       if (done) {
         stopSyncPolling();
-        if (onDone) onDone();
+        syncAwaiting = false;
+        if (onDone) await onDone();
       }
     } catch (err) {
       stopSyncPolling();
+      syncAwaiting = false;
+      showToast(err.message || "同步进度查询失败", true);
       console.error(err);
     }
   }, 1200);
+}
+
+function setSyncButtonsBusy(busy, label) {
+  const refreshBtn = document.getElementById("refreshBreadthBtn");
+  const syncBtn = document.getElementById("syncBreadthBtn");
+  if (refreshBtn) {
+    refreshBtn.disabled = busy;
+    if (label && busy) refreshBtn.textContent = label;
+    else if (!busy) refreshBtn.textContent = "增量同步今日数据";
+  }
+  if (syncBtn) {
+    syncBtn.disabled = busy;
+  }
+}
+
+async function runBreadthSync(full, { auto = false } = {}) {
+  const progress = document.getElementById("syncProgressText");
+  setSyncButtonsBusy(true, full ? "全量同步中…" : "增量同步中…");
+  if (progress) progress.textContent = "正在启动同步…";
+  try {
+    const kick = await fetchJson(
+      `/api/breadth/sync?full=${full ? "true" : "false"}&async_mode=true`,
+      { method: "POST" },
+    );
+    if (kick.status === "error") {
+      throw new Error(kick.error || "同步启动失败");
+    }
+    if (kick.blocked) {
+      if (progress) progress.textContent = "检测到进行中的同步，正在接管进度…";
+    } else if (kick.status === "started") {
+      if (progress) progress.textContent = "同步已启动…";
+    }
+    await new Promise((resolve, reject) => {
+      startSyncPolling(async () => {
+        try {
+          await loadBreadth(false);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+  } finally {
+    setSyncButtonsBusy(false);
+  }
 }
 
 function destroyCharts() {
@@ -843,8 +864,11 @@ function renderCharts(payload) {
 
 async function loadBreadth(refresh = false) {
   const btn = document.getElementById("refreshBreadthBtn");
-  btn.disabled = true;
-  btn.textContent = "刷新中…";
+  const wasDisabled = btn?.disabled;
+  if (btn && !wasDisabled) {
+    btn.disabled = true;
+    btn.textContent = "加载中…";
+  }
   try {
     const payload = await fetchJson(`/api/breadth?limit=8000${refresh ? "&refresh=true" : ""}`);
     latestPayload = { ...payload, _all_rows: payload.rows || [] };
@@ -861,42 +885,31 @@ async function loadBreadth(refresh = false) {
   } catch (err) {
     showToast(err.message, true);
   } finally {
-    btn.disabled = false;
-    btn.textContent = "增量同步今日数据";
+    if (btn && !wasDisabled && !syncAwaiting) {
+      btn.disabled = false;
+      btn.textContent = "增量同步今日数据";
+    }
   }
-}
-
-function bjDateKey() {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
-}
-
-function bjHourNow() {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Shanghai",
-    hour: "2-digit",
-    hour12: false,
-  }).formatToParts(new Date());
-  const hourPart = parts.find((p) => p.type === "hour");
-  return Number(hourPart?.value || 0);
 }
 
 async function autoMorningBreadthRefresh() {
   const stampKey = `breadth:auto-refresh:${bjDateKey()}`;
-  if (bjHourNow() >= BREADTH_MORNING_SYNC_HOUR_BJ && localStorage.getItem(stampKey) !== "done") {
-    await loadBreadth(true);
-    localStorage.setItem(stampKey, "done");
-    return;
+  const shouldSync =
+    bjHourNow() >= BREADTH_MORNING_SYNC_HOUR_BJ && localStorage.getItem(stampKey) !== "done";
+  if (shouldSync) {
+    try {
+      await runBreadthSync(false, { auto: true });
+      localStorage.setItem(stampKey, "done");
+      return;
+    } catch (err) {
+      showToast(`自动同步失败，已加载本地缓存：${err.message}`, true);
+    }
   }
   await loadBreadth(false);
 }
 
 async function startBreadthSync(full) {
-  await fetchJson(`/api/breadth/sync?full=${full ? "true" : "false"}&async_mode=true`, { method: "POST" });
+  await runBreadthSync(full);
 }
 
 function init() {
@@ -911,27 +924,10 @@ function init() {
   widthRange.addEventListener("input", (e) => setChartWidth(e.target.value));
 
   document.getElementById("refreshBreadthBtn").addEventListener("click", () => {
-    startBreadthSync(false)
-      .then(() => {
-        startSyncPolling(async () => {
-          await loadBreadth(false);
-        });
-      })
-      .catch((err) => showToast(err.message, true));
+    runBreadthSync(false).catch((err) => showToast(err.message, true));
   });
-  document.getElementById("syncBreadthBtn").addEventListener("click", async () => {
-    const btn = document.getElementById("syncBreadthBtn");
-    btn.disabled = true;
-    btn.textContent = "同步中…";
-    try {
-      await startBreadthSync(true);
-      startSyncPolling(async () => {
-        await loadBreadth(false);
-      });
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "全量同步历史";
-    }
+  document.getElementById("syncBreadthBtn").addEventListener("click", () => {
+    runBreadthSync(true).catch((err) => showToast(err.message, true));
   });
   document.getElementById("saveBreadthConfigBtn").addEventListener("click", () => {
     saveBreadthConfig().catch((err) => showToast(err.message, true));
@@ -948,9 +944,7 @@ function init() {
     });
   });
   pollSyncProgress().catch(() => {});
-  autoMorningBreadthRefresh()
-    .then(() => {})
-    .catch((err) => showToast(err.message, true));
+  autoMorningBreadthRefresh().catch((err) => showToast(err.message, true));
 }
 
 init();

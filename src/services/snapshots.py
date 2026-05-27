@@ -83,10 +83,14 @@ def build_snapshot_response(
             row["stock_picks"] = pick["tickers"]
             row["stock_screener_url"] = pick.get("screener_url")
             row["stock_picks_error"] = pick.get("error")
+            row["stock_picks_stale_fallback"] = str(pick.get("error") or "").startswith(
+                "沿用缓存("
+            )
         else:
             row["stock_picks"] = []
             row["stock_screener_url"] = None
             row["stock_picks_error"] = None
+            row["stock_picks_stale_fallback"] = False
 
     rs_count = storage.count_stock_rs(snapshot_date)
     rs_watchlist_count = storage.count_stock_watchlist(snapshot_date)

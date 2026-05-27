@@ -467,6 +467,123 @@ def load_us_universe_from_nasdaq() -> list[dict[str, Any]]:
     return sorted(symbols.values(), key=lambda x: x["symbol"])
 
 
+def load_us_universe_with_cache(storage: Storage, config: dict[str, Any]) -> list[dict[str, Any]]:
+    rs_cfg = config.get("stock_rs", {})
+    cache_hours = int(rs_cfg.get("universe_cache_hours", 24))
+    universe_cap = int(rs_cfg.get("universe_cap", 0))
+
+    freshness = storage.get_stock_universe_freshness()
+    count = storage.count_stock_universe()
+    updated_at_raw = freshness.get("updated_at") if freshness else None
+    if count > 500 and updated_at_raw:
+        try:
+            updated_at = datetime.fromisoformat(str(updated_at_raw))
+            age_hours = (datetime.now(timezone.utc) - updated_at).total_seconds() / 3600.0
+            if age_hours <= cache_hours:
+                rows = storage.list_stock_universe()
+                return rows[:universe_cap] if universe_cap > 0 else rows
+        except ValueError:
+            pass
+
+    universe = load_us_universe_from_nasdaq()
+    if universe_cap > 0:
+        universe = universe[:universe_cap]
+    storage.upsert_stock_universe(universe, source="nasdaqtrader")
+    return universe
+
+
+def _symbol_payload_from_bars(
+    symbol: str,
+    bars: list[dict[str, Any]],
+    *,
+    min_price_rows: int,
+    source: str,
+) -> dict[str, Any]:
+    if not bars:
+        return {"symbol": symbol, "status": "no_bars", "reason": "no_bars"}
+    if len(bars) < min_price_rows:
+        return {
+            "symbol": symbol,
+            "status": "insufficient_history",
+            "reason": "insufficient_history",
+            "bars": bars,
+        }
+    perf = _calc_performance(bars)
+    if not perf:
+        return {"symbol": symbol, "status": "perf_invalid", "reason": "perf_invalid"}
+    return {
+        "symbol": symbol,
+        "status": "ok",
+        "source": source,
+        "bars": bars[-320:],
+        "perf": perf,
+    }
+
+
+def _rs_meta_payload(
+    *,
+    universe_count: int,
+    computed_count: int,
+    no_bars_count: int,
+    insufficient_history_count: int,
+    perf_invalid_count: int,
+    coverage_ratio: float,
+    new_stock_result: dict[str, Any] | None = None,
+    worker_errors: list[str] | None = None,
+) -> dict[str, Any]:
+    new_stock_result = new_stock_result or {}
+    return {
+        "universe_count": universe_count,
+        "computed_count": computed_count,
+        "no_bars_count": no_bars_count,
+        "insufficient_history_count": insufficient_history_count,
+        "perf_invalid_count": perf_invalid_count,
+        "coverage_ratio": coverage_ratio,
+        "new_stock_m_count": int(new_stock_result.get("new_stock_m_count", 0) or 0),
+        "new_stock_q_count": int(new_stock_result.get("new_stock_q_count", 0) or 0),
+        "new_stock_h_count": int(new_stock_result.get("new_stock_h_count", 0) or 0),
+        "new_stock_3q_count": int(new_stock_result.get("new_stock_3q_count", 0) or 0),
+        "new_stock_leaderboard_count": int(
+            new_stock_result.get("new_stock_leaderboard_count", 0) or 0
+        ),
+        "new_stock_watchlist_added": int(
+            new_stock_result.get("new_stock_watchlist_added", 0) or 0
+        ),
+        "worker_error_count": len(worker_errors or []),
+        "worker_error_sample": (worker_errors or [])[:3],
+    }
+
+
+def _apply_symbol_payload(
+    payload: dict[str, Any],
+    *,
+    storage: Storage,
+    snapshot_date: str,
+    perf_map: dict[str, dict[str, Any]],
+    issues_map: dict[str, str],
+    insufficient_bars: dict[str, list[dict[str, Any]]],
+    save_price_history: bool,
+) -> None:
+    status = payload.get("status")
+    symbol = str(payload.get("symbol") or "")
+    if not symbol:
+        return
+    if status == "ok":
+        if save_price_history:
+            storage.replace_stock_price_history(
+                symbol,
+                payload["bars"],
+                source=payload.get("source", "yahoo"),
+            )
+        perf_map[symbol] = {"symbol": symbol, **payload["perf"]}
+        issues_map.pop(symbol, None)
+        return
+    reason = str(payload.get("reason") or "no_bars")
+    issues_map[symbol] = reason
+    if reason == "insufficient_history" and payload.get("bars"):
+        insufficient_bars[symbol] = payload["bars"]
+
+
 def _stooq_symbol_candidates(symbol: str) -> list[str]:
     s = symbol.lower()
     candidates = [s]
@@ -677,13 +794,11 @@ def compute_and_store_stock_rs(
     cross_top_percent = max(0.01, min(1.0, cross_top_percent))
     tier_a = float(rs_cfg.get("tier_a_score", 0.8))
     tier_b = float(rs_cfg.get("tier_b_score", 0.65))
-    universe_cap = int(rs_cfg.get("universe_cap", 0))
     prefer_stooq = bool(rs_cfg.get("prefer_stooq", False))
+    yahoo_batch_size = int(rs_cfg.get("yahoo_batch_size", 100))
+    yahoo_batch_size = max(20, min(200, yahoo_batch_size))
 
-    universe = load_us_universe_from_nasdaq()
-    if universe_cap > 0:
-        universe = universe[:universe_cap]
-    storage.upsert_stock_universe(universe, source="nasdaqtrader")
+    universe = load_us_universe_with_cache(storage, config)
     symbols = [row["symbol"] for row in universe]
     symbol_set = set(symbols)
 
@@ -725,68 +840,81 @@ def compute_and_store_stock_rs(
     if progress_callback:
         progress_callback(0, total_symbols)
 
-    def _fetch_one(symbol: str) -> dict[str, Any]:
+    def _fetch_one_stooq(symbol: str) -> dict[str, Any]:
         with requests.Session() as session:
             session.headers.update({"User-Agent": user_agent})
-            bars: list[dict[str, Any]] = []
-            source = "yahoo"
-            if prefer_stooq:
-                bars = fetch_stooq_daily_bars(symbol, session, timeout=request_timeout)
-                source = "stooq"
+            bars = fetch_stooq_daily_bars(symbol, session, timeout=request_timeout)
+            source = "stooq"
             if not bars:
                 bars = fetch_yahoo_daily_bars(symbol, session, timeout=request_timeout)
                 source = "yahoo"
-        if not bars:
-            return {"symbol": symbol, "status": "no_bars", "reason": "no_bars"}
-        if len(bars) < min_price_rows:
-            return {
-                "symbol": symbol,
-                "status": "insufficient_history",
-                "reason": "insufficient_history",
-                "bars": bars,
-            }
-        perf = _calc_performance(bars)
-        if not perf:
-            return {"symbol": symbol, "status": "perf_invalid", "reason": "perf_invalid"}
-        return {
-            "symbol": symbol,
-            "status": "ok",
-            "source": source,
-            "bars": bars[-320:],
-            "perf": perf,
-        }
+        return _symbol_payload_from_bars(
+            symbol,
+            bars,
+            min_price_rows=min_price_rows,
+            source=source,
+        )
 
     if target_symbols:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(_fetch_one, symbol) for symbol in target_symbols]
-            for future in as_completed(futures):
-                try:
-                    payload = future.result()
-                except Exception as exc:  # noqa: BLE001
-                    if len(worker_errors) < 20:
-                        worker_errors.append(str(exc))
-                    payload = {"status": "no_bars", "reason": "no_bars", "symbol": ""}
-
-                status = payload.get("status")
-                symbol = str(payload.get("symbol") or "")
-                if status == "ok" and symbol:
-                    if save_price_history:
-                        storage.replace_stock_price_history(
+        if prefer_stooq:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {
+                    executor.submit(_fetch_one_stooq, symbol): symbol for symbol in target_symbols
+                }
+                for future in as_completed(future_map):
+                    symbol = future_map[future]
+                    try:
+                        payload = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        if len(worker_errors) < 20:
+                            worker_errors.append(f"{symbol}: {exc}")
+                        payload = {"symbol": symbol, "status": "no_bars", "reason": "no_bars"}
+                    _apply_symbol_payload(
+                        payload,
+                        storage=storage,
+                        snapshot_date=snapshot_date,
+                        perf_map=perf_map,
+                        issues_map=issues_map,
+                        insufficient_bars=insufficient_bars,
+                        save_price_history=save_price_history,
+                    )
+                    processed += 1
+                    if progress_callback and (processed % 25 == 0 or processed == total_symbols):
+                        progress_callback(processed, total_symbols)
+        else:
+            session = requests.Session()
+            session.headers.update({"User-Agent": user_agent})
+            try:
+                for batch_start in range(0, len(target_symbols), yahoo_batch_size):
+                    batch = target_symbols[batch_start : batch_start + yahoo_batch_size]
+                    bars_map = fetch_yahoo_batch_daily_bars(
+                        batch,
+                        session,
+                        timeout=request_timeout,
+                    )
+                    for symbol in batch:
+                        payload = _symbol_payload_from_bars(
                             symbol,
-                            payload["bars"],
-                            source=payload.get("source", "yahoo"),
+                            bars_map.get(symbol, []),
+                            min_price_rows=min_price_rows,
+                            source="yahoo",
                         )
-                    perf_map[symbol] = {"symbol": symbol, **payload["perf"]}
-                    issues_map.pop(symbol, None)
-                elif symbol:
-                    reason = str(payload.get("reason") or "no_bars")
-                    issues_map[symbol] = reason
-                    if reason == "insufficient_history" and payload.get("bars"):
-                        insufficient_bars[symbol] = payload["bars"]
-
-                processed += 1
-                if progress_callback and (processed % 25 == 0 or processed == total_symbols):
-                    progress_callback(processed, total_symbols)
+                        _apply_symbol_payload(
+                            payload,
+                            storage=storage,
+                            snapshot_date=snapshot_date,
+                            perf_map=perf_map,
+                            issues_map=issues_map,
+                            insufficient_bars=insufficient_bars,
+                            save_price_history=save_price_history,
+                        )
+                    processed += len(batch)
+                    if progress_callback and (
+                        processed % 25 == 0 or processed == total_symbols
+                    ):
+                        progress_callback(processed, total_symbols)
+            finally:
+                session.close()
     elif progress_callback:
         progress_callback(0, 0)
 
@@ -836,20 +964,19 @@ def compute_and_store_stock_rs(
         storage.save_stock_watchlist(snapshot_date, watch_rows)
         storage.save_stock_rs_meta(
             snapshot_date,
-            {
-                "universe_count": len(universe),
-                "computed_count": 0,
-                "no_bars_count": no_bars_count,
-                "insufficient_history_count": insufficient_history_count,
-                "perf_invalid_count": perf_invalid_count,
-                "coverage_ratio": coverage_ratio,
-                "new_stock_m_count": new_stock_result["new_stock_m_count"],
-                "new_stock_q_count": new_stock_result["new_stock_q_count"],
-                "new_stock_h_count": new_stock_result["new_stock_h_count"],
-                "new_stock_3q_count": new_stock_result["new_stock_3q_count"],
-                "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
-                "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
-            },
+            _rs_meta_payload(
+                universe_count=len(universe),
+                computed_count=0,
+                no_bars_count=no_bars_count,
+                insufficient_history_count=insufficient_history_count,
+                perf_invalid_count=perf_invalid_count,
+                coverage_ratio=coverage_ratio,
+                new_stock_result={
+                    **new_stock_result,
+                    "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
+                },
+                worker_errors=worker_errors,
+            ),
         )
         return {
             "snapshot_date": snapshot_date,
@@ -914,20 +1041,19 @@ def compute_and_store_stock_rs(
     storage.save_stock_watchlist(snapshot_date, watch_rows)
     storage.save_stock_rs_meta(
         snapshot_date,
-        {
-            "universe_count": len(universe),
-            "computed_count": total,
-            "no_bars_count": no_bars_count,
-            "insufficient_history_count": insufficient_history_count,
-            "perf_invalid_count": perf_invalid_count,
-            "coverage_ratio": coverage_ratio,
-            "new_stock_m_count": new_stock_result["new_stock_m_count"],
-            "new_stock_q_count": new_stock_result["new_stock_q_count"],
-            "new_stock_h_count": new_stock_result["new_stock_h_count"],
-            "new_stock_3q_count": new_stock_result["new_stock_3q_count"],
-            "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
-            "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
-        },
+        _rs_meta_payload(
+            universe_count=len(universe),
+            computed_count=total,
+            no_bars_count=no_bars_count,
+            insufficient_history_count=insufficient_history_count,
+            perf_invalid_count=perf_invalid_count,
+            coverage_ratio=coverage_ratio,
+            new_stock_result={
+                **new_stock_result,
+                "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
+            },
+            worker_errors=worker_errors,
+        ),
     )
 
     return {
@@ -943,6 +1069,7 @@ def compute_and_store_stock_rs(
         "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
         "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
         "worker_errors": worker_errors,
+        "worker_error_count": len(worker_errors),
     }
 
 

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>市场宽度 · 网络检测</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260525-7" />
+  <style>
+    .net-test { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; }
+    .net-test pre {
+      background: #132238;
+      border: 1px solid #2a3d5f;
+      border-radius: 8px;
+      padding: 0.75rem;
+      overflow: auto;
+      font-size: 0.8rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .net-test .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 1rem 0; }
+    .net-test .status { color: #94a3b8; font-size: 0.85rem; margin-bottom: 0.5rem; }
+  </style>
+</head>
+<body>
+  <nav class="top-nav">
+    <a class="top-nav-item" href="/breadth">← 返回市场宽度</a>
+  </nav>
+  <main class="net-test panel">
+    <h1>市场宽度 · 网络检测</h1>
+    <p class="hint">用于确认本地服务与 Google Sheet 下载是否正常（不必直接打开 JSON 接口）。</p>
+    <div class="actions">
+      <button type="button" id="pingBtn">1. 快速检测（约 1 秒）</button>
+      <button type="button" id="fetchBtn">2. 完整拉取测试（约 5–15 秒）</button>
+    </div>
+    <p id="statusLine" class="status">点击上方按钮开始检测。</p>
+    <pre id="resultBox">（结果将显示在这里）</pre>
+  </main>
+  <script src="/static/shared.js?v=20260527-3"></script>
+  <script>
+    const statusLine = document.getElementById("statusLine");
+    const resultBox = document.getElementById("resultBox");
+
+    function setBusy(busy, text) {
+      document.getElementById("pingBtn").disabled = busy;
+      document.getElementById("fetchBtn").disabled = busy;
+      statusLine.textContent = text;
+    }
+
+    async function run(url, label) {
+      setBusy(true, `${label}…`);
+      resultBox.textContent = "请求中，请稍候…";
+      try {
+        const data = await fetchJson(url);
+        resultBox.textContent = JSON.stringify(data, null, 2);
+        statusLine.textContent = `${label}：成功`;
+        showToast("检测成功");
+      } catch (err) {
+        resultBox.textContent = String(err.message || err);
+        statusLine.textContent = `${label}：失败`;
+        showToast(err.message, true);
+      } finally {
+        setBusy(false, "可再次点击按钮重试。");
+      }
+    }
+
+    document.getElementById("pingBtn").addEventListener("click", () => {
+      run("/api/breadth/ping", "快速检测");
+    });
+    document.getElementById("fetchBtn").addEventListener("click", () => {
+      run("/api/breadth/fetch-test", "完整拉取");
+    });
+  </script>
+</body>
+</html>

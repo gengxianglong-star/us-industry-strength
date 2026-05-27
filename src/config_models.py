@@ -43,6 +43,8 @@ class StockRsConfig(BaseModel):
     tier_b_score: float = Field(default=0.65, ge=0, le=1)
     cross_top_percent: float = Field(default=0.1, ge=0.01, le=1.0)
     universe_cap: int = Field(default=0, ge=0, le=12000)
+    universe_cache_hours: int = Field(default=24, ge=1, le=168)
+    yahoo_batch_size: int = Field(default=100, ge=20, le=200)
     new_stock_enabled: bool = True
     max_job_runtime_seconds: int = Field(default=7200, ge=60, le=86400)
     new_stock_job_runtime_seconds: int = Field(default=3600, ge=60, le=86400)
