@@ -23,6 +23,21 @@
 
 默认会自动创建虚拟环境、安装依赖并启动 Web（`http://127.0.0.1:8080`）。
 
+### 桌面双击启动（只需做一次）
+
+- macOS
+  ```bash
+  chmod +x scripts/create-desktop-launcher.sh
+  ./scripts/create-desktop-launcher.sh
+  ```
+  执行后，桌面会生成 `US-Industry-Strength.command`，以后双击它即可启动。
+
+- Windows
+  ```bat
+  scripts\create-desktop-launcher.bat
+  ```
+  执行后，桌面会生成 `US-Industry-Strength.cmd`，以后双击它即可启动。
+
 如需先抓取当日快照再启动：
 - macOS / Linux：`./run.sh daily`（调用 `scripts/precompute_daily.py`：行业快照 + Top行业个股 + RS + 宽度）
 - Windows：`run.bat daily`
