@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>市场宽度 · 网络检测</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260525-7" />
+  <title>Market Breadth · Network Test</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260601h" />
   <style>
     .net-test { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; }
     .net-test pre {
@@ -23,51 +23,53 @@
 </head>
 <body>
   <nav class="top-nav">
-    <a class="top-nav-item" href="/breadth">← 返回市场宽度</a>
+    <a class="top-nav-item" href="/breadth">← Back to Breadth</a>
   </nav>
   <main class="net-test panel">
-    <h1>市场宽度 · 网络检测</h1>
-    <p class="hint">用于确认本地服务与 Google Sheet 下载是否正常（不必直接打开 JSON 接口）。</p>
+    <h1>Market Breadth · Network Test</h1>
+    <p class="hint">Checks local API and Google Sheet download without opening raw JSON.</p>
     <div class="actions">
-      <button type="button" id="pingBtn">1. 快速检测（约 1 秒）</button>
-      <button type="button" id="fetchBtn">2. 完整拉取测试（约 5–15 秒）</button>
+      <button type="button" id="pingBtn">1. Quick ping (~1s)</button>
+      <button type="button" id="fetchBtn">2. Full fetch test (~5–15s)</button>
     </div>
-    <p id="statusLine" class="status">点击上方按钮开始检测。</p>
-    <pre id="resultBox">（结果将显示在这里）</pre>
+    <p id="statusLine" class="status">Click a button to start.</p>
+    <pre id="resultBox">Results appear here.</pre>
   </main>
-  <script src="/static/shared.js?v=20260527-3"></script>
+  <script src="/static/shared.js?v=20260601h"></script>
   <script>
     const statusLine = document.getElementById("statusLine");
     const resultBox = document.getElementById("resultBox");
+    const pingBtn = document.getElementById("pingBtn");
+    const fetchBtn = document.getElementById("fetchBtn");
 
-    function setBusy(busy, text) {
-      document.getElementById("pingBtn").disabled = busy;
-      document.getElementById("fetchBtn").disabled = busy;
-      statusLine.textContent = text;
+    function setBusy(busy, msg) {
+      pingBtn.disabled = busy;
+      fetchBtn.disabled = busy;
+      if (msg) statusLine.textContent = msg;
     }
 
     async function run(url, label) {
       setBusy(true, `${label}…`);
-      resultBox.textContent = "请求中，请稍候…";
+      resultBox.textContent = "Request in progress…";
       try {
         const data = await fetchJson(url);
         resultBox.textContent = JSON.stringify(data, null, 2);
-        statusLine.textContent = `${label}：成功`;
-        showToast("检测成功");
+        statusLine.textContent = `${label}: OK`;
+        showToast("Test passed");
       } catch (err) {
-        resultBox.textContent = String(err.message || err);
-        statusLine.textContent = `${label}：失败`;
-        showToast(err.message, true);
+        resultBox.textContent = err.message || String(err);
+        statusLine.textContent = `${label}: failed`;
+        showToast(err.message || "Test failed", true);
       } finally {
-        setBusy(false, "可再次点击按钮重试。");
+        setBusy(false, "Click a button to retry.");
       }
     }
 
-    document.getElementById("pingBtn").addEventListener("click", () => {
-      run("/api/breadth/ping", "快速检测");
+    pingBtn.addEventListener("click", () => {
+      run("/api/breadth/ping", "Quick ping");
     });
-    document.getElementById("fetchBtn").addEventListener("click", () => {
-      run("/api/breadth/fetch-test", "完整拉取");
+    fetchBtn.addEventListener("click", () => {
+      run("/api/breadth/fetch-test", "Full fetch");
     });
   </script>
 </body>

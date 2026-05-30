@@ -35,9 +35,24 @@ class BreadthSyncService:
         with self._lock:
             self._state.update(kwargs)
 
+    @staticmethod
+    def _decorate_state(state: dict[str, Any]) -> dict[str, Any]:
+        processed = int(state.get("processed") or 0)
+        total = int(state.get("total") or 0)
+        progress_ratio = round((processed / total), 4) if total > 0 else 0.0
+        payload = dict(state)
+        payload.setdefault("kind", "breadth")
+        payload["processed"] = processed
+        payload["total"] = total
+        payload["progress_ratio"] = progress_ratio
+        if payload.get("status") == "error":
+            payload.setdefault("error_code", "BREADTH_SYNC_FAILED")
+            payload.setdefault("error_message", payload.get("error") or "sync failed")
+        return payload
+
     def get_state(self) -> dict[str, Any]:
         with self._lock:
-            return dict(self._state)
+            return self._decorate_state(dict(self._state))
 
     def get_progress_state(self, storage: Storage) -> dict[str, Any]:
         state = self.get_state()
@@ -51,7 +66,7 @@ class BreadthSyncService:
 
         db_status = str(db_job.get("status") or "")
         if db_status in {"running", "cancelling"}:
-            return {
+            return self._decorate_state({
                 "status": "running",
                 "mode": state.get("mode") or "incremental",
                 "processed": int(db_job.get("processed") or 0),
@@ -60,26 +75,26 @@ class BreadthSyncService:
                 "updated_at": db_job.get("updated_at"),
                 "message": "running (recovered from job store)",
                 "job_id": db_job.get("job_id"),
-            }
+            })
         if db_status == "error":
-            return {
+            return self._decorate_state({
                 "status": "error",
                 "error": db_job.get("error") or "sync failed",
                 "job_id": db_job.get("job_id"),
                 "updated_at": db_job.get("updated_at"),
-            }
+            })
         if db_status == "done":
             try:
                 result = db_job.get("result") or {}
             except Exception:  # noqa: BLE001
                 result = {}
-            return {
+            return self._decorate_state({
                 "status": "done",
                 "mode": (result or {}).get("mode") or state.get("mode"),
                 "result": result,
                 "job_id": db_job.get("job_id"),
                 "updated_at": db_job.get("updated_at"),
-            }
+            })
         return state
 
     def start_sync(

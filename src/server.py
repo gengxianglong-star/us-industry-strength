@@ -6,8 +6,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
@@ -24,7 +24,9 @@ from src.breadth_data import (
     load_breadth_data,
     validate_breadth_thresholds,
 )
+from src.errors import ApiError
 from src.rescore import rescore_snapshot
+from src.services.health import build_health_report
 from src.services.snapshots import (
     build_snapshot_response,
     scored_industries_from_rows,
@@ -32,25 +34,99 @@ from src.services.snapshots import (
 )
 from src.stock_rs import rebuild_stock_watchlist_for_snapshot
 from src.stock_picks import fetch_and_store_stock_picks
+from src.services.auto_scheduler import AutoScheduler
 from src.services.breadth_jobs import BreadthSyncService
+from src.services.daily_jobs import (
+    DailyJobService,
+    finalize_snapshot_run,
+    snapshots_needing_finalize_after_rs,
+)
 from src.services.rs_jobs import RsJobService
-from src.storage import Storage
+from src.storage import Storage, today_snapshot_date
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
+WEB_DIST = WEB_DIR / "dist"
+SPA_INDEX = WEB_DIST / "index.html"
+USE_SPA = SPA_INDEX.is_file()
 
 app = FastAPI(title="US Industry Strength")
 config = load_config()
 storage = Storage(db_path(config))
 
-
-@app.on_event("startup")
-def _ensure_database_schema() -> None:
-    storage._init_db()
-
-
 RS_JOB_SERVICE = RsJobService()
 BREADTH_SYNC_SERVICE = BreadthSyncService()
+DAILY_JOB_SERVICE = DailyJobService()
+AUTO_SCHEDULER = AutoScheduler(
+    storage=storage,
+    config_getter=lambda: config,
+    daily_service=DAILY_JOB_SERVICE,
+    rs_service=RS_JOB_SERVICE,
+    breadth_service=BREADTH_SYNC_SERVICE,
+)
+
+
+@app.on_event("startup")
+def _startup_tasks() -> None:
+    storage._init_db()
+    recovered = storage.recover_stale_jobs(stale_seconds=1800)
+    finalize_dates = list(dict.fromkeys(
+        [*recovered.get("finalize", []), *snapshots_needing_finalize_after_rs(storage)]
+    ))
+    for snap_date in finalize_dates:
+        try:
+            finalize_snapshot_run(storage, config, snap_date)
+            print(f"[startup] finalized snapshot run after RS: {snap_date}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[startup] finalize failed for {snap_date}: {exc}")
+    if recovered["snapshot_runs"] or recovered["rs_jobs"]:
+        print(f"[startup] recovered stale jobs: {recovered}")
+    AUTO_SCHEDULER.start()
+    if recovered["snapshot_runs"] or recovered["rs_jobs"] or recovered.get("finalize"):
+        AUTO_SCHEDULER.schedule_recovery(reason="stale_recovered")
+
+
+@app.on_event("shutdown")
+def _shutdown_tasks() -> None:
+    AUTO_SCHEDULER.stop()
+
+
+@app.exception_handler(ApiError)
+def handle_api_error(_: Request, exc: ApiError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
+
+
+@app.exception_handler(HTTPException)
+def handle_http_exception(_: Request, exc: HTTPException) -> JSONResponse:
+    detail = exc.detail
+    if isinstance(detail, dict):
+        payload = dict(detail)
+        payload.setdefault("code", "HTTP_ERROR")
+        payload.setdefault("message", str(payload.get("detail") or exc.status_code))
+        payload.setdefault("hint", "")
+        payload.setdefault("retryable", exc.status_code >= 500)
+    else:
+        payload = {
+            "code": "HTTP_ERROR",
+            "message": str(detail or exc.status_code),
+            "hint": "",
+            "retryable": exc.status_code >= 500,
+        }
+    return JSONResponse(status_code=exc.status_code, content=payload)
+
+
+@app.exception_handler(Exception)
+def handle_unexpected_error(_: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=500,
+        content={
+            "code": "INTERNAL_ERROR",
+            "message": "Internal server error",
+            "hint": "Retry shortly; check server logs if it persists.",
+            "retryable": True,
+            "detail": str(exc),
+        },
+    )
 
 
 def _reload_config() -> None:
@@ -68,6 +144,44 @@ def get_config() -> dict[str, Any]:
         for k in weights
     }
     return editable
+
+
+@app.get("/api/health")
+def api_health(quick: bool = Query(default=False)) -> dict[str, Any]:
+    return build_health_report(storage, config, quick=quick)
+
+
+@app.post("/api/daily/run")
+def daily_run(
+    snapshot_date: str | None = Query(default=None),
+    force: bool = Query(default=False),
+    async_mode: bool = Query(default=True),
+) -> dict[str, Any]:
+    try:
+        return DAILY_JOB_SERVICE.start_run(
+            storage,
+            config,
+            snapshot_date,
+            force=force,
+            async_mode=async_mode,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/daily/status")
+def daily_status(snapshot_date: str | None = Query(default=None)) -> dict[str, Any]:
+    return DAILY_JOB_SERVICE.get_status(storage, config, snapshot_date)
+
+
+@app.get("/api/dashboard/today")
+def dashboard_today(snapshot_date: str | None = Query(default=None)) -> dict[str, Any]:
+    return DAILY_JOB_SERVICE.build_dashboard(storage, config, snapshot_date)
+
+
+@app.get("/api/automation/status")
+def automation_status() -> dict[str, Any]:
+    return AUTO_SCHEDULER.status()
 
 
 @app.get("/api/breadth")
@@ -118,7 +232,7 @@ def breadth_fetch_test(quick: bool = Query(default=False)) -> dict[str, Any]:
         return {
             "ok": True,
             "quick": True,
-            "message": "服务正常；未下载 Google Sheet。去掉 ?quick=true 可测完整拉取。",
+            "message": "OK — Google Sheet not fetched. Drop ?quick=true for full pull test.",
             "proxy_url": settings.get("proxy_url") or "",
             "proxy_source": settings.get("proxy_source") or "none",
             "curl_only": settings.get("curl_only"),
@@ -139,10 +253,7 @@ def breadth_fetch_test(quick: bool = Query(default=False)) -> dict[str, Any]:
 @app.get("/api/breadth/sync-progress")
 def breadth_sync_progress() -> dict[str, Any]:
     state = BREADTH_SYNC_SERVICE.get_progress_state(storage)
-    processed = int(state.get("processed") or 0)
-    total = int(state.get("total") or 0)
-    progress_ratio = round((processed / total), 4) if total > 0 else 0.0
-    state["progress_ratio"] = progress_ratio
+    state.setdefault("kind", "breadth")
     return state
 
 
@@ -180,19 +291,19 @@ def update_config(body: ConfigUpdate) -> dict[str, Any]:
     if body.thresholds.tier_b_score > body.thresholds.tier_a_score:
         raise HTTPException(
             status_code=400,
-            detail="tier_b_score 不能大于 tier_a_score",
+            detail="tier_b_score cannot exceed tier_a_score",
         )
 
     weight_total = sum(
         getattr(body.weights, field) for field in body.weights.model_fields
     )
     if weight_total <= 0:
-        raise HTTPException(status_code=400, detail="权重总和必须大于 0")
+        raise HTTPException(status_code=400, detail="Weight sum must be greater than 0")
     if body.stock_rs.tier_b_score is not None and body.stock_rs.tier_a_score is not None:
         if body.stock_rs.tier_b_score > body.stock_rs.tier_a_score:
             raise HTTPException(
                 status_code=400,
-                detail="stock_rs.tier_b_score 不能大于 stock_rs.tier_a_score",
+                detail="stock_rs.tier_b_score cannot exceed tier_a_score",
             )
     elif body.stock_rs.tier_b_score is not None or body.stock_rs.tier_a_score is not None:
         current_rs = config.get("stock_rs", {})
@@ -209,7 +320,7 @@ def update_config(body: ConfigUpdate) -> dict[str, Any]:
         if tier_b > tier_a:
             raise HTTPException(
                 status_code=400,
-                detail="stock_rs.tier_b_score 不能大于 stock_rs.tier_a_score",
+                detail="stock_rs.tier_b_score cannot exceed tier_a_score",
             )
 
     try:
@@ -233,7 +344,7 @@ def recompute_latest_snapshot(
 ) -> dict[str, Any]:
     date_key = snapshot_date or storage.get_latest_date()
     if not date_key:
-        raise HTTPException(status_code=404, detail="尚无快照可重新计算")
+        raise HTTPException(status_code=404, detail="No snapshot to rescore")
 
     try:
         result = rescore_snapshot(storage, date_key, config, rebuild_watchlist=True)
@@ -258,7 +369,7 @@ def list_dates() -> list[str]:
 def latest_snapshot() -> dict[str, Any]:
     latest = storage.get_latest_date()
     if not latest:
-        raise HTTPException(status_code=404, detail="尚无快照，请先运行 run_daily.py")
+        raise HTTPException(status_code=404, detail="No snapshot yet — run daily first")
     return get_snapshot(latest)
 
 
@@ -266,7 +377,7 @@ def latest_snapshot() -> dict[str, Any]:
 def get_snapshot(snapshot_date: str) -> dict[str, Any]:
     rows = storage.get_snapshot(snapshot_date)
     if not rows:
-        raise HTTPException(status_code=404, detail=f"未找到日期 {snapshot_date} 的快照")
+        raise HTTPException(status_code=404, detail=f"No snapshot for {snapshot_date}")
     top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
     return build_snapshot_response(
         storage=storage,
@@ -291,7 +402,7 @@ def snapshot_run_status(snapshot_date: str) -> dict[str, Any]:
                 "error": None,
                 "details": {},
             }
-        raise HTTPException(status_code=404, detail=f"未找到日期 {snapshot_date} 的运行状态")
+        raise HTTPException(status_code=404, detail=f"No run status for {snapshot_date}")
     return status
 
 
@@ -303,7 +414,7 @@ def fetch_snapshot_stocks(
 ) -> dict[str, Any]:
     rows = storage.get_snapshot(snapshot_date)
     if not rows:
-        raise HTTPException(status_code=404, detail=f"未找到日期 {snapshot_date} 的快照")
+        raise HTTPException(status_code=404, detail=f"No snapshot for {snapshot_date}")
 
     active = [r for r in rows if not r["excluded"]]
     if top_only:
@@ -346,10 +457,11 @@ def fetch_snapshot_stocks(
 def compute_snapshot_rs(
     snapshot_date: str,
     async_mode: bool = Query(default=True),
+    force_full: bool = Query(default=False),
 ) -> dict[str, Any]:
     rows = storage.get_snapshot(snapshot_date)
     if not rows:
-        raise HTTPException(status_code=404, detail=f"未找到日期 {snapshot_date} 的快照")
+        raise HTTPException(status_code=404, detail=f"No snapshot for {snapshot_date}")
     scored = scored_industries_from_rows(rows)
     try:
         return RS_JOB_SERVICE.start_compute_rs(
@@ -357,6 +469,7 @@ def compute_snapshot_rs(
             snapshot_date=snapshot_date,
             scored=scored,
             config=config,
+            force_full=force_full,
             async_mode=async_mode,
         )
     except RuntimeError as exc:
@@ -370,9 +483,9 @@ def compute_snapshot_new_stock_rs(
 ) -> dict[str, Any]:
     rows = storage.get_snapshot(snapshot_date)
     if not rows:
-        raise HTTPException(status_code=404, detail=f"未找到日期 {snapshot_date} 的快照")
+        raise HTTPException(status_code=404, detail=f"No snapshot for {snapshot_date}")
     if not storage.get_stock_rs_raw(snapshot_date):
-        raise HTTPException(status_code=400, detail="请先完成主 RS 计算（刷新个股RS）")
+        raise HTTPException(status_code=400, detail="Run main RS first")
     try:
         return RS_JOB_SERVICE.start_compute_new_rs(
             storage=storage,
@@ -407,20 +520,31 @@ def latest_rs(
 ) -> dict[str, Any]:
     latest = storage.get_latest_date()
     if not latest:
-        raise HTTPException(status_code=404, detail="尚无快照")
+        raise HTTPException(status_code=404, detail="No snapshot")
     return rs_snapshot(latest, limit=limit, watchlist_limit=watchlist_limit)
 
 
 @app.get("/api/rs/{snapshot_date}")
 def rs_snapshot(
     snapshot_date: str,
-    limit: int = Query(default=120, ge=1, le=1000),
+    limit: int = Query(default=120, ge=0, le=1000),
     watchlist_limit: int = Query(default=120, ge=1, le=1000),
+    watchlist_only: bool = Query(default=False),
 ) -> dict[str, Any]:
-    rs_rows = storage.get_stock_rs(snapshot_date, limit=limit)
     watchlist = storage.get_stock_watchlist(snapshot_date, limit=watchlist_limit)
+    if watchlist_only:
+        return {
+            "snapshot_date": snapshot_date,
+            "rs_count": storage.count_stock_rs(snapshot_date),
+            "rs_meta": storage.get_stock_rs_meta(snapshot_date),
+            "rows": [],
+            "new_stock_rows": [],
+            "new_stock_leaderboard": [],
+            "watchlist": watchlist,
+        }
+    rs_rows = storage.get_stock_rs(snapshot_date, limit=max(limit, 1))
     if not rs_rows and not watchlist:
-        raise HTTPException(status_code=404, detail="该日期尚未生成个股RS数据")
+        raise HTTPException(status_code=404, detail=f"No stock RS for {snapshot_date}")
     return {
         "snapshot_date": snapshot_date,
         "rs_count": storage.count_stock_rs(snapshot_date),
@@ -444,14 +568,14 @@ def industry_stocks(
 ) -> dict[str, Any]:
     date_key = snapshot_date or storage.get_latest_date()
     if not date_key:
-        raise HTTPException(status_code=404, detail="尚无快照")
+        raise HTTPException(status_code=404, detail="No snapshot")
 
     if refresh:
         fetch_and_store_stock_picks(storage, date_key, [industry_key], config)
 
     pick = storage.get_industry_stock_picks(date_key, industry_key)
     if not pick:
-        raise HTTPException(status_code=404, detail="该行业尚无股票筛选结果，请先运行 run_daily.py 或点击刷新")
+        raise HTTPException(status_code=404, detail="No stock screen for this industry — run daily first")
 
     return {
         "snapshot_date": date_key,
@@ -471,7 +595,7 @@ def list_industries(
 ) -> list[dict[str, Any]]:
     date_key = snapshot_date or storage.get_latest_date()
     if not date_key:
-        raise HTTPException(status_code=404, detail="尚无快照")
+        raise HTTPException(status_code=404, detail="No snapshot")
     rows = storage.get_snapshot(date_key)
     if q:
         needle = q.lower()
@@ -490,7 +614,7 @@ def industry_history(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if not series:
-        raise HTTPException(status_code=404, detail="无历史数据")
+        raise HTTPException(status_code=404, detail="No history")
 
     return {
         "industry_key": industry_key,
@@ -518,7 +642,7 @@ def industry_history_multi(
         ]
 
     if not result:
-        raise HTTPException(status_code=404, detail="无历史数据")
+        raise HTTPException(status_code=404, detail="No history")
 
     return {
         "industry_key": industry_key,
@@ -528,20 +652,32 @@ def industry_history_multi(
 
 
 app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
+if USE_SPA:
+    app.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="spa_assets")
+
+
+def _spa_index() -> FileResponse:
+    return FileResponse(SPA_INDEX)
 
 
 @app.get("/")
 def index() -> FileResponse:
+    if USE_SPA:
+        return _spa_index()
     return FileResponse(WEB_DIR / "index.html")
 
 
 @app.get("/strong")
 def strong_page() -> FileResponse:
+    if USE_SPA:
+        return _spa_index()
     return FileResponse(WEB_DIR / "index.html")
 
 
 @app.get("/breadth")
 def breadth_page() -> FileResponse:
+    if USE_SPA:
+        return _spa_index()
     return FileResponse(WEB_DIR / "breadth.html")
 
 

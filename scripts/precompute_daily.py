@@ -12,8 +12,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config_loader import db_path, load_config
-from src.pipeline.daily import DailyPipelineOptions, run_daily_pipeline
-from src.storage import Storage, today_snapshot_date
+from src.services.daily_jobs import DailyJobService, daily_options_from_config
+from src.storage import Storage, latest_trading_date
 
 
 def main() -> int:
@@ -22,24 +22,35 @@ def main() -> int:
     parser.add_argument("--skip-rs", action="store_true")
     parser.add_argument("--skip-breadth", action="store_true")
     parser.add_argument("--full-breadth", action="store_true")
+    parser.add_argument("--force", action="store_true", help="忽略已有完成状态，强制重跑")
     args = parser.parse_args()
 
     config = load_config()
     storage = Storage(db_path(config))
-    snapshot_date = args.date or today_snapshot_date()
+    snapshot_date = args.date or latest_trading_date()
+    service = DailyJobService()
 
     print(f"[precompute] snapshot_date={snapshot_date}")
+    if not args.force:
+        status = service.get_status(storage, config, snapshot_date)
+        if status.get("daily_status") in {"ready", "degraded"}:
+            print(f"[precompute] skipped: already {status.get('daily_status')}")
+            print(f"[precompute] headline: {status.get('headline')}")
+            return 0
+
     try:
-        run_daily_pipeline(
+        opts = daily_options_from_config(config)
+        if args.skip_rs:
+            opts.skip_rs = True
+        if args.skip_breadth:
+            opts.skip_breadth = True
+        if args.full_breadth:
+            opts.full_breadth = True
+        service.run_sync(
             storage,
             config,
             snapshot_date,
-            DailyPipelineOptions(
-                skip_breadth=args.skip_breadth,
-                skip_rs=args.skip_rs,
-                full_breadth=args.full_breadth,
-                verbose=True,
-            ),
+            options=opts,
         )
         print("[precompute] done")
         return 0

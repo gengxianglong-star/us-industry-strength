@@ -13,6 +13,17 @@ from src.stock_rs import backfill_new_stock_rs_for_snapshot, compute_and_store_s
 from src.storage import Storage
 
 
+def _finalize_after_rs(
+    storage: Storage,
+    snapshot_date: str,
+    config: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    from src.services.daily_jobs import finalize_snapshot_run
+
+    finalize_snapshot_run(storage, config, snapshot_date, rs_result=result)
+
+
 class JobCancelledError(RuntimeError):
     """Raised when a running job is cancelled by user request."""
 
@@ -257,6 +268,7 @@ class RsJobService:
         snapshot_date: str,
         scored: list[Any],
         config: dict[str, Any],
+        force_full: bool = False,
         async_mode: bool = True,
     ) -> dict[str, Any]:
         max_runtime = int(config.get("stock_rs", {}).get("max_job_runtime_seconds", 7200))
@@ -267,6 +279,7 @@ class RsJobService:
                 snapshot_date,
                 scored,
                 config,
+                force_full=force_full,
                 progress_callback=progress_cb,
             )
             if int(result.get("new_stock_leaderboard_count", 0) or 0) <= 0:
@@ -278,14 +291,7 @@ class RsJobService:
                         progress_callback=progress_cb,
                     )
                     result = {**result, **backfill}
-            storage.upsert_snapshot_run(
-                snapshot_date,
-                "running",
-                current_step="stock_rs_async_done",
-                details={
-                    "rs_computed_count": int(result.get("computed_count", 0) or 0),
-                },
-            )
+            _finalize_after_rs(storage, snapshot_date, config, result)
             return result
 
         return self._start_job(
@@ -336,6 +342,7 @@ class RsJobService:
         processed = int(state.get("processed") or 0)
         progress_ratio = (processed / total) if total > 0 else 0
         return {
+            "kind": "rs",
             "snapshot_date": snapshot_date,
             "job_kind": job_kind,
             "status": state.get("status", "running"),
@@ -347,6 +354,8 @@ class RsJobService:
             "updated_at": state.get("updated_at"),
             "elapsed_seconds": state.get("elapsed_seconds"),
             "error": state.get("error"),
+            "error_code": "RS_JOB_FAILED" if state.get("status") == "error" else None,
+            "error_message": state.get("error"),
             "result": state.get("result"),
         }
 

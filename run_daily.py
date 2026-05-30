@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch Finviz data, score industries, and save daily snapshot."""
+"""Fetch Finviz data, score industries, and save daily snapshot (no breadth)."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config_loader import db_path, load_config
-from src.pipeline.daily import DailyPipelineOptions, run_daily_pipeline
-from src.storage import Storage, today_snapshot_date
+from src.services.daily_jobs import DailyJobService, daily_options_from_config
+from src.storage import Storage, latest_trading_date
 
 
 def main() -> int:
@@ -25,20 +25,22 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    snapshot_date = args.date or today_snapshot_date()
+    snapshot_date = args.date or latest_trading_date()
     storage = Storage(db_path(config))
+    service = DailyJobService()
 
+    opts = daily_options_from_config(config)
+    if args.skip_stocks:
+        opts.skip_stocks = True
+    if args.skip_rs:
+        opts.skip_rs = True
+    opts.skip_breadth = True
     try:
-        result = run_daily_pipeline(
+        result = service.run_sync(
             storage,
             config,
             snapshot_date,
-            DailyPipelineOptions(
-                skip_stocks=args.skip_stocks,
-                skip_rs=args.skip_rs,
-                skip_breadth=True,
-                verbose=True,
-            ),
+            options=opts,
         )
         print(f"快照已保存: {snapshot_date}（Top {result.get('top_count', 0)} 行业）")
         return 0

@@ -1,20 +1,30 @@
-let historyChart = null;
 let currentSnapshot = null;
-let selectedIndustryKey = null;
 let currentRsSnapshot = null;
 let autoRefreshBusy = false;
-let activeRsJob = null;
+let automationTimer = null;
 
-const STRONG_MORNING_SYNC_HOUR_BJ = 6;
+const NEW_STOCK_COHORT_LABEL = { M: "Monthly", Q: "Quarter", H: "Half", "3Q": "3Q" };
 
-const rankColors = {
-  rank_w: "#60a5fa",
-  rank_m: "#34d399",
-  rank_q: "#fbbf24",
-  rank_h: "#f472b6",
-  rank_y: "#a78bfa",
-  score: "#f97316",
+const LEGACY_TAG_LABEL = {
+  "核心强势": "Core",
+  "不一致": "Mixed",
+  "强势回调": "Strong PB",
+  "加速↑": "A↑",
+  "加速↓": "A↓",
+  "加速": "A",
+  "回调↑": "PB↑",
+  "回调↓": "PB↓",
+  "回调": "PB",
+  "Accel↑": "A↑",
+  "Accel↓": "A↓",
+  "Accel": "A",
+  "Pullback↑": "PB↑",
+  "Pullback↓": "PB↓",
+  "Pullback": "PB",
+  "走弱": "Weak",
 };
+
+const HIDDEN_TAGS = new Set(["Core", "Strong PB", "Mixed", "核心强势", "强势回调", "不一致"]);
 
 const thresholdPresets = {
   conservative: {
@@ -54,6 +64,52 @@ function pct(v) {
   return `${sign}${v.toFixed(2)}%`;
 }
 
+function perfScales(rows) {
+  const keys = ["perf_w", "perf_m", "perf_q", "perf_h", "perf_y"];
+  const scales = {};
+  keys.forEach((key) => {
+    const vals = rows.map((r) => Math.abs(Number(r[key]))).filter(Number.isFinite);
+    scales[key] = Math.max(...vals, 0.01);
+  });
+  return scales;
+}
+
+function perfMicroBar(value, maxAbs) {
+  const v = Number(value);
+  if (!Number.isFinite(v)) {
+    return '<span class="perf-cell"><span class="perf-val">—</span></span>';
+  }
+  const sign = v >= 0 ? "pos" : "neg";
+  const scale = Math.max(Number(maxAbs) || 0.01, 0.01);
+  const width = Math.min(100, Math.max(6, (Math.abs(v) / scale) * 100));
+  return `<span class="perf-cell">
+    <span class="perf-bar-wrap" aria-hidden="true"><span class="perf-bar ${sign}" style="width:${width.toFixed(1)}%"></span></span>
+    <span class="perf-val ${sign}">${pct(v)}</span>
+  </span>`;
+}
+
+function rankItemClass(rank) {
+  if (rank <= 20) return "rank-hot";
+  if (rank >= 100) return "rank-cold";
+  return "rank-mid";
+}
+
+function rankCompactRow(row) {
+  const items = [
+    ["W", row.rank_w],
+    ["M", row.rank_m],
+    ["Q", row.rank_q],
+    ["H", row.rank_h],
+    ["Y", row.rank_y],
+  ];
+  return `<span class="rank-compact" aria-label="Rank W${row.rank_w} M${row.rank_m} Q${row.rank_q} H${row.rank_h} Y${row.rank_y}">${items
+    .map(
+      ([label, rank]) =>
+        `<span class="rank-item ${rankItemClass(rank)}" title="${label} rank ${rank} — lower is stronger"><span class="rank-item-l">${label}</span><span class="rank-item-n">${rank}</span></span>`,
+    )
+    .join("")}</span>`;
+}
+
 function rankHeat(rank) {
   if (rank <= 20) return "rank-cell pos";
   if (rank >= 100) return "rank-cell neg";
@@ -61,8 +117,13 @@ function rankHeat(rank) {
 }
 
 function formatIndustryTags(tags) {
-  const hidden = new Set(["核心强势", "不一致", "强势回调"]);
-  return (tags || []).filter((t) => !hidden.has(t));
+  return (tags || [])
+    .filter((t) => !HIDDEN_TAGS.has(t))
+    .map((t) => LEGACY_TAG_LABEL[t] || t);
+}
+
+function normalizeTrendLabel(text) {
+  return LEGACY_TAG_LABEL[text] || text;
 }
 
 function buildTrendLabel(base, arrow) {
@@ -70,46 +131,46 @@ function buildTrendLabel(base, arrow) {
 }
 
 function trendBadgeClass(text) {
-  if (text === "加速↑") return "trend-badge trend-accel-up";
-  if (text === "加速↓") return "trend-badge trend-accel-down";
-  if (text === "回调↓") return "trend-badge trend-pullback-down";
-  if (text === "回调↑") return "trend-badge trend-pullback-up";
-  if (text === "加速") return "trend-badge trend-accel-down";
-  if (text === "回调") return "trend-badge trend-pullback-up";
+  const t = normalizeTrendLabel(text);
+  if (t === "A↑") return "trend-badge trend-accel-up";
+  if (t === "A↓") return "trend-badge trend-accel-down";
+  if (t === "PB↓") return "trend-badge trend-pullback-down";
+  if (t === "PB↑") return "trend-badge trend-pullback-up";
+  if (t === "A") return "trend-badge trend-accel-down";
+  if (t === "PB") return "trend-badge trend-pullback-up";
   return "trend-badge";
 }
 
 function renderTrendBadge(text) {
   if (!text) return "—";
-  return `<span class="${trendBadgeClass(text)}">${text}</span>`;
+  const label = normalizeTrendLabel(text);
+  return `<span class="${trendBadgeClass(label)}">${label}</span>`;
 }
 
 function computeShortTrend(row) {
-  // 短期趋势：锚定3个月排名，月度优于3个月=加速；月度弱于3个月=回调。
   if (row.rank_m < row.rank_q) {
-    if (row.rank_w < row.rank_m) return buildTrendLabel("加速", "↑");
-    if (row.rank_w > row.rank_m) return buildTrendLabel("加速", "↓");
-    return "加速";
+    if (row.rank_w < row.rank_m) return buildTrendLabel("A", "↑");
+    if (row.rank_w > row.rank_m) return buildTrendLabel("A", "↓");
+    return "A";
   }
   if (row.rank_m > row.rank_q) {
-    if (row.rank_w < row.rank_m) return buildTrendLabel("回调", "↑");
-    if (row.rank_w > row.rank_m) return buildTrendLabel("回调", "↓");
-    return "回调";
+    if (row.rank_w < row.rank_m) return buildTrendLabel("PB", "↑");
+    if (row.rank_w > row.rank_m) return buildTrendLabel("PB", "↓");
+    return "PB";
   }
   return "";
 }
 
 function computeLongTrend(row) {
-  // 长期趋势：锚定6个月排名，季度优于6个月=加速；季度弱于6个月=回调。
   if (row.rank_q < row.rank_h) {
-    if (row.rank_m < row.rank_q) return buildTrendLabel("加速", "↑");
-    if (row.rank_m > row.rank_q) return buildTrendLabel("加速", "↓");
-    return "加速";
+    if (row.rank_m < row.rank_q) return buildTrendLabel("A", "↑");
+    if (row.rank_m > row.rank_q) return buildTrendLabel("A", "↓");
+    return "A";
   }
   if (row.rank_q > row.rank_h) {
-    if (row.rank_m < row.rank_q) return buildTrendLabel("回调", "↑");
-    if (row.rank_m > row.rank_q) return buildTrendLabel("回调", "↓");
-    return "回调";
+    if (row.rank_m < row.rank_q) return buildTrendLabel("PB", "↑");
+    if (row.rank_m > row.rank_q) return buildTrendLabel("PB", "↓");
+    return "PB";
   }
   return "";
 }
@@ -124,25 +185,38 @@ let currentTopListCount = 15;
 
 function syncTopListLabels(count) {
   currentTopListCount = Number(count) || 15;
-  const title = document.getElementById("coreTableTitle");
-  if (title) title.textContent = `强势行业 Top ${currentTopListCount}`;
-  const btn = document.getElementById("fetchCoreStocksBtn");
-  if (btn && !btn.disabled) {
-    btn.textContent = `刷新 Top ${currentTopListCount} 个股`;
-  }
 }
 
-function renderSummary(data) {
+function rsUniverseCount(snapshot) {
+  const meta = snapshot?.rs_meta || currentRsSnapshot?.rs_meta;
+  if (meta) {
+    const newStock =
+      (meta.new_stock_m_count ?? 0) +
+      (meta.new_stock_q_count ?? 0) +
+      (meta.new_stock_h_count ?? 0) +
+      (meta.new_stock_3q_count ?? 0);
+    const main = Number(meta.computed_count ?? 0);
+    if (main || newStock) return main + newStock;
+  }
+  const fallback = snapshot?.rs_count ?? currentRsSnapshot?.rows?.length;
+  return fallback != null && fallback > 0 ? fallback : null;
+}
+
+function renderSummary(data, dashboard = null) {
   const top = getTopStrongIndustries(data);
-  const active = data.industries.filter((i) => !i.excluded);
   syncTopListLabels(data.top_strong_count ?? top.length);
+  let dateText = data.snapshot_date || "—";
+  const lag = Number(dashboard?.lag_days || 0);
+  const target = dashboard?.target_date;
+  if (lag > 0 && target && target !== data.snapshot_date) {
+    dateText = `${dateText} (catch-up ${target})`;
+  }
+  const rsCount = rsUniverseCount(data) ?? dashboard?.summary?.rs_count;
+  const rsText = rsCount != null ? rsCount.toLocaleString() : "—";
   document.getElementById("summary").innerHTML = `
-    <div class="stat-card"><div class="value">${data.snapshot_date}</div><div class="label">快照日期</div></div>
-    <div class="stat-card"><div class="value">${top.length}</div><div class="label">强势行业 Top ${currentTopListCount}</div></div>
-    <div class="stat-card"><div class="value">${active.length}</div><div class="label">参与评分</div></div>
-    <div class="stat-card"><div class="value">${top.reduce((n, i) => n + (i.stock_picks?.length || 0), 0)}</div><div class="label">筛选个股总数</div></div>
-    <div class="stat-card"><div class="value">${data.rs_count ?? 0}</div><div class="label">RS样本数</div></div>
-    <div class="stat-card"><div class="value">${data.rs_watchlist_count ?? 0}</div><div class="label">交叉观察名单</div></div>
+    <p class="snapshot-meta" aria-label="Snapshot overview">
+      As of ${dateText} · Top ${currentTopListCount}: ${top.length} · RS ${rsText}
+    </p>
   `;
 }
 
@@ -151,7 +225,7 @@ function renderRsTable(payload) {
   if (!tbody) return;
   const rows = payload?.rows || [];
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="hint">该日期暂无 RS 数据，请点击“刷新个股RS”</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="hint">No RS data yet — fills in after the daily run.</td></tr>';
     return;
   }
   tbody.innerHTML = rows
@@ -179,7 +253,7 @@ function renderWatchlistTable(payload) {
   );
   const rows = payload?.watchlist || [];
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="hint">暂无交叉观察名单（需先生成 RS 且 Top${currentTopListCount} 行业个股已抓取）</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" class="hint">No watchlist yet — built after daily cross-screen.</td></tr>`;
     return;
   }
   tbody.innerHTML = rows
@@ -203,7 +277,7 @@ function renderWatchlistCharts(payload) {
   if (!container) return;
   const rows = payload?.watchlist || [];
   if (!rows.length) {
-    container.innerHTML = '<p class="hint">暂无观察名单图表（需先生成 RS 交叉名单）。</p>';
+    container.innerHTML = '<p class="hint">Charts appear after the daily watchlist is built.</p>';
     return;
   }
   container.innerHTML = rows
@@ -211,7 +285,7 @@ function renderWatchlistCharts(payload) {
       const symbol = row.symbol;
       return `<article class="watchlist-chart-card">
         <a href="https://finviz.com/quote.ashx?t=${encodeURIComponent(symbol)}" target="_blank" rel="noreferrer">
-          <img class="watchlist-chart-img" src="${finvizDailyChartUrl(symbol)}" alt="${symbol} 日K图" loading="lazy" />
+          <img class="watchlist-chart-img" src="${finvizDailyChartUrl(symbol)}" alt="${symbol} daily chart" loading="lazy" />
         </a>
       </article>`;
     })
@@ -223,7 +297,7 @@ function renderCoveragePanel(snapshot, rsPayload) {
   if (!target) return;
   const meta = snapshot?.rs_meta || rsPayload?.rs_meta;
   if (!meta) {
-    target.innerHTML = '<span class="hint">覆盖率：暂无（请先刷新个股RS）</span>';
+    target.innerHTML = '<span class="hint">Coverage: waiting on RS run</span>';
     return;
   }
   const newStockRsCount =
@@ -233,16 +307,14 @@ function renderCoveragePanel(snapshot, rsPayload) {
     (meta.new_stock_3q_count ?? 0);
   const covered = (meta.computed_count ?? 0) + newStockRsCount;
   target.innerHTML = `
-    <span class="coverage-item">股票池 ${meta.universe_count}</span>
-    <span class="coverage-item">覆盖率 ${covered}</span>
-    <span class="coverage-item">主RS ${meta.computed_count}</span>
-    <span class="coverage-item">新股RS ${newStockRsCount}</span>
-    <span class="coverage-item">新股榜 ${meta.new_stock_leaderboard_count ?? 0}</span>
-    <span class="coverage-item">无数据 ${meta.no_bars_count}</span>
+    <span class="coverage-item">Universe ${meta.universe_count}</span>
+    <span class="coverage-item">Covered ${covered}</span>
+    <span class="coverage-item">Main RS ${meta.computed_count}</span>
+    <span class="coverage-item">New IPO RS ${newStockRsCount}</span>
+    <span class="coverage-item">New list ${meta.new_stock_leaderboard_count ?? 0}</span>
+    <span class="coverage-item">No bars ${meta.no_bars_count}</span>
   `;
 }
-
-const NEW_STOCK_COHORT_LABEL = { M: "月度", Q: "季度", H: "半年", "3Q": "三季" };
 
 function fmtPerf(v) {
   if (v == null || !Number.isFinite(Number(v))) return "—";
@@ -254,7 +326,7 @@ function renderNewStockLeaderboard(payload) {
   if (!tbody) return;
   const rows = payload?.new_stock_leaderboard || [];
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="hint">暂无新股 RS 榜单（需刷新个股RS，且存在历史不足260日的股票）</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="hint">No new-issue RS leaderboard yet</td></tr>';
     return;
   }
   tbody.innerHTML = rows
@@ -285,7 +357,7 @@ function renderStockPicks(row) {
     const link = row.stock_screener_url
       ? `<a class="industry-link" href="${row.stock_screener_url}" target="_blank" rel="noreferrer">Finviz</a>`
       : "—";
-    return `<span class="hint">无匹配 ${link}</span>`;
+    return `<span class="hint">No hits ${link}</span>`;
   }
   return tickers
     .map(
@@ -303,9 +375,9 @@ function renderTickerList(row) {
   }
   if (!tickers.length) {
     const link = row.stock_screener_url
-      ? `<a class="industry-link" href="${row.stock_screener_url}" target="_blank" rel="noreferrer">在 Finviz 查看</a>`
+      ? `<a class="industry-link" href="${row.stock_screener_url}" target="_blank" rel="noreferrer">Open in Finviz</a>`
       : '';
-    return `<p class="hint">无匹配 ${link}</p>`;
+    return `<p class="hint">No hits ${link}</p>`;
   }
   return `<ul class="ticker-list">${tickers
     .map(
@@ -329,7 +401,7 @@ function renderStrongCards(data) {
             <a class="industry-link strong-card-title" href="${row.finviz_url}" target="_blank" rel="noreferrer">${row.name}</a>
           </div>
           <div class="strong-card-right">
-            <span class="strong-card-hits">${(row.stock_picks || []).length} 只股票</span>
+            <span class="strong-card-hits">${(row.stock_picks || []).length} names</span>
             <span class="strong-card-meta">Score ${row.score.toFixed(3)}</span>
           </div>
         </header>
@@ -342,26 +414,26 @@ function renderStrongCards(data) {
 function renderCoreTable(data) {
   const tbody = document.querySelector("#coreTable tbody");
   const top = getTopStrongIndustries(data);
+  const scales = perfScales(top);
   tbody.innerHTML = top
     .map((row) => {
       const shortTrend = computeShortTrend(row);
       const longTrend = computeLongTrend(row);
       return `<tr data-key="${row.industry_key}">
         <td><a class="industry-link" href="${row.finviz_url}" target="_blank" rel="noreferrer">${row.name}</a></td>
-        <td>${row.stocks}</td>
-        <td>${row.score.toFixed(3)}</td>
-        <td class="${row.perf_w >= 0 ? "pos" : "neg"}">${pct(row.perf_w)}</td>
-        <td class="${row.perf_m >= 0 ? "pos" : "neg"}">${pct(row.perf_m)}</td>
-        <td class="${row.perf_q >= 0 ? "pos" : "neg"}">${pct(row.perf_q)}</td>
-        <td class="${row.perf_h >= 0 ? "pos" : "neg"}">${pct(row.perf_h)}</td>
-        <td class="${row.perf_y >= 0 ? "pos" : "neg"}">${pct(row.perf_y)}</td>
-        <td>${row.rank_w}/${row.rank_m}/${row.rank_q}/${row.rank_h}/${row.rank_y}</td>
+        <td class="num">${row.stocks}</td>
+        <td class="num score-cell">${row.score.toFixed(3)}</td>
+        <td>${perfMicroBar(row.perf_w, scales.perf_w)}</td>
+        <td>${perfMicroBar(row.perf_m, scales.perf_m)}</td>
+        <td>${perfMicroBar(row.perf_q, scales.perf_q)}</td>
+        <td>${perfMicroBar(row.perf_h, scales.perf_h)}</td>
+        <td>${perfMicroBar(row.perf_y, scales.perf_y)}</td>
+        <td class="ranks-cell">${rankCompactRow(row)}</td>
         <td>${renderTrendBadge(shortTrend)}</td>
         <td>${renderTrendBadge(longTrend)}</td>
       </tr>`;
     })
     .join("");
-  bindIndustryRowClicks(tbody);
 }
 
 function renderAllTable(data, filter = "") {
@@ -391,82 +463,150 @@ function renderAllTable(data, filter = "") {
       </tr>`;
     })
     .join("");
-  bindIndustryRowClicks(tbody);
 }
 
-function bindIndustryRowClicks(tbody) {
-  tbody.querySelectorAll("tr[data-key]").forEach((tr) => {
-    tr.addEventListener("click", () => {
-      const key = tr.dataset.key;
-      selectedIndustryKey = key;
-      document.getElementById("industrySelect").value = key;
-      loadHistoryChart();
-    });
+function enhanceHelpTips() {
+  document.querySelectorAll(".help-tip[data-tip]").forEach((el) => {
+    el.setAttribute("tabindex", "0");
+    el.setAttribute("role", "button");
+    if (!el.getAttribute("aria-label")) {
+      el.setAttribute("aria-label", el.getAttribute("data-tip") || "Help");
+    }
   });
 }
 
-function populateIndustrySelect(data) {
-  const select = document.getElementById("industrySelect");
-  const options = data.industries
-    .filter((i) => !i.excluded)
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map(
-      (i) => `<option value="${i.industry_key}">${i.name}</option>`
-    )
-    .join("");
-  select.innerHTML = options;
-  if (!selectedIndustryKey && data.industries.length) {
-    const firstCore = getTopStrongIndustries(data)[0];
-    selectedIndustryKey = (firstCore || data.industries[0]).industry_key;
+function setButtonBusy(btn, busy, busyLabel) {
+  if (!btn) return;
+  if (busy) {
+    if (!btn.dataset.defaultLabel) btn.dataset.defaultLabel = btn.textContent;
+    btn.disabled = true;
+    btn.setAttribute("aria-busy", "true");
+    if (busyLabel) btn.textContent = busyLabel;
+  } else {
+    btn.disabled = false;
+    btn.removeAttribute("aria-busy");
+    if (btn.dataset.defaultLabel) btn.textContent = btn.dataset.defaultLabel;
   }
-  select.value = selectedIndustryKey;
 }
 
-async function loadDates() {
-  const dates = await fetchJson("/api/snapshots/dates");
-  const select = document.getElementById("dateSelect");
-  select.innerHTML = dates.map((d) => `<option value="${d}">${d}</option>`).join("");
-  if (dates.length) {
-    select.value = dates[0];
+
+async function loadDecisionView(date, snapshot = null) {
+  const [snap, rsWatch] = await Promise.all([
+    snapshot ? Promise.resolve(snapshot) : fetchJson(`/api/snapshots/${encodeURIComponent(date)}`),
+    fetchJson(
+      `/api/rs/${encodeURIComponent(date)}?watchlist_only=true&watchlist_limit=120`,
+    ).catch(() => null),
+  ]);
+  currentSnapshot = snap;
+  renderSummary(snap);
+  renderCoreTable(snap);
+  renderAllTable(snap);
+  renderStrongCards(snap);
+  if (rsWatch) {
+    currentRsSnapshot = {
+      snapshot_date: date,
+      rows: [],
+      watchlist: rsWatch.watchlist || [],
+      new_stock_leaderboard: [],
+      rs_meta: rsWatch.rs_meta || null,
+    };
+    renderWatchlistCharts(currentRsSnapshot);
   }
-  return dates;
+  return snap;
 }
 
-async function loadSnapshot(date) {
-  currentSnapshot = await fetchJson(`/api/snapshots/${date}`);
-  renderSummary(currentSnapshot);
-  renderCoreTable(currentSnapshot);
-  renderAllTable(currentSnapshot);
-  renderStrongCards(currentSnapshot);
+async function loadSnapshot(date, { includeRsDetails = true } = {}) {
+  await loadDecisionView(date);
+  if (includeRsDetails) {
+    loadRsDetails(date).catch(() => {});
+  }
+}
+
+async function loadRsDetails(date) {
+  if (currentRsSnapshot?.rows?.length) {
+    renderCoveragePanel(currentSnapshot, currentRsSnapshot);
+    return;
+  }
   await loadRsSnapshot(date);
   renderCoveragePanel(currentSnapshot, currentRsSnapshot);
-  populateIndustrySelect(currentSnapshot);
-  await loadHistoryChart();
 }
 
-async function autoMorningRefreshIfNeeded() {
-  const date = document.getElementById("dateSelect").value;
-  if (!date) return;
-  if (bjHourNow() < STRONG_MORNING_SYNC_HOUR_BJ) return;
-  const stampKey = `strong:auto-refresh:${bjDateKey()}:${date}`;
-  if (localStorage.getItem(stampKey) === "done") return;
+function applyAutoStatus(dashboard) {
+  if (!dashboard) return;
+  if (currentSnapshot) {
+    renderSummary(currentSnapshot, dashboard);
+  }
+  const headline = dashboard.headline || "";
+  const isError = dashboard.daily_status === "failed";
+  const isRunning = dashboard.daily_status === "running";
+  if (isRunning) {
+    const progress = dashboard.progress || {};
+    const label = progress.current_label ? ` · ${progress.current_label}` : "";
+    setRsStatus(`${headline || "Updating…"}${label}`);
+  } else if (headline) {
+    setRsStatus(headline, isError);
+  } else if (dashboard.daily_status === "ready" || dashboard.daily_status === "degraded") {
+    setRsStatus("Data ready");
+  }
+}
+
+async function watchAutomation() {
   if (autoRefreshBusy) return;
   autoRefreshBusy = true;
-  setRsStatus("早间自动更新中：行业个股 + 观察名单…");
   try {
-    await fetchCoreStocks();
-    const rsLite = await fetchJson(`/api/rs/${encodeURIComponent(date)}?limit=1&watchlist_limit=1`);
-    if (!(rsLite.rows || []).length) {
-      setRsStatus("早间自动更新中：检测到RS为空，自动补算RS…");
-      await computeRs();
+    const status = await fetchJson("/api/automation/status");
+    applyAutoStatus(status);
+    const displayDate = status.display_date;
+    if (displayDate && displayDate !== currentSnapshot?.snapshot_date) {
+      await loadSnapshot(displayDate);
     }
-    localStorage.setItem(stampKey, "done");
-    setRsStatus("早间自动更新完成");
   } catch (err) {
-    setRsStatus(`早间自动更新失败：${err.message}`, true);
+    setRsStatus(`Status check failed: ${err.message}`, true);
   } finally {
     autoRefreshBusy = false;
   }
+}
+
+function startAutomationWatch() {
+  if (automationTimer) clearInterval(automationTimer);
+  automationTimer = setInterval(() => {
+    watchAutomation().catch(() => {});
+  }, 30000);
+}
+
+async function refreshFromServer() {
+  const [snapshotResult, statusResult] = await Promise.allSettled([
+    fetchJson("/api/snapshots/latest"),
+    fetchJson("/api/automation/status"),
+  ]);
+
+  if (statusResult.status === "fulfilled") {
+    applyAutoStatus(statusResult.value);
+  }
+
+  if (snapshotResult.status === "fulfilled") {
+    const snapshot = snapshotResult.value;
+    const date = snapshot.snapshot_date;
+    await loadDecisionView(date, snapshot);
+    if (statusResult.status === "fulfilled") {
+      renderSummary(snapshot, statusResult.value);
+    }
+    loadRsDetails(date).catch(() => {});
+    return statusResult.status === "fulfilled" ? statusResult.value : null;
+  }
+
+  if (snapshotResult.status === "rejected") {
+    showToast(snapshotResult.reason?.message || "Failed to load snapshot", true);
+  }
+  const status = statusResult.status === "fulfilled" ? statusResult.value : null;
+  if (!status?.has_snapshot) {
+    document.getElementById("summary").innerHTML =
+      '<p class="snapshot-meta">No snapshot yet — first daily run in progress…</p>';
+    setRsStatus("Waiting for first update");
+  } else if (statusResult.status === "rejected") {
+    setRsStatus("Cannot reach server status", true);
+  }
+  return status;
 }
 
 async function loadRsSnapshot(date) {
@@ -484,97 +624,7 @@ async function loadRsSnapshot(date) {
   renderNewStockLeaderboard(currentRsSnapshot);
   renderWatchlistTable(currentRsSnapshot);
   renderWatchlistCharts(currentRsSnapshot);
-}
-
-function destroyChart() {
-  if (historyChart) {
-    historyChart.destroy();
-    historyChart = null;
-  }
-}
-
-async function loadHistoryChart() {
-  const key = document.getElementById("industrySelect").value || selectedIndustryKey;
-  if (!key) return;
-
-  const multi = document.getElementById("multiRankToggle").checked;
-  destroyChart();
-
-  const ctx = document.getElementById("historyChart");
-
-  if (multi) {
-    const payload = await fetchJson(
-      `/api/industry/${key}/history/multi?metrics=rank_w,rank_m,rank_q,rank_h,rank_y`
-    );
-    const dates = payload.series.rank_m?.map((p) => p.date) || [];
-    historyChart = new Chart(ctx, {
-      type: "line",
-      data: {
-        labels: dates,
-        datasets: Object.entries(payload.series).map(([metric, points]) => ({
-          label: metric,
-          data: points.map((p) => p.value),
-          borderColor: rankColors[metric] || "#fff",
-          tension: 0.2,
-          pointRadius: 2,
-        })),
-      },
-      options: chartOptions(true),
-    });
-    return;
-  }
-
-  const metric = document.getElementById("metricSelect").value;
-  const payload = await fetchJson(`/api/industry/${key}/history?metric=${metric}`);
-  const labels = payload.series.map((p) => p.snapshot_date);
-  const values = payload.series.map((p) => p.value);
-
-  historyChart = new Chart(ctx, {
-    type: "line",
-    data: {
-      labels,
-      datasets: [
-        {
-          label: `${payload.series[0]?.name || key} · ${metric}`,
-          data: values,
-          borderColor: rankColors[metric] || "#3b82f6",
-          tension: 0.2,
-          pointRadius: 3,
-          fill: false,
-        },
-      ],
-    },
-    options: chartOptions(metric.startsWith("rank_")),
-  });
-}
-
-function chartOptions(invertY) {
-  return {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: {
-      legend: { labels: { color: "#e7ecf3" } },
-    },
-    scales: {
-      x: { ticks: { color: "#93a4b8" }, grid: { color: "rgba(255,255,255,0.06)" } },
-      y: {
-        reverse: invertY,
-        ticks: { color: "#93a4b8" },
-        grid: { color: "rgba(255,255,255,0.06)" },
-        title: {
-          display: invertY,
-          text: "排名（越小越强，曲线向下=走强）",
-          color: "#93a4b8",
-        },
-      },
-    },
-  };
-}
-
-function setConfigStatus(message, isError = false) {
-  const el = document.getElementById("configStatus");
-  el.textContent = message;
-  el.className = isError ? "config-status error" : "config-status";
+  if (currentSnapshot) renderSummary(currentSnapshot);
 }
 
 function setRsStatus(message, isError = false) {
@@ -584,74 +634,10 @@ function setRsStatus(message, isError = false) {
   el.className = isError ? "inline-status error" : "inline-status";
 }
 
-function setCancelRsEnabled(enabled) {
-  const btn = document.getElementById("cancelRsBtn");
-  if (!btn) return;
-  btn.disabled = !enabled;
-}
-
-function rsKindLabel(kind) {
-  return kind === "new" ? "新股RS" : "RS";
-}
-
-async function pollRsProgress(date, kind = "main") {
-  const p = await fetchJson(
-    `/api/snapshots/${encodeURIComponent(date)}/rs-progress?kind=${encodeURIComponent(kind)}`
-  );
-  const label = rsKindLabel(kind);
-  if (p.status === "running" && p.total > 0) {
-    const pct = ((p.progress_ratio || 0) * 100).toFixed(1);
-    setRsStatus(`${label}计算中：${p.processed}/${p.total} (${pct}%)`);
-  } else if (p.status === "running") {
-    setRsStatus(`${label}计算中：准备任务与样本…`);
-  } else if (p.status === "cancelling") {
-    setRsStatus(`${label}任务取消中，等待收尾…`);
-  } else if (p.status === "cancelled") {
-    throw new Error(`${label}任务已取消`);
-  } else if (p.status === "error") {
-    throw new Error(p.error || `${label}计算失败`);
-  }
-  return p;
-}
-
-async function waitForRsDone(date, kind = "main") {
-  const timeoutMs = 2 * 60 * 60 * 1000;
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const p = await pollRsProgress(date, kind);
-    if (p.status === "done") return p;
-    if (p.status === "idle") {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      continue;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-  }
-  throw new Error("RS 计算超时，请稍后查看进度");
-}
-
-async function cancelRs() {
-  if (!activeRsJob || !activeRsJob.date) {
-    setRsStatus("当前没有可取消的RS任务");
-    return;
-  }
-  const date = activeRsJob.date;
-  const kind = activeRsJob.kind || "main";
-  const label = rsKindLabel(kind);
-  try {
-    const ret = await fetchJson(
-      `/api/snapshots/${encodeURIComponent(date)}/rs-cancel?kind=${encodeURIComponent(kind)}`,
-      { method: "POST" }
-    );
-    if (ret.status === "cancelling") {
-      setRsStatus(`已发送${label}取消请求，等待任务收尾…`);
-    } else {
-      setRsStatus(`当前没有运行中的${label}任务`);
-      setCancelRsEnabled(false);
-    }
-  } catch (err) {
-    setRsStatus(`取消失败：${err.message}`, true);
-    showToast(err.message, true);
-  }
+function setConfigStatus(message, isError = false) {
+  const el = document.getElementById("configStatus");
+  el.textContent = message;
+  el.className = isError ? "config-status error" : "config-status";
 }
 
 function updateWeightHint(weights, normalized) {
@@ -660,7 +646,7 @@ function updateWeightHint(weights, normalized) {
     .map(([k, v]) => `${k}: ${(v * 100).toFixed(1)}%`)
     .join(" · ");
   document.getElementById("weightHint").textContent =
-    `当前权重总和 ${total.toFixed(2)}，归一化后 → ${parts}`;
+    `Weight sum ${total.toFixed(2)} · normalized → ${parts}`;
 }
 
 function fillConfigForm(cfg) {
@@ -760,7 +746,9 @@ function applyThresholdPreset(name) {
   document.getElementById("accelerationRankDelta").value = preset.acceleration_rank_delta;
   document.getElementById("pullbackMidtermRankMax").value = preset.pullback_midterm_rank_max;
   document.getElementById("pullbackWeekRankMin").value = preset.pullback_week_rank_min;
-  setConfigStatus(`已套用“${name === "conservative" ? "保守" : name === "balanced" ? "均衡" : "激进"}”预设，点击保存即可生效`);
+  const presetName =
+    name === "conservative" ? "Conservative" : name === "balanced" ? "Balanced" : "Aggressive";
+  setConfigStatus(`Applied ${presetName} preset — click Save to keep`);
 }
 
 async function loadConfigForm() {
@@ -769,25 +757,15 @@ async function loadConfigForm() {
   return cfg;
 }
 
-async function saveConfig(recompute = false) {
+async function saveConfig() {
   const payload = readConfigForm();
-  setConfigStatus("保存中…");
+  setConfigStatus("Saving…");
   const result = await fetchJson("/api/config", {
     method: "PUT",
     body: JSON.stringify(payload),
   });
   fillConfigForm(result.config);
-
-  if (recompute) {
-    setConfigStatus("配置已保存，正在重新计算快照…");
-    const date = document.getElementById("dateSelect").value;
-    const query = date ? `?snapshot_date=${encodeURIComponent(date)}` : "";
-    await fetchJson(`/api/snapshots/recompute-latest${query}`, { method: "POST" });
-    await loadSnapshot(date || (await loadDates())[0]);
-    setConfigStatus("配置已保存，当前快照已按新规则重算");
-  } else {
-    setConfigStatus("配置已保存");
-  }
+  setConfigStatus("Saved — applies on next daily run");
 }
 
 function bindConfigForm() {
@@ -805,157 +783,13 @@ function bindConfigForm() {
 
   document.getElementById("configForm").addEventListener("submit", (e) => {
     e.preventDefault();
-    saveConfig(false).catch((err) => setConfigStatus(err.message, true));
+    saveConfig().catch((err) => setConfigStatus(err.message, true));
   });
-
-  document.getElementById("saveAndRecomputeBtn").addEventListener("click", () => {
-    saveConfig(true).catch((err) => setConfigStatus(err.message, true));
-  });
-}
-
-async function fetchCoreStocks() {
-  const date = document.getElementById("dateSelect").value;
-  if (!date) return;
-  const btn = document.getElementById("fetchCoreStocksBtn");
-  btn.disabled = true;
-  btn.textContent = "抓取中…";
-  try {
-    const result = await fetchJson(`/api/snapshots/${encodeURIComponent(date)}/fetch-stocks`, {
-      method: "POST",
-    });
-    if (currentSnapshot && currentSnapshot.snapshot_date === date) {
-      const byKey = result.results || {};
-      currentSnapshot.industries = (currentSnapshot.industries || []).map((row) => {
-        const picked = byKey[row.industry_key];
-        if (!picked) return row;
-        return {
-          ...row,
-          stock_picks: picked.tickers || [],
-          stock_picks_error: picked.error || null,
-          stock_screener_url: picked.screener_url || row.stock_screener_url || null,
-        };
-      });
-      if (result.watchlist && result.watchlist.watchlist_count != null) {
-        currentSnapshot.rs_watchlist_count = result.watchlist.watchlist_count;
-      }
-      renderSummary(currentSnapshot);
-      renderCoreTable(currentSnapshot);
-      renderAllTable(currentSnapshot, document.getElementById("searchInput").value || "");
-      renderStrongCards(currentSnapshot);
-      await loadRsSnapshot(date);
-      renderCoveragePanel(currentSnapshot, currentRsSnapshot);
-    } else {
-      await loadSnapshot(date);
-    }
-    const wl = result.watchlist;
-    if (wl && !wl.skipped && wl.watchlist_count != null) {
-      setRsStatus(`行业个股已更新，交叉观察名单 ${wl.watchlist_count} 只`);
-    } else if (wl?.skipped) {
-      setRsStatus("行业个股已更新；观察名单需先完成个股 RS 计算", true);
-    }
-  } catch (err) {
-    showToast(err.message, true);
-  } finally {
-    btn.disabled = false;
-    syncTopListLabels(currentTopListCount);
-  }
-}
-
-async function computeRs() {
-  const date = document.getElementById("dateSelect").value;
-  if (!date) return;
-  const btn = document.getElementById("computeRsBtn");
-  const startAt = Date.now();
-  activeRsJob = { date, kind: "main" };
-  btn.disabled = true;
-  setCancelRsEnabled(true);
-  btn.textContent = "计算中…";
-  setRsStatus("已开始计算，首次全量可能需要几分钟…");
-
-  try {
-    const kick = await fetchJson(`/api/snapshots/${encodeURIComponent(date)}/compute-rs?async_mode=true`, {
-      method: "POST",
-    });
-    if (kick.status === "running") {
-      setRsStatus("检测到已有 RS 任务在运行，正在接管进度…");
-    } else {
-      setRsStatus("RS 任务已启动，正在计算…");
-    }
-    await waitForRsDone(date, "main");
-    await loadSnapshot(date);
-    const sec = ((Date.now() - startAt) / 1000).toFixed(1);
-    setRsStatus(`计算完成，耗时 ${sec}s`);
-  } catch (err) {
-    if ((err.message || "").includes("已取消")) {
-      setRsStatus("RS任务已取消");
-    } else {
-      setRsStatus(`计算失败：${err.message}`, true);
-      showToast(err.message, true);
-    }
-  } finally {
-    activeRsJob = null;
-    setCancelRsEnabled(false);
-    btn.disabled = false;
-    btn.textContent = "刷新个股RS";
-  }
-}
-
-async function computeNewRs() {
-  const date = document.getElementById("dateSelect").value;
-  if (!date) return;
-  const btn = document.getElementById("computeNewRsBtn");
-  const startAt = Date.now();
-  activeRsJob = { date, kind: "new" };
-  btn.disabled = true;
-  setCancelRsEnabled(true);
-  btn.textContent = "计算中…";
-  setRsStatus("已开始计算新股RS，通常会快于主RS…");
-  try {
-    const kick = await fetchJson(
-      `/api/snapshots/${encodeURIComponent(date)}/compute-new-stock-rs?async_mode=true`,
-      { method: "POST" }
-    );
-    if (kick.status === "running") {
-      setRsStatus("检测到已有新股RS任务在运行，正在接管进度…");
-    } else {
-      setRsStatus("新股RS任务已启动，正在计算…");
-    }
-    await waitForRsDone(date, "new");
-    await loadSnapshot(date);
-    const sec = ((Date.now() - startAt) / 1000).toFixed(1);
-    setRsStatus(`新股RS计算完成，耗时 ${sec}s`);
-  } catch (err) {
-    if ((err.message || "").includes("已取消")) {
-      setRsStatus("新股RS任务已取消");
-    } else {
-      setRsStatus(`新股RS计算失败：${err.message}`, true);
-      showToast(err.message, true);
-    }
-  } finally {
-    activeRsJob = null;
-    setCancelRsEnabled(false);
-    btn.disabled = false;
-    btn.textContent = "刷新新股RS";
-  }
 }
 
 async function init() {
-  document.getElementById("refreshBtn").addEventListener("click", () => location.reload());
-  document.getElementById("dateSelect").addEventListener("change", (e) => {
-    loadSnapshot(e.target.value).catch((err) => showToast(err.message, true));
-  });
-  document.getElementById("industrySelect").addEventListener("change", (e) => {
-    selectedIndustryKey = e.target.value;
-    loadHistoryChart().catch((err) => showToast(err.message, true));
-  });
-  document.getElementById("metricSelect").addEventListener("change", () => {
-    if (!document.getElementById("multiRankToggle").checked) {
-      loadHistoryChart().catch((err) => showToast(err.message, true));
-    }
-  });
-  document.getElementById("multiRankToggle").addEventListener("change", () => {
-    loadHistoryChart().catch((err) => showToast(err.message, true));
-  });
+  enhanceHelpTips();
+  renderHealthBadge("healthBadge").catch(() => {});
   document.getElementById("searchInput").addEventListener("input", (e) => {
     if (currentSnapshot) renderAllTable(currentSnapshot, e.target.value);
   });
@@ -964,29 +798,11 @@ async function init() {
   });
 
   bindConfigForm();
-  document.getElementById("fetchCoreStocksBtn").addEventListener("click", () => {
-    fetchCoreStocks().catch((err) => showToast(err.message, true));
-  });
-  document.getElementById("computeRsBtn").addEventListener("click", () => {
-    computeRs().catch((err) => showToast(err.message, true));
-  });
-  document.getElementById("computeNewRsBtn").addEventListener("click", () => {
-    computeNewRs().catch((err) => showToast(err.message, true));
-  });
-  document.getElementById("cancelRsBtn").addEventListener("click", () => {
-    cancelRs().catch((err) => showToast(err.message, true));
-  });
 
   try {
-    const dates = await loadDates();
-    if (!dates.length) {
-      document.getElementById("summary").innerHTML =
-        '<p class="hint">尚无历史快照。请在项目目录运行：<code>python run_daily.py</code></p>';
-      return;
-    }
-    await loadSnapshot(dates[0]);
-    await autoMorningRefreshIfNeeded();
-    loadConfigForm().catch((err) => setConfigStatus(err.message, true));
+    await refreshFromServer();
+    startAutomationWatch();
+    loadConfigForm().catch(() => {});
   } catch (err) {
     showToast(err.message, true);
   }

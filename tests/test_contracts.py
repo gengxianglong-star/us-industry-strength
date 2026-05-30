@@ -96,7 +96,7 @@ class ScoringTagTests(unittest.TestCase):
         )
         scored = score_industries(rows, _test_config(acceleration_rank_delta=5))
         accel = next(x for x in scored if x.key == "accel")
-        self.assertIn("加速↑", accel.tags)
+        self.assertIn("Accel↑", accel.tags)
 
     def test_pullback_tag_on_strong_midterm_week_weakness(self) -> None:
         rows = [
@@ -122,7 +122,7 @@ class ScoringTagTests(unittest.TestCase):
         )
         scored = score_industries(rows, _test_config())
         item = next(x for x in scored if x.key == "pullback")
-        self.assertIn("强势回调", item.tags)
+        self.assertIn("Strong PB", item.tags)
 
 
 class SnapshotStaleFallbackTests(unittest.TestCase):

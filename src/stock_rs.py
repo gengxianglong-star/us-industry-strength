@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import ftplib
 import io
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -270,6 +272,8 @@ def backfill_new_stock_rs_for_snapshot(
             self.key = d["industry_key"]
             self.name = d["name"]
             self.score = float(d.get("score") or 0)
+            self.rank_m = int(d.get("rank_m") or 9999)
+            self.rank_q = int(d.get("rank_q") or 9999)
             self.excluded = bool(d.get("excluded"))
 
     scored = [_Industry(r) for r in scored_rows if not r.get("excluded")]
@@ -755,6 +759,84 @@ def fetch_yahoo_batch_daily_bars(
     return out
 
 
+def _yahoo_rs_batches(symbols: list[str], batch_size: int) -> list[list[str]]:
+    return [symbols[i : i + batch_size] for i in range(0, len(symbols), batch_size)]
+
+
+def _fetch_yahoo_batch_with_retry(
+    batch: list[str],
+    *,
+    request_timeout: int,
+    user_agent: str,
+    retry_pause_seconds: float = 0.8,
+) -> dict[str, list[dict[str, Any]]]:
+    if not batch:
+        return {}
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": user_agent})
+        bars_map = fetch_yahoo_batch_daily_bars(batch, session, timeout=request_timeout)
+    if bars_map:
+        return bars_map
+    time.sleep(retry_pause_seconds)
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": user_agent})
+        return fetch_yahoo_batch_daily_bars(batch, session, timeout=request_timeout)
+
+
+def _run_yahoo_batch_rs_fetch(
+    *,
+    target_symbols: list[str],
+    yahoo_batch_size: int,
+    yahoo_batch_workers: int,
+    request_timeout: int,
+    user_agent: str,
+    storage: Storage,
+    snapshot_date: str,
+    min_price_rows: int,
+    perf_map: dict[str, dict[str, Any]],
+    issues_map: dict[str, str],
+    insufficient_bars: dict[str, list[dict[str, Any]]],
+    save_price_history: bool,
+    progress_callback: Callable[[int, int], None] | None,
+) -> None:
+    batches = _yahoo_rs_batches(target_symbols, yahoo_batch_size)
+    total_symbols = len(target_symbols)
+    processed = 0
+    apply_lock = threading.Lock()
+
+    def _process_batch(batch: list[str]) -> None:
+        nonlocal processed
+        bars_map = _fetch_yahoo_batch_with_retry(
+            batch,
+            request_timeout=request_timeout,
+            user_agent=user_agent,
+        )
+        with apply_lock:
+            for symbol in batch:
+                payload = _symbol_payload_from_bars(
+                    symbol,
+                    bars_map.get(symbol, []),
+                    min_price_rows=min_price_rows,
+                    source="yahoo",
+                )
+                _apply_symbol_payload(
+                    payload,
+                    storage=storage,
+                    snapshot_date=snapshot_date,
+                    perf_map=perf_map,
+                    issues_map=issues_map,
+                    insufficient_bars=insufficient_bars,
+                    save_price_history=save_price_history,
+                )
+            processed += len(batch)
+            if progress_callback and (processed % 25 == 0 or processed >= total_symbols):
+                progress_callback(processed, total_symbols)
+
+    workers = max(1, min(yahoo_batch_workers, len(batches)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        list(executor.map(_process_batch, batches))
+
+
 def _calc_performance(bars: list[dict[str, Any]]) -> dict[str, float] | None:
     if len(bars) < PERF_INDEX_OFFSETS["year"] + 1:
         return None
@@ -781,6 +863,8 @@ def compute_and_store_stock_rs(
     snapshot_date: str,
     scored_industries: list[ScoredIndustry],
     config: dict[str, Any],
+    *,
+    force_full: bool = False,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     rs_cfg = config.get("stock_rs", {})
@@ -789,14 +873,16 @@ def compute_and_store_stock_rs(
     max_workers = int(rs_cfg.get("max_workers", 24))
     max_workers = max(4, min(64, max_workers))
     save_price_history = bool(rs_cfg.get("save_price_history", False))
-    incremental_mode = bool(rs_cfg.get("incremental_mode", True))
+    incremental_mode = bool(rs_cfg.get("incremental_mode", True)) and (not force_full)
     cross_top_percent = float(rs_cfg.get("cross_top_percent", 0.1))
     cross_top_percent = max(0.01, min(1.0, cross_top_percent))
     tier_a = float(rs_cfg.get("tier_a_score", 0.8))
     tier_b = float(rs_cfg.get("tier_b_score", 0.65))
     prefer_stooq = bool(rs_cfg.get("prefer_stooq", False))
-    yahoo_batch_size = int(rs_cfg.get("yahoo_batch_size", 100))
-    yahoo_batch_size = max(20, min(200, yahoo_batch_size))
+    yahoo_batch_size = int(rs_cfg.get("yahoo_batch_size", 20))
+    yahoo_batch_size = max(5, min(50, yahoo_batch_size))
+    yahoo_batch_workers = int(rs_cfg.get("yahoo_batch_workers", 6))
+    yahoo_batch_workers = max(1, min(12, yahoo_batch_workers))
 
     universe = load_us_universe_with_cache(storage, config)
     symbols = [row["symbol"] for row in universe]
@@ -882,39 +968,21 @@ def compute_and_store_stock_rs(
                     if progress_callback and (processed % 25 == 0 or processed == total_symbols):
                         progress_callback(processed, total_symbols)
         else:
-            session = requests.Session()
-            session.headers.update({"User-Agent": user_agent})
-            try:
-                for batch_start in range(0, len(target_symbols), yahoo_batch_size):
-                    batch = target_symbols[batch_start : batch_start + yahoo_batch_size]
-                    bars_map = fetch_yahoo_batch_daily_bars(
-                        batch,
-                        session,
-                        timeout=request_timeout,
-                    )
-                    for symbol in batch:
-                        payload = _symbol_payload_from_bars(
-                            symbol,
-                            bars_map.get(symbol, []),
-                            min_price_rows=min_price_rows,
-                            source="yahoo",
-                        )
-                        _apply_symbol_payload(
-                            payload,
-                            storage=storage,
-                            snapshot_date=snapshot_date,
-                            perf_map=perf_map,
-                            issues_map=issues_map,
-                            insufficient_bars=insufficient_bars,
-                            save_price_history=save_price_history,
-                        )
-                    processed += len(batch)
-                    if progress_callback and (
-                        processed % 25 == 0 or processed == total_symbols
-                    ):
-                        progress_callback(processed, total_symbols)
-            finally:
-                session.close()
+            _run_yahoo_batch_rs_fetch(
+                target_symbols=target_symbols,
+                yahoo_batch_size=yahoo_batch_size,
+                yahoo_batch_workers=yahoo_batch_workers,
+                request_timeout=request_timeout,
+                user_agent=user_agent,
+                storage=storage,
+                snapshot_date=snapshot_date,
+                min_price_rows=min_price_rows,
+                perf_map=perf_map,
+                issues_map=issues_map,
+                insufficient_bars=insufficient_bars,
+                save_price_history=save_price_history,
+                progress_callback=progress_callback,
+            )
     elif progress_callback:
         progress_callback(0, 0)
 
@@ -948,6 +1016,13 @@ def compute_and_store_stock_rs(
                 "worker_errors": worker_errors,
                 "preserved_existing_rs": True,
             }
+
+        # 全量或无历史时，如果所有目标股票都 no_bars，视为上游行情源不可用，交给任务层报错重试
+        if target_symbols and no_bars_count >= len(target_symbols):
+            raise RuntimeError(
+                "RS 计算失败：行情源返回空数据（no_bars 全量命中）。"
+                "请检查网络/代理，或稍后重试。"
+            )
 
         storage.save_stock_rs_snapshot(snapshot_date, [])
         storage.save_stock_rs_issues(snapshot_date, issues_map)

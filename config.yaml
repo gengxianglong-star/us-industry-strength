@@ -31,12 +31,13 @@ stock_rs:
   cross_top_percent: 0.1
   universe_cap: 0
   universe_cache_hours: 24
-  yahoo_batch_size: 100
+  yahoo_batch_size: 20
+  yahoo_batch_workers: 6
   new_stock_enabled: true
 scraper:
   user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
-  request_delay_seconds: 1.5
-  stock_pick_workers: 3
+  request_delay_seconds: 1.0
+  stock_pick_workers: 5
   request_retries: 3
   stale_fallback_enabled: true
   cookie_file: ""
@@ -56,5 +57,21 @@ breadth:
 server:
   host: 127.0.0.1
   port: 8080
+automation:
+  enabled: true
+  timezone: Asia/Shanghai
+  daily_hour: 6
+  daily_minute: 30
+  weekdays_only: true
+  run_on_startup: true
+  watchdog_interval_minutes: 20
+  retry_failed: true
+  retry_failed_rs: true
+  catchup_interval_minutes: 2
+  auto_install_service: true
+  daily:
+    force_full_rs: false
+    skip_breadth: false
+    rs_async: true
 database:
   path: data/industry_strength.db

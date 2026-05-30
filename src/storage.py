@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from src.scoring import ScoredIndustry
 
@@ -1339,6 +1340,129 @@ class Storage:
         data["excluded"] = bool(data.get("excluded"))
         return data
 
+    def recover_stale_jobs(self, stale_seconds: int = 1800) -> dict[str, list[str]]:
+        """Mark orphaned running snapshot runs and RS jobs as failed."""
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        recovered: dict[str, list[str]] = {"snapshot_runs": [], "rs_jobs": [], "finalize": []}
+        with self._connect() as conn:
+            run_rows = conn.execute(
+                """
+                SELECT snapshot_date, updated_at, current_step
+                FROM snapshot_runs
+                WHERE status = 'running'
+                """
+            ).fetchall()
+            for row in run_rows:
+                age = stale_seconds + 1
+                try:
+                    updated = datetime.fromisoformat(str(row["updated_at"]))
+                    if updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=timezone.utc)
+                    age = (now - updated).total_seconds()
+                except ValueError:
+                    pass
+                snap_date = str(row["snapshot_date"])
+                current_step = str(row["current_step"] or "")
+                if age > stale_seconds:
+                    rs_done = conn.execute(
+                        """
+                        SELECT 1 FROM rs_job_runs
+                        WHERE snapshot_date = ? AND job_kind = 'main' AND status = 'done'
+                        ORDER BY started_at DESC
+                        LIMIT 1
+                        """,
+                        (snap_date,),
+                    ).fetchone()
+                    if current_step in {"awaiting_rs", "stock_rs_async_done"} and rs_done:
+                        recovered["finalize"].append(snap_date)
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE snapshot_runs
+                        SET status = 'failed',
+                            error = ?,
+                            updated_at = ?,
+                            finished_at = ?
+                        WHERE snapshot_date = ?
+                        """,
+                        (
+                            f"stale run recovered (>{stale_seconds}s)",
+                            now_iso,
+                            now_iso,
+                            row["snapshot_date"],
+                        ),
+                    )
+                    recovered["snapshot_runs"].append(str(row["snapshot_date"]))
 
-def today_snapshot_date() -> str:
-    return date.today().isoformat()
+            job_rows = conn.execute(
+                """
+                SELECT job_id, snapshot_date, job_kind
+                FROM rs_job_runs
+                WHERE status IN ('running', 'cancelling')
+                """
+            ).fetchall()
+            for row in job_rows:
+                age = stale_seconds + 1
+                detail = conn.execute(
+                    "SELECT updated_at FROM rs_job_runs WHERE job_id = ?",
+                    (row["job_id"],),
+                ).fetchone()
+                try:
+                    updated = datetime.fromisoformat(str(detail["updated_at"]))
+                    if updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=timezone.utc)
+                    age = (now - updated).total_seconds()
+                except (ValueError, TypeError):
+                    pass
+                if age > stale_seconds:
+                    conn.execute(
+                        """
+                        UPDATE rs_job_runs
+                        SET status = 'error',
+                            error = ?,
+                            updated_at = ?,
+                            finished_at = ?
+                        WHERE job_id = ?
+                        """,
+                        (
+                            f"stale job recovered (>{stale_seconds}s)",
+                            now_iso,
+                            now_iso,
+                            row["job_id"],
+                        ),
+                    )
+                    recovered["rs_jobs"].append(
+                        f"{row['snapshot_date']}:{row['job_kind']}:{row['job_id']}"
+                    )
+        return recovered
+
+
+NYSE_TZ = ZoneInfo("America/New_York")
+US_MARKET_CLOSE_HOUR = 16
+
+
+def today_snapshot_date(now: datetime | None = None) -> str:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(NYSE_TZ).date().isoformat()
+
+
+def _roll_to_weekday(d: date) -> date:
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def latest_trading_date(now: datetime | None = None) -> str:
+    """Latest US equity session we should target (NYSE tz, weekdays, after 16:00 ET)."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    ny = current.astimezone(NYSE_TZ)
+    today = ny.date()
+    d = _roll_to_weekday(today)
+    if d == today and today.weekday() < 5 and ny.hour < US_MARKET_CLOSE_HOUR:
+        d = _roll_to_weekday(today - timedelta(days=1))
+    return d.isoformat()

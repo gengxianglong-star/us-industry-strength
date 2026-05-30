@@ -6,3 +6,9 @@ data/
 .idea/
 .vscode/
 *.log
+.tools/
+frontend/node_modules/
+web/dist/
+frontend/dist/
+frontend/public/data/*.json
+*.tsbuildinfo

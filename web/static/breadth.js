@@ -9,7 +9,27 @@ let activeCockpitKey = null;
 let cockpitClickBound = false;
 const BREADTH_MORNING_SYNC_HOUR_BJ = 6;
 
-/** 驾驶舱卡片 → 图表 canvas 与要高亮的序列 */
+const COCKPIT_MODULE_TITLE = {
+  quarter_trend: "Quarter",
+  half_season_trend: "Half Qtr",
+  monthly_trend: "Monthly",
+  cross_5_10: "5-10 Cross",
+  trend_10d: "10D Trend",
+  trend_5d: "5D Trend",
+  extreme_alert: "T2108",
+};
+
+const COCKPIT_HELP_TITLE = {
+  quarter_trend: "Quarter Trend",
+  half_season_trend: "Half Quarter Trend",
+  monthly_trend: "Monthly Trend",
+  cross_5_10: "5-10 Cross",
+  trend_10d: "10D Trend",
+  trend_5d: "5D Trend",
+  extreme_alert: "T2108 Alert",
+};
+
+/** Cockpit card → chart canvas and highlighted series */
 const COCKPIT_CHART_LINK = {
   quarter_trend: { canvasId: "quarter25Chart", datasets: ["Up 25% Quarter", "Down 25% Quarter"] },
   half_season_trend: { canvasId: "spxBreadthChart", datasets: ["Up 13%/34D", "Down 13%/34D"] },
@@ -98,7 +118,7 @@ function renderTable(payload) {
     idx += 1;
     while (idx < headers.length && !(groupHeaders[idx] || "").trim()) idx += 1;
     const end = idx;
-    const title = raw || headers[start] || "指标";
+    const title = raw || headers[start] || "Metric";
     groups.push({ title, span: end - start });
   }
 
@@ -214,38 +234,43 @@ function buildCockpitHelpClient(thresholds, ratio) {
   const g = ratio?.green || DEFAULT_RATIO_BG.green;
   const r = ratio?.red || DEFAULT_RATIO_BG.red;
   const trendBg = [
-    `绿灯背景锚点 ${fmtThreshold(g.anchor)}（与季度/半季/月度/5-10交叉 绿灯一致）`,
-    `区间 [${fmtThreshold(g.low_min)}, ${fmtThreshold(g.high_max)}]，锚点以下/以上各 ${g.tier_count} 档`,
-    "比值 < 锚点变浅，> 锚点加深；超出区间取最浅/最深档",
-    `红灯背景锚点 ${fmtThreshold(r.anchor)}（与四模块红灯一致）`,
-    `区间 [${fmtThreshold(r.low_min)}, ${fmtThreshold(r.high_max)}]，锚点以下/以上各 ${r.tier_count} 档`,
-    "比值 < 锚点加深，> 锚点变浅",
+    `Green anchor ${fmtThreshold(g.anchor)} (matches quarter/half/month/5-10 green lights)`,
+    `Range [${fmtThreshold(g.low_min)}, ${fmtThreshold(g.high_max)}], ${g.tier_count} tiers below/above anchor`,
+    "Below anchor = lighter; above = deeper; out of range = min/max shade",
+    `Red anchor ${fmtThreshold(r.anchor)} (matches four red-light modules)`,
+    `Range [${fmtThreshold(r.low_min)}, ${fmtThreshold(r.high_max)}], ${r.tier_count} tiers below/above anchor`,
+    "Below anchor = deeper; above = lighter",
   ];
   const trendState = [
-    "≥ Overbought 下限 → OVERBOUGHT（绿灯）",
-    "≤ Oversold 上限 → OVERSOLD（红灯）",
-    "介于两者之间且 ≥ 1 → NORMAL（绿灯，强度随比值升高）",
-    "< 1 且未 Oversold → NORMAL（红灯，强度随比值降低）",
+    "≥ overbought floor → OVERBOUGHT (green)",
+    "≤ oversold cap → OVERSOLD (red)",
+    "Between and ≥ 1 → NORMAL (green, stronger as ratio rises)",
+    "< 1 and not oversold → NORMAL (red, weaker as ratio falls)",
   ];
   return [
     {
-      title: "季度趋势",
-      lines: ["Up25%Q > Down25%Q → 绿灯 BULL", "否则 → 红灯 BEAR", "背景：与对应灯色满强度一致"],
+      id: "quarter_trend",
+      title: COCKPIT_HELP_TITLE.quarter_trend,
+      lines: ["Up25%Q > Down25%Q → green BULL", "else → red BEAR", "Background = full-strength light color"],
     },
     {
-      title: "半季趋势",
-      lines: ["Up13%/34D > Down13%/34D → 绿灯 BULL", "否则 → 红灯 BEAR", "背景：与对应灯色满强度一致"],
+      id: "half_season_trend",
+      title: COCKPIT_HELP_TITLE.half_season_trend,
+      lines: ["Up13%/34D > Down13%/34D → green BULL", "else → red BEAR", "Background = full-strength light color"],
     },
     {
-      title: "月度趋势",
-      lines: ["Up25%M > Down25%M → 绿灯 BULLISH", "否则 → 红灯 BEARISH", "背景：与对应灯色满强度一致"],
+      id: "monthly_trend",
+      title: COCKPIT_HELP_TITLE.monthly_trend,
+      lines: ["Up25%M > Down25%M → green BULLISH", "else → red BEARISH", "Background = full-strength light color"],
     },
     {
-      title: "5-10交叉",
-      lines: ["5日 ratio ≥ 10日 ratio → 绿灯 LONG", "否则 → 红灯 SHORT", "背景：与对应灯色满强度一致"],
+      id: "cross_5_10",
+      title: COCKPIT_HELP_TITLE.cross_5_10,
+      lines: ["5D ratio ≥ 10D ratio → green LONG", "else → red SHORT", "Background = full-strength light color"],
     },
     {
-      title: "10日趋势",
+      id: "trend_10d",
+      title: COCKPIT_HELP_TITLE.trend_10d,
       lines: [
         `10D Overbought ≥ ${fmtThreshold(t.trend10_overbought_min ?? 2)}；Oversold ≤ ${fmtThreshold(t.trend10_oversold_max ?? 0.5)}`,
         ...trendState,
@@ -253,7 +278,8 @@ function buildCockpitHelpClient(thresholds, ratio) {
       ],
     },
     {
-      title: "5日趋势",
+      id: "trend_5d",
+      title: COCKPIT_HELP_TITLE.trend_5d,
       lines: [
         `5D Overbought ≥ ${fmtThreshold(t.trend5_overbought_min ?? 2)}；Oversold ≤ ${fmtThreshold(t.trend5_oversold_max ?? 0.5)}`,
         ...trendState,
@@ -261,11 +287,12 @@ function buildCockpitHelpClient(thresholds, ratio) {
       ],
     },
     {
-      title: "极值提醒（T2108）",
+      id: "extreme_alert",
+      title: COCKPIT_HELP_TITLE.extreme_alert,
       lines: [
-        `≤ ${fmtThreshold(t.t2108_red_max ?? 20)} → OVERSOLD（红灯）`,
-        `≥ ${fmtThreshold(t.t2108_green_min ?? 60)} → OVERBOUGHT（绿灯）`,
-        "介于两者之间 → NORMAL（白灯）",
+        `≤ ${fmtThreshold(t.t2108_red_max ?? 20)} → OVERSOLD (red)`,
+        `≥ ${fmtThreshold(t.t2108_green_min ?? 60)} → OVERBOUGHT (green)`,
+        "Between → NORMAL (neutral)",
       ],
     },
   ];
@@ -355,14 +382,217 @@ function modulePalette(key, module) {
   return cockpitPalette(module.color, module.intensity);
 }
 
+function cockpitStatusBand(key, module, thresholds) {
+  if (key === "trend_5d" || key === "trend_10d") {
+    return ratioBandHtml(key, module, thresholds);
+  }
+  if (key === "extreme_alert") {
+    return t2108BandHtml(module, thresholds);
+  }
+  return "";
+}
+
+function mapLinear(value, min, max) {
+  if (!Number.isFinite(value) || !Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
+    return 50;
+  }
+  return clampPos(((value - min) / (max - min)) * 100);
+}
+
+function renderStatusBand(leftLabel, rightLabel, pointerPct) {
+  const pos = clampPos(pointerPct);
+  return `
+    <div class="status-band-wrap">
+      <div class="status-band scale-green-red" aria-hidden="true"></div>
+      <div class="status-pointer" style="left:${pos}%" aria-hidden="true"></div>
+      <div class="status-band-labels"><span>${leftLabel}</span><span>${rightLabel}</span></div>
+    </div>
+  `;
+}
+
+function ratioBandHtml(key, module, thresholds) {
+  const value = toNum(module.value);
+  if (value == null) return "";
+  const is5d = key === "trend_5d";
+  const oversold = toNum(is5d ? thresholds.trend5_oversold_max : thresholds.trend10_oversold_max) ?? 0.5;
+  const overbought = toNum(is5d ? thresholds.trend5_overbought_min : thresholds.trend10_overbought_min) ?? 2.0;
+  const min = 0;
+  const max = Math.max(overbought * 1.2, 2.4);
+  return renderStatusBand(`≤${oversold}`, `≥${overbought}`, mapLinear(value, min, max));
+}
+
+function t2108BandHtml(module, thresholds) {
+  const value = toNum(module.value);
+  if (value == null) return "";
+  const redMax = toNum(thresholds.t2108_red_max) ?? 20;
+  const greenMin = toNum(thresholds.t2108_green_min) ?? 60;
+  return renderStatusBand(`≤${redMax}`, `≥${greenMin}`, mapLinear(value, 0, 100));
+}
+
+function renderUpDownBar(up, down, upLabel, downLabel) {
+  const u = Math.max(0, toNum(up) ?? 0);
+  const d = Math.max(0, toNum(down) ?? 0);
+  const total = u + d;
+  if (total <= 0) return "";
+  const upPct = (u / total) * 100;
+  return `
+    <div class="cockpit-balance-wrap">
+      <div class="cockpit-balance-bar" aria-hidden="true">
+        <span class="cockpit-balance-up" style="width:${upPct.toFixed(1)}%"></span>
+        <span class="cockpit-balance-down" style="width:${(100 - upPct).toFixed(1)}%"></span>
+      </div>
+      <div class="cockpit-balance-meta">
+        <span class="cockpit-balance-up-label">${Math.round(upPct)}% Up</span>
+        <span class="cockpit-balance-note">${upLabel} ${u} · ${downLabel} ${d}</span>
+      </div>
+    </div>
+  `;
+}
+
+function cockpitTrendBalance(key, latestRow) {
+  if (!latestRow) return "";
+  if (key === "quarter_trend") {
+    return renderUpDownBar(latestRow.c5_num, latestRow.c6_num, "Up25Q", "Down25Q");
+  }
+  if (key === "half_season_trend") {
+    return renderUpDownBar(latestRow.c11_num, latestRow.c12_num, "Up13", "Down13");
+  }
+  if (key === "monthly_trend") {
+    return renderUpDownBar(latestRow.c7_num, latestRow.c8_num, "Up25M", "Down25M");
+  }
+  return "";
+}
+
+function upDownPct(up, down) {
+  const u = Math.max(0, toNum(up) ?? 0);
+  const d = Math.max(0, toNum(down) ?? 0);
+  const total = u + d;
+  return total > 0 ? (u / total) * 100 : 50;
+}
+
+function cockpitGaugePct(key, module, thresholds, latestRow) {
+  if (key === "trend_5d" || key === "trend_10d") {
+    const value = toNum(module.value);
+    if (value == null) return 50;
+    const is5d = key === "trend_5d";
+    const overbought =
+      toNum(is5d ? thresholds.trend5_overbought_min : thresholds.trend10_overbought_min) ?? 2.0;
+    return mapLinear(value, 0, Math.max(overbought * 1.2, 2.4));
+  }
+  if (key === "extreme_alert") {
+    return mapLinear(toNum(module.value), 0, 100);
+  }
+  if (key === "cross_5_10" && latestRow) {
+    const ratio5 = toNum(latestRow.c3_num);
+    if (ratio5 == null) return 50;
+    const overbought = toNum(thresholds.trend5_overbought_min) ?? 2.0;
+    return mapLinear(ratio5, 0, Math.max(overbought * 1.2, 2.4));
+  }
+  if (key === "quarter_trend" && latestRow) {
+    return upDownPct(latestRow.c5_num, latestRow.c6_num);
+  }
+  if (key === "half_season_trend" && latestRow) {
+    return upDownPct(latestRow.c11_num, latestRow.c12_num);
+  }
+  if (key === "monthly_trend" && latestRow) {
+    return upDownPct(latestRow.c7_num, latestRow.c8_num);
+  }
+  return 50;
+}
+
+function gaugeStateClass(color) {
+  if (color === "green") return "gauge-state-ok";
+  if (color === "red") return "gauge-state-bad";
+  return "gauge-state-neutral";
+}
+
+function formatCockpitGaugeValue(key, module, latestRow) {
+  if (key === "trend_5d" || key === "trend_10d" || key === "extreme_alert") {
+    const v = toNum(module.value);
+    return v == null ? "" : String(v);
+  }
+  if (key === "cross_5_10" && latestRow) {
+    const r5 = toNum(latestRow.c3_num);
+    const r10 = toNum(latestRow.c4_num);
+    if (r5 == null || r10 == null) return "";
+    return `${r5.toFixed(2)} / ${r10.toFixed(2)}`;
+  }
+  if (
+    (key === "quarter_trend" || key === "half_season_trend" || key === "monthly_trend") &&
+    latestRow
+  ) {
+    const pairs = {
+      quarter_trend: [latestRow.c5_num, latestRow.c6_num],
+      half_season_trend: [latestRow.c11_num, latestRow.c12_num],
+      monthly_trend: [latestRow.c7_num, latestRow.c8_num],
+    };
+    const [up, down] = pairs[key] || [];
+    const u = Math.max(0, toNum(up) ?? 0);
+    const d = Math.max(0, toNum(down) ?? 0);
+    return `${Math.round(upDownPct(u, d))}% Up`;
+  }
+  return module.value != null ? String(module.value) : "";
+}
+
+function renderCockpitGauge({ gaugeKey, pct, state, value, colorClass }) {
+  const p = clampPos(pct);
+  const cx = 44;
+  const cy = 44;
+  const r = 32;
+  const angle = Math.PI - (p / 100) * Math.PI;
+  const nx = cx + (r - 10) * Math.cos(angle);
+  const ny = cy - (r - 10) * Math.sin(angle);
+  const dotX = cx + r * Math.cos(angle);
+  const dotY = cy - r * Math.sin(angle);
+  const gradId = `gauge-grad-${gaugeKey}`;
+  const label = [state, value].filter(Boolean).join(" ");
+
+  return `
+    <div class="cockpit-gauge-wrap">
+      <svg class="cockpit-gauge-svg" viewBox="0 0 88 46" role="img" aria-label="${label}">
+        <defs>
+          <linearGradient id="${gradId}" x1="8" y1="44" x2="80" y2="44" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#6a4040" stop-opacity="0.85" />
+            <stop offset="50%" stop-color="#5a5a62" stop-opacity="0.45" />
+            <stop offset="100%" stop-color="#3d6648" stop-opacity="0.85" />
+          </linearGradient>
+        </defs>
+        <path class="gauge-arc-bg" d="M 12 44 A 32 32 0 0 1 76 44" />
+        <path class="gauge-arc-fill" d="M 12 44 A 32 32 0 0 1 76 44" stroke="url(#${gradId})" />
+        <line class="gauge-tick" x1="12" y1="44" x2="15" y2="41" />
+        <line class="gauge-tick" x1="44" y1="12" x2="44" y2="15" />
+        <line class="gauge-tick" x1="76" y1="44" x2="73" y2="41" />
+        <line class="gauge-needle" x1="${cx}" y1="${cy}" x2="${nx.toFixed(2)}" y2="${ny.toFixed(2)}" />
+        <circle class="gauge-hub" cx="${cx}" cy="${cy}" r="2.2" />
+        <circle class="gauge-dot" cx="${dotX.toFixed(2)}" cy="${dotY.toFixed(2)}" r="2.4" />
+      </svg>
+      <div class="cockpit-gauge-caption">
+        <span class="cockpit-gauge-state ${colorClass}">${state}</span>
+        ${value ? `<span class="cockpit-gauge-value">${value}</span>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function cockpitStateLabel(state) {
+  return state || "—";
+}
+
+function cockpitHelpTitle(section) {
+  if (section?.id && COCKPIT_HELP_TITLE[section.id]) return COCKPIT_HELP_TITLE[section.id];
+  return section?.title || "";
+}
+
 function renderStatusCards(payload) {
   const wrap = document.getElementById("breadthStatusCards");
   if (!wrap) return;
   const status = payload.status || {};
+  const thresholds = payload.thresholds || {};
+  const latestRow = (payload.rows || [])[0] || null;
   const coverage = payload.coverage || {};
   const coverageInline = document.getElementById("coverageInline");
   if (coverageInline) {
-    coverageInline.textContent = `History Coverage ${coverage.first_date || "—"} → ${coverage.last_date || "—"} (${coverage.row_count || 0}天)`;
+    coverageInline.textContent = `History ${coverage.first_date || "—"} → ${coverage.last_date || "—"} (${coverage.row_count || 0} days)`;
   }
   const modules = [
     ["quarter_trend", status.quarter_trend],
@@ -376,16 +606,20 @@ function renderStatusCards(payload) {
 
   wrap.innerHTML = `
     ${modules.map(([key, m]) => {
-      const pal = modulePalette(key, m);
       const active = activeCockpitKey === key ? " is-active" : "";
+      const label = COCKPIT_MODULE_TITLE[key] || m.title;
+      const pct = cockpitGaugePct(key, m, thresholds, latestRow);
+      const gauge = renderCockpitGauge({
+        gaugeKey: key,
+        pct,
+        state: cockpitStateLabel(m.state),
+        value: formatCockpitGaugeValue(key, m, latestRow),
+        colorClass: gaugeStateClass(m.color),
+      });
       return `
-      <article class="status-card cockpit-card cockpit-card-opaque cockpit-card-link${active}" data-cockpit-key="${key}" role="button" tabindex="0" title="点击联动图表">
-        <div class="status-label">${m.title}</div>
-        <div class="status-value phase-row">
-          <span class="${pal.lampClass}" aria-hidden="true"></span>
-          <span>${m.state}</span>
-        </div>
-        <div class="status-note">${m.value ?? ""}</div>
+      <article class="status-card cockpit-card cockpit-card-opaque cockpit-card-link${active}" data-cockpit-key="${key}" role="button" tabindex="0" title="Click to link chart · ${label}">
+        <div class="status-label">${label}</div>
+        ${gauge}
       </article>
     `;
     }).join("")}
@@ -491,14 +725,14 @@ function renderCockpitHelp(payload) {
     sections = buildCockpitHelpClient(payload?.thresholds, ratioBg);
   }
   if (!sections.length) {
-    box.innerHTML = '<p class="hint">暂无说明（请刷新页面或重启后端服务）。</p>';
+    box.innerHTML = '<p class="hint">No rules loaded — refresh or restart the server.</p>';
     return;
   }
   box.innerHTML = sections
     .map(
       (s) => `
       <article class="cockpit-help-item">
-        <h3>${s.title}</h3>
+        <h3>${cockpitHelpTitle(s)}</h3>
         <ul>${(s.lines || []).map((line) => `<li>${line}</li>`).join("")}</ul>
       </article>
     `,
@@ -511,7 +745,7 @@ function renderPercentileCards(payload) {
   if (!wrap) return;
   const cards = payload.percentile_cards || [];
   if (!cards.length) {
-    wrap.innerHTML = '<p class="hint">暂无历史分位数据。</p>';
+    wrap.innerHTML = '<p class="hint">No percentile history yet.</p>';
     return;
   }
   wrap.innerHTML = cards
@@ -519,11 +753,11 @@ function renderPercentileCards(payload) {
       <article class="pct-card">
         <div class="pct-title">${c.label}</div>
         <div class="pct-value">${c.value}</div>
-        <div class="pct-meta">历史百分位 ${c.history_percentile}%</div>
+        <div class="pct-meta">${c.history_percentile}th pct</div>
         <div class="pct-strip-wrap">
           <div class="pct-strip"></div>
           <div class="pct-triangle" style="left:${clampPos(c.history_percentile)}%"></div>
-          <div class="pct-strip-labels"><span>低位</span><span>中位</span><span>高位</span></div>
+          <div class="pct-strip-labels"><span>Low</span><span>Mid</span><span>High</span></div>
         </div>
       </article>
     `)
@@ -535,23 +769,23 @@ function renderBreadthConfig(payload) {
   if (!box) return;
   const t = payload?.thresholds || {};
   const fields = [
-    { type: "title", label: "状态灯阈值" },
+    { type: "title", label: "Status Light Thresholds" },
     ["trend10_overbought_min", "10D Overbought ≥", 0.01],
     ["trend10_oversold_max", "10D Oversold ≤", 0.01],
     ["trend5_overbought_min", "5D Overbought ≥", 0.01],
     ["trend5_oversold_max", "5D Oversold ≤", 0.01],
     ["t2108_red_max", "T2108 Red ≤", 0.01],
     ["t2108_green_min", "T2108 Green ≥", 0.01],
-    { type: "title", label: "5/10 日背景分档（绿）" },
-    ["ratio_green_anchor", "绿锚点", 0.01],
-    ["ratio_green_low_min", "绿下限", 0.01],
-    ["ratio_green_high_max", "绿上限", 0.01],
-    ["ratio_green_tier_count", "绿侧档数", 1],
-    { type: "title", label: "5/10 日背景分档（红）" },
-    ["ratio_red_anchor", "红锚点", 0.01],
-    ["ratio_red_low_min", "红下限", 0.01],
-    ["ratio_red_high_max", "红上限", 0.01],
-    ["ratio_red_tier_count", "红侧档数", 1],
+    { type: "title", label: "5/10D Background Tiers (Green)" },
+    ["ratio_green_anchor", "Green anchor", 0.01],
+    ["ratio_green_low_min", "Green low", 0.01],
+    ["ratio_green_high_max", "Green high", 0.01],
+    ["ratio_green_tier_count", "Green tiers", 1],
+    { type: "title", label: "5/10D Background Tiers (Red)" },
+    ["ratio_red_anchor", "Red anchor", 0.01],
+    ["ratio_red_low_min", "Red low", 0.01],
+    ["ratio_red_high_max", "Red high", 0.01],
+    ["ratio_red_tier_count", "Red tiers", 1],
   ];
   box.innerHTML = fields
     .map((item) => {
@@ -596,9 +830,9 @@ async function saveBreadthConfig() {
     body: JSON.stringify({ thresholds }),
   });
   renderBreadthConfig(payload);
-  status.textContent = "配置已保存，正在刷新驾驶舱…";
+  status.textContent = "Saved — refreshing cockpit…";
   await loadBreadth(false);
-  status.textContent = "配置已保存";
+  status.textContent = "Saved";
 }
 
 async function pollSyncProgress() {
@@ -609,22 +843,22 @@ async function pollSyncProgress() {
     const done = Number(p.processed || 0);
     const total = Number(p.total || 0);
     const pct = total > 0 ? `${Math.round((done * 100) / total)}%` : "--";
-    txt.textContent = `同步中 ${done}/${total || "?"} (${pct})`;
+    txt.textContent = `Syncing ${done}/${total || "?"} (${pct})`;
     return false;
   }
   if (p.status === "done") {
-    txt.textContent = `同步完成（${p.mode || ""}，${p.elapsed_seconds || 0}s）`;
+    txt.textContent = `Done (${p.mode || ""}, ${p.elapsed_seconds || 0}s)`;
     syncAwaiting = false;
     return true;
   }
   if (p.status === "error") {
-    txt.textContent = `同步失败：${p.error || "unknown"}`;
+    txt.textContent = `Sync failed: ${p.error || "unknown"}`;
     syncAwaiting = false;
-    showToast(p.error || "市场宽度同步失败", true);
+    showToast(p.error || "Breadth sync failed", true);
     return true;
   }
   if (syncAwaiting) {
-    txt.textContent = "等待同步启动…";
+    txt.textContent = "Waiting for sync…";
     return false;
   }
   txt.textContent = "";
@@ -653,7 +887,7 @@ function startSyncPolling(onDone) {
     } catch (err) {
       stopSyncPolling();
       syncAwaiting = false;
-      showToast(err.message || "同步进度查询失败", true);
+      showToast(err.message || "Sync progress check failed", true);
       console.error(err);
     }
   }, 1200);
@@ -665,7 +899,7 @@ function setSyncButtonsBusy(busy, label) {
   if (refreshBtn) {
     refreshBtn.disabled = busy;
     if (label && busy) refreshBtn.textContent = label;
-    else if (!busy) refreshBtn.textContent = "增量同步今日数据";
+    else if (!busy) refreshBtn.textContent = "Sync today";
   }
   if (syncBtn) {
     syncBtn.disabled = busy;
@@ -674,20 +908,20 @@ function setSyncButtonsBusy(busy, label) {
 
 async function runBreadthSync(full, { auto = false } = {}) {
   const progress = document.getElementById("syncProgressText");
-  setSyncButtonsBusy(true, full ? "全量同步中…" : "增量同步中…");
-  if (progress) progress.textContent = "正在启动同步…";
+  setSyncButtonsBusy(true, full ? "Full sync…" : "Incremental sync…");
+  if (progress) progress.textContent = "Starting sync…";
   try {
     const kick = await fetchJson(
       `/api/breadth/sync?full=${full ? "true" : "false"}&async_mode=true`,
       { method: "POST" },
     );
     if (kick.status === "error") {
-      throw new Error(kick.error || "同步启动失败");
+      throw new Error(kick.error || "Sync start failed");
     }
     if (kick.blocked) {
-      if (progress) progress.textContent = "检测到进行中的同步，正在接管进度…";
+      if (progress) progress.textContent = "Sync already running — joining…";
     } else if (kick.status === "started") {
-      if (progress) progress.textContent = "同步已启动…";
+      if (progress) progress.textContent = "Sync started…";
     }
     await new Promise((resolve, reject) => {
       startSyncPolling(async () => {
@@ -717,17 +951,32 @@ function lineDataset(partial) {
     pointRadius: 0,
     pointHoverRadius: 3,
     pointHitRadius: 10,
+    fill: false,
     ...partial,
   };
 }
 
-function chartOptions(extra = {}) {
+function chartScaleOptions(theme, extra = {}) {
+  return {
+    x: {
+      ticks: { color: theme.text, maxTicksLimit: 8 },
+      grid: { color: theme.grid },
+    },
+    y: {
+      ticks: { color: theme.text },
+      grid: { color: theme.grid },
+    },
+    ...extra,
+  };
+}
+
+function chartOptions(theme, extra = {}) {
   return {
     responsive: true,
     maintainAspectRatio: false,
     interaction: { mode: "index", intersect: false },
     plugins: {
-      legend: { labels: { color: "#dbe7f5" } },
+      legend: { labels: { color: theme.text } },
       tooltip: { enabled: true },
     },
     ...extra,
@@ -740,6 +989,7 @@ function renderCharts(payload) {
   const rows = [...sourceRows].slice(0, maxRows).reverse();
   if (!rows.length) return;
   const labels = rows.map((r) => r.raw_date || r.date);
+  const theme = chartThemeFromCss();
   destroyCharts();
 
   const ratioChart = new Chart(document.getElementById("ratioChart"), {
@@ -747,17 +997,15 @@ function renderCharts(payload) {
     data: {
       labels,
       datasets: [
-        lineDataset({ label: "5 Day Ratio", data: rows.map((r) => toNum(r.c3_num)), borderColor: "#34d399" }),
-        lineDataset({ label: "10 Day Ratio", data: rows.map((r) => toNum(r.c4_num)), borderColor: "#fbbf24" }),
-        lineDataset({ label: "T2108", data: rows.map((r) => toNum(r.c14_num)), borderColor: "#60a5fa", yAxisID: "y1" }),
+        lineDataset({ label: "5 Day Ratio", data: rows.map((r) => toNum(r.c3_num)), borderColor: theme.ok }),
+        lineDataset({ label: "10 Day Ratio", data: rows.map((r) => toNum(r.c4_num)), borderColor: theme.warn }),
+        lineDataset({ label: "T2108", data: rows.map((r) => toNum(r.c14_num)), borderColor: theme.accent, yAxisID: "y1" }),
       ],
     },
-    options: chartOptions({
-      scales: {
-        x: { ticks: { color: "#9fb2cc", maxTicksLimit: 8 }, grid: { color: "rgba(255,255,255,0.06)" } },
-        y: { ticks: { color: "#9fb2cc" }, grid: { color: "rgba(255,255,255,0.06)" } },
-        y1: { position: "right", ticks: { color: "#9fb2cc" }, grid: { drawOnChartArea: false } },
-      },
+    options: chartOptions(theme, {
+      scales: chartScaleOptions(theme, {
+        y1: { position: "right", ticks: { color: theme.text }, grid: { drawOnChartArea: false } },
+      }),
     }),
   });
   chartInstances.push(ratioChart);
@@ -768,16 +1016,11 @@ function renderCharts(payload) {
     data: {
       labels,
       datasets: [
-        lineDataset({ label: "Up 4%+", data: rows.map((r) => toNum(r.c1_num)), borderColor: "#22c55e" }),
-        lineDataset({ label: "Down 4%+", data: rows.map((r) => toNum(r.c2_num)), borderColor: "#ef4444" }),
+        lineDataset({ label: "Up 4%+", data: rows.map((r) => toNum(r.c1_num)), borderColor: theme.ok }),
+        lineDataset({ label: "Down 4%+", data: rows.map((r) => toNum(r.c2_num)), borderColor: theme.bad }),
       ],
     },
-    options: chartOptions({
-      scales: {
-        x: { ticks: { color: "#9fb2cc", maxTicksLimit: 8 }, grid: { color: "rgba(255,255,255,0.06)" } },
-        y: { ticks: { color: "#9fb2cc" }, grid: { color: "rgba(255,255,255,0.06)" } },
-      },
-    }),
+    options: chartOptions(theme, { scales: chartScaleOptions(theme) }),
   });
   chartInstances.push(upDown4Chart);
   registerChart("upDown4Chart", upDown4Chart);
@@ -787,16 +1030,11 @@ function renderCharts(payload) {
     data: {
       labels,
       datasets: [
-        lineDataset({ label: "Up 25% Quarter", data: rows.map((r) => toNum(r.c5_num)), borderColor: "#22c55e" }),
-        lineDataset({ label: "Down 25% Quarter", data: rows.map((r) => toNum(r.c6_num)), borderColor: "#ef4444" }),
+        lineDataset({ label: "Up 25% Quarter", data: rows.map((r) => toNum(r.c5_num)), borderColor: theme.ok }),
+        lineDataset({ label: "Down 25% Quarter", data: rows.map((r) => toNum(r.c6_num)), borderColor: theme.bad }),
       ],
     },
-    options: chartOptions({
-      scales: {
-        x: { ticks: { color: "#9fb2cc", maxTicksLimit: 8 }, grid: { color: "rgba(255,255,255,0.06)" } },
-        y: { ticks: { color: "#9fb2cc" }, grid: { color: "rgba(255,255,255,0.06)" } },
-      },
-    }),
+    options: chartOptions(theme, { scales: chartScaleOptions(theme) }),
   });
   chartInstances.push(quarter25Chart);
   registerChart("quarter25Chart", quarter25Chart);
@@ -806,16 +1044,11 @@ function renderCharts(payload) {
     data: {
       labels,
       datasets: [
-        lineDataset({ label: "Up 25% Month", data: rows.map((r) => toNum(r.c7_num)), borderColor: "#2dd4bf" }),
-        lineDataset({ label: "Down 25% Month", data: rows.map((r) => toNum(r.c8_num)), borderColor: "#f97316" }),
+        lineDataset({ label: "Up 25% Month", data: rows.map((r) => toNum(r.c7_num)), borderColor: theme.ok }),
+        lineDataset({ label: "Down 25% Month", data: rows.map((r) => toNum(r.c8_num)), borderColor: theme.bad }),
       ],
     },
-    options: chartOptions({
-      scales: {
-        x: { ticks: { color: "#9fb2cc", maxTicksLimit: 8 }, grid: { color: "rgba(255,255,255,0.06)" } },
-        y: { ticks: { color: "#9fb2cc" }, grid: { color: "rgba(255,255,255,0.06)" } },
-      },
-    }),
+    options: chartOptions(theme, { scales: chartScaleOptions(theme) }),
   });
   chartInstances.push(month25Chart);
   registerChart("month25Chart", month25Chart);
@@ -825,16 +1058,11 @@ function renderCharts(payload) {
     data: {
       labels,
       datasets: [
-        lineDataset({ label: "Up 50% Month", data: rows.map((r) => toNum(r.c9_num)), borderColor: "#f59e0b" }),
-        lineDataset({ label: "Down 50% Month", data: rows.map((r) => toNum(r.c10_num)), borderColor: "#ef4444" }),
+        lineDataset({ label: "Up 50% Month", data: rows.map((r) => toNum(r.c9_num)), borderColor: theme.ok }),
+        lineDataset({ label: "Down 50% Month", data: rows.map((r) => toNum(r.c10_num)), borderColor: theme.bad }),
       ],
     },
-    options: chartOptions({
-      scales: {
-        x: { ticks: { color: "#9fb2cc", maxTicksLimit: 8 }, grid: { color: "rgba(255,255,255,0.06)" } },
-        y: { ticks: { color: "#9fb2cc" }, grid: { color: "rgba(255,255,255,0.06)" } },
-      },
-    }),
+    options: chartOptions(theme, { scales: chartScaleOptions(theme) }),
   });
   chartInstances.push(extreme50Chart);
   registerChart("extreme50Chart", extreme50Chart);
@@ -844,17 +1072,21 @@ function renderCharts(payload) {
     data: {
       labels,
       datasets: [
-        lineDataset({ label: "S&P", data: rows.map((r) => toNum((r.c15 || "").replace(",", ""))), borderColor: "#60a5fa", yAxisID: "y" }),
-        lineDataset({ label: "Up 13%/34D", data: rows.map((r) => toNum(r.c11_num)), borderColor: "#22c55e", yAxisID: "y1" }),
-        lineDataset({ label: "Down 13%/34D", data: rows.map((r) => toNum(r.c12_num)), borderColor: "#ef4444", yAxisID: "y1" }),
+        lineDataset({
+          label: "S&P",
+          data: rows.map((r) => toNum((r.c15 || "").replace(",", ""))),
+          borderColor: theme.accent,
+          yAxisID: "y",
+        }),
+        lineDataset({ label: "Up 13%/34D", data: rows.map((r) => toNum(r.c11_num)), borderColor: theme.ok, yAxisID: "y1" }),
+        lineDataset({ label: "Down 13%/34D", data: rows.map((r) => toNum(r.c12_num)), borderColor: theme.bad, yAxisID: "y1" }),
       ],
     },
-    options: chartOptions({
-      scales: {
-        x: { ticks: { color: "#9fb2cc", maxTicksLimit: 8 }, grid: { color: "rgba(255,255,255,0.06)" } },
-        y: { position: "left", ticks: { color: "#9fb2cc" }, grid: { color: "rgba(255,255,255,0.06)" } },
-        y1: { position: "right", ticks: { color: "#9fb2cc" }, grid: { drawOnChartArea: false } },
-      },
+    options: chartOptions(theme, {
+      scales: chartScaleOptions(theme, {
+        y: { position: "left", ticks: { color: theme.text }, grid: { color: theme.grid } },
+        y1: { position: "right", ticks: { color: theme.text }, grid: { drawOnChartArea: false } },
+      }),
     }),
   });
   chartInstances.push(spxBreadthChart);
@@ -867,7 +1099,7 @@ async function loadBreadth(refresh = false) {
   const wasDisabled = btn?.disabled;
   if (btn && !wasDisabled) {
     btn.disabled = true;
-    btn.textContent = "加载中…";
+    btn.textContent = "Loading…";
   }
   try {
     const payload = await fetchJson(`/api/breadth?limit=8000${refresh ? "&refresh=true" : ""}`);
@@ -880,14 +1112,14 @@ async function loadBreadth(refresh = false) {
     renderTable(payload);
     renderCharts(latestPayload);
     const updatedAt = payload.updated_at ? new Date(payload.updated_at).toLocaleString("zh-CN", { hour12: false }) : "—";
-    document.getElementById("breadthMeta").textContent = `记录数 ${payload.row_count}，展示 ${payload.rows.length}，更新时间 ${updatedAt}`;
+    document.getElementById("breadthMeta").textContent = `${payload.row_count} rows · showing ${payload.rows.length} · updated ${updatedAt}`;
     document.getElementById("explainLink").href = payload.notes?.indicators_explain_url || "https://stockbee.blogspot.com/2022/12/market-monitor-scans.html";
   } catch (err) {
     showToast(err.message, true);
   } finally {
     if (btn && !wasDisabled && !syncAwaiting) {
       btn.disabled = false;
-      btn.textContent = "增量同步今日数据";
+      btn.textContent = "Sync today";
     }
   }
 }
@@ -902,7 +1134,7 @@ async function autoMorningBreadthRefresh() {
       localStorage.setItem(stampKey, "done");
       return;
     } catch (err) {
-      showToast(`自动同步失败，已加载本地缓存：${err.message}`, true);
+      showToast(`Auto-sync failed — showing cache: ${err.message}`, true);
     }
   }
   await loadBreadth(false);
@@ -913,6 +1145,7 @@ async function startBreadthSync(full) {
 }
 
 function init() {
+  renderHealthBadge("healthBadge").catch(() => {});
   const widthRange = document.getElementById("chartWidthRange");
   const widthValue = document.getElementById("chartWidthValue");
   const chartPanel = document.querySelector(".chart-panel");
@@ -923,13 +1156,13 @@ function init() {
   setChartWidth(widthRange.value);
   widthRange.addEventListener("input", (e) => setChartWidth(e.target.value));
 
-  document.getElementById("refreshBreadthBtn").addEventListener("click", () => {
+  document.getElementById("refreshBreadthBtn")?.addEventListener("click", () => {
     runBreadthSync(false).catch((err) => showToast(err.message, true));
   });
-  document.getElementById("syncBreadthBtn").addEventListener("click", () => {
+  document.getElementById("syncBreadthBtn")?.addEventListener("click", () => {
     runBreadthSync(true).catch((err) => showToast(err.message, true));
   });
-  document.getElementById("saveBreadthConfigBtn").addEventListener("click", () => {
+  document.getElementById("saveBreadthConfigBtn")?.addEventListener("click", () => {
     saveBreadthConfig().catch((err) => showToast(err.message, true));
   });
   document.querySelectorAll("#chartRangeGroup button").forEach((btn) => {
@@ -944,7 +1177,7 @@ function init() {
     });
   });
   pollSyncProgress().catch(() => {});
-  autoMorningBreadthRefresh().catch((err) => showToast(err.message, true));
+  loadBreadth(false).catch((err) => showToast(err.message, true));
 }
 
 init();

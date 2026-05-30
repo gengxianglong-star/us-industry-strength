@@ -123,60 +123,60 @@ def build_cockpit_help(thresholds: dict[str, float]) -> list[dict[str, Any]]:
         return f"{v:g}"
 
     trend_bg_lines = [
-        f"绿灯背景锚点 {_fmt(g['anchor'])}（与季度/半季/月度/5-10交叉 绿灯一致）",
-        f"区间 [{_fmt(g['low_min'])}, {_fmt(g['high_max'])}]，锚点以下/以上各 {int(g['tier_count'])} 档（步长约 {_fmt(g['band_below'])} / {_fmt(g['band_above'])}）",
-        f"比值 < 锚点变浅，> 锚点加深；超出区间取最浅/最深档",
-        f"红灯背景锚点 {_fmt(r['anchor'])}（与四模块红灯一致）",
-        f"区间 [{_fmt(r['low_min'])}, {_fmt(r['high_max'])}]，锚点以下/以上各 {int(r['tier_count'])} 档（步长约 {_fmt(r['band_below'])} / {_fmt(r['band_above'])}）",
-        "比值 < 锚点加深，> 锚点变浅",
+        f"Green anchor {_fmt(g['anchor'])} (same as quarter/half/month/5-10 green lights)",
+        f"Range [{_fmt(g['low_min'])}, {_fmt(g['high_max'])}], {int(g['tier_count'])} tiers below/above anchor (step ~{_fmt(g['band_below'])} / {_fmt(g['band_above'])})",
+        "Ratio below anchor = lighter; above = deeper; out of range = min/max shade",
+        f"Red anchor {_fmt(r['anchor'])} (same as the four red-light modules)",
+        f"Range [{_fmt(r['low_min'])}, {_fmt(r['high_max'])}], {int(r['tier_count'])} tiers below/above anchor (step ~{_fmt(r['band_below'])} / {_fmt(r['band_above'])})",
+        "Ratio below anchor = deeper; above = lighter",
     ]
     trend_state_lines = [
-        f"≥ Overbought 下限 → OVERBOUGHT（绿灯）",
-        f"≤ Oversold 上限 → OVERSOLD（红灯）",
-        f"介于两者之间且 ≥ 1 → NORMAL（绿灯，强度随比值升高）",
-        f"< 1 且未 Oversold → NORMAL（红灯，强度随比值降低）",
+        "≥ overbought floor → OVERBOUGHT (green)",
+        "≤ oversold cap → OVERSOLD (red)",
+        "Between and ≥ 1 → NORMAL (green, stronger as ratio rises)",
+        "< 1 and not oversold → NORMAL (red, weaker as ratio falls)",
     ]
 
     return [
         {
             "id": "quarter_trend",
-            "title": "季度趋势",
+            "title": "Quarter Trend",
             "lines": [
-                "Up25%Q > Down25%Q → 绿灯 BULL",
-                "否则 → 红灯 BEAR",
-                "背景：与对应灯色满强度一致",
+                "Up25%Q > Down25%Q → green BULL",
+                "else → red BEAR",
+                "Background matches full-strength light color",
             ],
         },
         {
             "id": "half_season_trend",
-            "title": "半季趋势",
+            "title": "Half Quarter Trend",
             "lines": [
-                "Up13%/34D > Down13%/34D → 绿灯 BULL",
-                "否则 → 红灯 BEAR",
-                "背景：与对应灯色满强度一致",
+                "Up13%/34D > Down13%/34D → green BULL",
+                "else → red BEAR",
+                "Background matches full-strength light color",
             ],
         },
         {
             "id": "monthly_trend",
-            "title": "月度趋势",
+            "title": "Monthly Trend",
             "lines": [
-                "Up25%M > Down25%M → 绿灯 BULLISH",
-                "否则 → 红灯 BEARISH",
-                "背景：与对应灯色满强度一致",
+                "Up25%M > Down25%M → green BULLISH",
+                "else → red BEARISH",
+                "Background matches full-strength light color",
             ],
         },
         {
             "id": "cross_5_10",
-            "title": "5-10交叉",
+            "title": "5-10 Cross",
             "lines": [
-                "5日 ratio ≥ 10日 ratio → 绿灯 LONG",
-                "否则 → 红灯 SHORT",
-                "背景：与对应灯色满强度一致",
+                "5D ratio ≥ 10D ratio → green LONG",
+                "else → red SHORT",
+                "Background matches full-strength light color",
             ],
         },
         {
             "id": "trend_10d",
-            "title": "10日趋势",
+            "title": "10D Trend",
             "lines": [
                 f"10D Overbought ≥ {_fmt(t10_ob)}；Oversold ≤ {_fmt(t10_os)}",
                 *trend_state_lines,
@@ -185,7 +185,7 @@ def build_cockpit_help(thresholds: dict[str, float]) -> list[dict[str, Any]]:
         },
         {
             "id": "trend_5d",
-            "title": "5日趋势",
+            "title": "5D Trend",
             "lines": [
                 f"5D Overbought ≥ {_fmt(t5_ob)}；Oversold ≤ {_fmt(t5_os)}",
                 *trend_state_lines,
@@ -194,11 +194,11 @@ def build_cockpit_help(thresholds: dict[str, float]) -> list[dict[str, Any]]:
         },
         {
             "id": "extreme_alert",
-            "title": "极值提醒（T2108）",
+            "title": "T2108 Alert",
             "lines": [
-                f"≤ {_fmt(t_red)} → OVERSOLD（红灯，越深越低）",
-                f"≥ {_fmt(t_green)} → OVERBOUGHT（绿灯，越深越高）",
-                "介于两者之间 → NORMAL（白灯）",
+                f"≤ {_fmt(t_red)} → OVERSOLD (red, deeper = lower)",
+                f"≥ {_fmt(t_green)} → OVERBOUGHT (green, deeper = higher)",
+                "Between → NORMAL (neutral)",
             ],
         },
     ]
@@ -789,7 +789,7 @@ def load_breadth_data(
         sync_breadth_history(storage, full=True, config=cfg)
         rows = storage.get_breadth_daily(limit=6000)
     if not rows:
-        raise ValueError("市场宽度数据为空，请先同步")
+        raise ValueError("Breadth data is empty — run sync first")
 
     thresholds = dict(DEFAULT_THRESHOLDS)
     thresholds.update(storage.get_breadth_threshold_overrides())
@@ -904,49 +904,49 @@ def load_breadth_data(
         "cockpit_help": build_cockpit_help(thresholds),
         "status": {
             "quarter_trend": {
-                "title": "季度趋势",
+                "title": "Quarter",
                 "state": quarter_state,
                 "color": quarter_color,
                 "intensity": 1.0,
                 "value": f"Up25Q {up_q:.0f} / Down25Q {down_q:.0f}",
             },
             "half_season_trend": {
-                "title": "半季趋势",
+                "title": "Half Quarter",
                 "state": half_state,
                 "color": half_color,
                 "intensity": 1.0,
                 "value": f"Up13/34D {up_h:.0f} / Down13/34D {down_h:.0f}",
             },
             "monthly_trend": {
-                "title": "月度趋势",
+                "title": "Monthly",
                 "state": month_state,
                 "color": month_color,
                 "intensity": 1.0,
                 "value": f"Up25M {up_m:.0f} / Down25M {down_m:.0f}",
             },
             "cross_5_10": {
-                "title": "5-10交叉",
+                "title": "5-10 Cross",
                 "state": cross_state,
                 "color": cross_color,
                 "intensity": 1.0,
                 "value": f"5D {ratio5:.2f} / 10D {ratio10:.2f}",
             },
             "trend_10d": {
-                "title": "10日趋势",
+                "title": "10D Trend",
                 "state": r10_state,
                 "color": r10_color,
                 "intensity": round(r10_intensity, 3),
                 "value": round(ratio10, 3),
             },
             "trend_5d": {
-                "title": "5日趋势",
+                "title": "5D Trend",
                 "state": r5_state,
                 "color": r5_color,
                 "intensity": round(r5_intensity, 3),
                 "value": round(ratio5, 3),
             },
             "extreme_alert": {
-                "title": "极值提醒",
+                "title": "T2108",
                 "state": t_state,
                 "color": t_color,
                 "intensity": round(t_intensity, 3),

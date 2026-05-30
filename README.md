@@ -23,6 +23,20 @@
 
 默认会自动创建虚拟环境、安装依赖并启动 Web（`http://127.0.0.1:8080`）。
 
+### Windows 常见问题（快速排障）
+
+- 提示找不到 `py`：重新安装 Python，并勾选 **Add Python to PATH**
+- 依赖安装失败：先设置代理后再执行 `run.bat`
+  ```bat
+  set HTTPS_PROXY=http://127.0.0.1:7890
+  run.bat
+  ```
+- 提示 8080 被占用：按提示执行
+  ```bat
+  taskkill /PID <PID> /F
+  ```
+  然后重新 `run.bat`
+
 ### 桌面双击启动（只需做一次）
 
 - macOS
@@ -94,6 +108,14 @@ chmod +x scripts/scheduled_daily.sh scripts/install-macos-schedule.sh
 - `stock_rs`：个股 RS 抓取与交叉参数
 
 市场宽度页的驾驶舱阈值、5/10 日背景分档、API 与联动逻辑见 **[docs/breadth.md](docs/breadth.md)**（与页面「驾驶舱规则说明」一致，适合长期留存）。
+
+### 只读跨平台看板（GitHub Pages · 零成本）
+
+手机 / 任意浏览器只读查看（无改配置、无手动 RS）：见 **[docs/deploy-readonly-pages.md](docs/deploy-readonly-pages.md)**。
+
+- 地址：`https://<user>.github.io/us-industry-strength/strong`
+- 更新：GitHub Actions 工作日自动跑 Daily → 导出 JSON → 发布 Pages
+- 本地仍用 `./run.sh serve` 获得完整交互版
 
 个股 RS、新股四档分池与观察名单合并规则见 **[docs/stock_rs.md](docs/stock_rs.md)**。
 

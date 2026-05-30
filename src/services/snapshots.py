@@ -56,7 +56,7 @@ def top_strong_from_rows(rows: list[dict[str, Any]], *, top_n: int) -> list[Snap
 
 def core_strong_from_rows(rows: list[dict[str, Any]], *, top_n: int) -> list[SnapshotIndustry]:
     active = [x for x in to_snapshot_industries(rows) if not x.excluded]
-    core = [x for x in active if "核心强势" in x.tags]
+    core = [x for x in active if "Core" in x.tags]
     core.sort(key=lambda x: top_strong_sort_key(x.score, x.rank_m, x.rank_q, x.key))
     return core[:top_n]
 

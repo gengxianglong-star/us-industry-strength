@@ -122,7 +122,7 @@ def score_industries(rows: list[IndustryRow], config: dict[str, Any]) -> list[Sc
             and spread <= max_spread
         )
         if core_ok and item.tier == "A":
-            item.tags.append("核心强势")
+            item.tags.append("Core")
 
         # 以3个月排名为锚：月度优于3个月=加速；月度弱于3个月=回调
         # acceleration_rank_delta：周排名需比月排名至少好/差这么多名才打箭头标签。
@@ -130,20 +130,20 @@ def score_industries(rows: list[IndustryRow], config: dict[str, Any]) -> list[Sc
         if item.rank_m < item.rank_q:
             if week_vs_month >= accel_delta:
                 if item.rank_w < item.rank_m:
-                    item.tags.append("加速↑")
+                    item.tags.append("Accel↑")
                 elif item.rank_w > item.rank_m:
-                    item.tags.append("加速↓")
+                    item.tags.append("Accel↓")
                 else:
-                    item.tags.append("加速")
+                    item.tags.append("Accel")
             elif week_vs_month <= -accel_delta and item.rank_w > item.rank_m:
-                item.tags.append("加速↓")
+                item.tags.append("Accel↓")
         elif item.rank_m > item.rank_q:
             if item.rank_w < item.rank_m:
-                item.tags.append("回调↑")
+                item.tags.append("Pullback↑")
             elif item.rank_w > item.rank_m:
-                item.tags.append("回调↓")
+                item.tags.append("Pullback↓")
             else:
-                item.tags.append("回调")
+                item.tags.append("Pullback")
 
         pullback_mid_ok = (
             item.rank_m <= pullback_midterm_rank_max
@@ -151,10 +151,10 @@ def score_industries(rows: list[IndustryRow], config: dict[str, Any]) -> list[Sc
             and item.rank_h <= pullback_midterm_rank_max
         )
         if pullback_mid_ok and item.rank_w >= pullback_week_rank_min and item.perf_w < 0:
-            item.tags.append("强势回调")
+            item.tags.append("Strong PB")
 
         if item.rank_m > 80 and item.rank_h > 60:
-            item.tags.append("走弱")
+            item.tags.append("Weak")
 
         scored.append(item)
 
@@ -166,7 +166,7 @@ def filter_core_strong(
     scored: list[ScoredIndustry], config: dict[str, Any]
 ) -> list[ScoredIndustry]:
     top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
-    core = [s for s in scored if not s.excluded and "核心强势" in s.tags]
+    core = [s for s in scored if not s.excluded and "Core" in s.tags]
     core.sort(key=lambda x: top_strong_sort_key(x.score, x.rank_m, x.rank_q, x.key))
     return core[:top_n]
 
