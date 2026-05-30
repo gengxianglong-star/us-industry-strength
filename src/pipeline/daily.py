@@ -68,8 +68,6 @@ def run_daily_pipeline(
         top = filter_top_strong(scored, config)
         storage.save_snapshot(snapshot_date, scored)
         result["industry_count"] = len(rows)
-        result["top_count"] = len(top)
-        _log(opts, f"共获取 {len(rows)} 个行业，Top {len(top)}")
 
         storage.upsert_snapshot_run(
             snapshot_date,
@@ -79,9 +77,17 @@ def run_daily_pipeline(
         )
 
         picks: dict[str, dict[str, Any]] = {}
-        if not opts.skip_stocks and top:
-            _log(opts, f"正在抓取 Top {len(top)} 强势行业的筛选个股…")
+        if opts.skip_stocks:
+            result["top_count"] = len(top)
+            _log(opts, f"共获取 {len(rows)} 个行业，Top {len(top)}")
+        elif not top:
+            result["top_count"] = 0
+            _log(opts, f"共获取 {len(rows)} 个行业，Top 0")
+        else:
+            _log(opts, f"正在抓取 Top 候选行业的筛选个股…")
             picks = fetch_top_industry_stock_picks(storage, snapshot_date, scored, config)
+            top = filter_top_strong(scored, config, stock_picks=picks)
+            result["top_count"] = len(top)
             result["stock_pick_count"] = sum(len(v.get("tickers") or []) for v in picks.values())
             result["stock_pick_errors"] = sum(1 for v in picks.values() if v.get("error"))
             result["picks_summary"] = {
@@ -93,6 +99,7 @@ def run_daily_pipeline(
                 ),
                 "with_tickers": sum(1 for v in picks.values() if v.get("tickers")),
             }
+            _log(opts, f"共获取 {len(rows)} 个行业，Top {len(top)}（含筛股命中）")
             for key, payload in picks.items():
                 name = next((c.name for c in top if c.key == key), key)
                 tickers = payload.get("tickers", [])

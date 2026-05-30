@@ -20,6 +20,7 @@ export function StrongPage() {
     setSearch,
     topListCount,
     summaryText,
+    watchlist,
     filteredIndustries,
     NEW_STOCK_COHORT_LABEL,
   } = useStrongPage();
@@ -80,7 +81,7 @@ export function StrongPage() {
             </table>
           </div>
           <div className="decision-watchlist-wrap" aria-label="Final watchlist daily charts">
-            <WatchlistChartGrid watchlist={rsPayload?.watchlist || []} />
+            <WatchlistChartGrid watchlist={watchlist} />
           </div>
         </div>
       </section>

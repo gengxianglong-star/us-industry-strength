@@ -22,6 +22,11 @@ def main() -> int:
     parser.add_argument("--skip-rs", action="store_true")
     parser.add_argument("--skip-breadth", action="store_true")
     parser.add_argument("--full-breadth", action="store_true")
+    parser.add_argument(
+        "--sync-rs",
+        action="store_true",
+        help="Run RS inline (required before static export)",
+    )
     parser.add_argument("--force", action="store_true", help="忽略已有完成状态，强制重跑")
     args = parser.parse_args()
 
@@ -46,6 +51,8 @@ def main() -> int:
             opts.skip_breadth = True
         if args.full_breadth:
             opts.full_breadth = True
+        if args.sync_rs:
+            opts.rs_async = False
         service.run_sync(
             storage,
             config,

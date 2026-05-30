@@ -56,9 +56,13 @@ jobs:
           restore-keys: |
             dashboard-db-v1-
 
+      - name: Ensure breadth history
+        run: python scripts/ensure_breadth_history.py
+        continue-on-error: true
+
       - name: Run daily precompute
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
-        run: python scripts/precompute_daily.py
+        run: python scripts/precompute_daily.py --sync-rs --force
         continue-on-error: true
 
       - name: Export static dashboard JSON

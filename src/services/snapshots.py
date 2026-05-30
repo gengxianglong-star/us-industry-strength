@@ -48,10 +48,25 @@ def scored_industries_from_rows(rows: list[dict[str, Any]]) -> list[SnapshotIndu
     return active
 
 
-def top_strong_from_rows(rows: list[dict[str, Any]], *, top_n: int) -> list[SnapshotIndustry]:
+def top_strong_from_rows(
+    rows: list[dict[str, Any]],
+    *,
+    top_n: int,
+    stock_picks: dict[str, Any] | None = None,
+) -> list[SnapshotIndustry]:
     active = [r for r in rows if not r.get("excluded")]
     active.sort(key=_row_top_sort_key)
-    return to_snapshot_industries(active[:top_n])
+    if stock_picks is None:
+        return to_snapshot_industries(active[:top_n])
+    selected: list[dict[str, Any]] = []
+    for row in active:
+        if len(selected) >= top_n:
+            break
+        pick = stock_picks.get(row["industry_key"]) or {}
+        tickers = pick.get("tickers") or []
+        if tickers:
+            selected.append(row)
+    return to_snapshot_industries(selected)
 
 
 def core_strong_from_rows(rows: list[dict[str, Any]], *, top_n: int) -> list[SnapshotIndustry]:
@@ -69,9 +84,12 @@ def build_snapshot_response(
     top_n: int,
 ) -> dict[str, Any]:
     active = [r for r in rows if not r["excluded"]]
-    core_keys = {x.key for x in core_strong_from_rows(active, top_n=top_n)}
-    top_keys = {x.key for x in top_strong_from_rows(active, top_n=top_n)}
     stock_picks = storage.get_stock_picks_for_snapshot(snapshot_date)
+    core_keys = {x.key for x in core_strong_from_rows(active, top_n=top_n)}
+    top_keys = {
+        x.key
+        for x in top_strong_from_rows(active, top_n=top_n, stock_picks=stock_picks)
+    }
     deltas = storage.compare_all_with_previous(snapshot_date)
 
     for row in rows:

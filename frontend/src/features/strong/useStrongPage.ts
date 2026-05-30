@@ -41,46 +41,48 @@ export function useStrongPage() {
     }
   }, []);
 
-  const loadRsDetails = useCallback(async (date: string, snap: SnapshotPayload) => {
-    try {
-      const payload = await fetchJson<RsPayload>(
-        `/api/rs/${encodeURIComponent(date)}?limit=120&watchlist_limit=120`,
+  const loadDecisionView = useCallback(async (date: string, snap?: SnapshotPayload) => {
+    const snapshotData =
+      snap ?? (await fetchJson<SnapshotPayload>(`/api/snapshots/${encodeURIComponent(date)}`));
+
+    if (IS_READONLY) {
+      const rsData = await fetchJson<RsPayload>(
+        `/api/rs/${encodeURIComponent(snapshotData.snapshot_date)}?limit=500&watchlist_limit=120`,
       );
-      setRsPayload(payload);
-      setSnapshot({ ...snap, rs_meta: payload.rs_meta || snap.rs_meta });
-    } catch {
+      setSnapshot(snapshotData);
+      setRsPayload(rsData);
+      setTopListCount(snapshotData.top_strong_count ?? getTopStrongIndustries(snapshotData).length);
+      return;
+    }
+
+    const [rsWatch, rsData] = await Promise.all([
+      fetchJson<{ watchlist?: RsPayload["watchlist"]; rs_meta?: RsPayload["rs_meta"] }>(
+        `/api/rs/${encodeURIComponent(date)}?watchlist_only=true&watchlist_limit=120`,
+      ).catch(() => null),
+      fetchJson<RsPayload>(
+        `/api/rs/${encodeURIComponent(date)}?limit=500&watchlist_limit=120`,
+      ).catch(() => null),
+    ]);
+
+    setSnapshot(snapshotData);
+    setTopListCount(snapshotData.top_strong_count ?? getTopStrongIndustries(snapshotData).length);
+
+    if (rsData) {
+      setRsPayload(rsData);
+      setSnapshot({ ...snapshotData, rs_meta: rsData.rs_meta || snapshotData.rs_meta });
+      return;
+    }
+
+    if (rsWatch) {
       setRsPayload({
         snapshot_date: date,
         rows: [],
-        watchlist: [],
+        watchlist: rsWatch.watchlist || snapshotData.watchlist_preview || [],
         new_stock_leaderboard: [],
+        rs_meta: rsWatch.rs_meta || snapshotData.rs_meta,
       });
     }
   }, []);
-
-  const loadDecisionView = useCallback(
-    async (date: string, snap?: SnapshotPayload) => {
-      const [snapshotData, rsWatch] = await Promise.all([
-        snap ? Promise.resolve(snap) : fetchJson<SnapshotPayload>(`/api/snapshots/${encodeURIComponent(date)}`),
-        fetchJson<{ watchlist?: RsPayload["watchlist"]; rs_meta?: RsPayload["rs_meta"] }>(
-          `/api/rs/${encodeURIComponent(date)}?watchlist_only=true&watchlist_limit=120`,
-        ).catch(() => null),
-      ]);
-      setSnapshot(snapshotData);
-      setTopListCount(snapshotData.top_strong_count ?? getTopStrongIndustries(snapshotData).length);
-      if (rsWatch) {
-        setRsPayload({
-          snapshot_date: date,
-          rows: [],
-          watchlist: rsWatch.watchlist || [],
-          new_stock_leaderboard: [],
-          rs_meta: rsWatch.rs_meta,
-        });
-      }
-      loadRsDetails(date, snapshotData).catch(() => {});
-    },
-    [loadRsDetails],
-  );
 
   const refreshFromServer = useCallback(async () => {
     const [snapshotResult, statusResult] = await Promise.allSettled([
@@ -153,9 +155,13 @@ export function useStrongPage() {
     .filter((r) => !search.trim() || r.name.toLowerCase().includes(search.trim().toLowerCase()))
     .sort((a, b) => b.score - a.score);
 
+  const watchlist =
+    rsPayload?.watchlist?.length ? rsPayload.watchlist : snapshot?.watchlist_preview || [];
+
   return {
     snapshot,
     rsPayload,
+    watchlist,
     automation,
     rsStatus,
     rsStatusError,

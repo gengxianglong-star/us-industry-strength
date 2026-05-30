@@ -172,10 +172,22 @@ def filter_core_strong(
 
 
 def filter_top_strong(
-    scored: list[ScoredIndustry], config: dict[str, Any]
+    scored: list[ScoredIndustry],
+    config: dict[str, Any],
+    *,
+    stock_picks: dict[str, Any] | None = None,
 ) -> list[ScoredIndustry]:
-    """Top N industries by composite score (main dashboard list)."""
+    """Top N industries by score; skip empty screener hits and backfill from lower ranks."""
     top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
     active = [s for s in scored if not s.excluded]
     active.sort(key=lambda x: top_strong_sort_key(x.score, x.rank_m, x.rank_q, x.key))
-    return active[:top_n]
+    if stock_picks is None:
+        return active[:top_n]
+    selected: list[ScoredIndustry] = []
+    for item in active:
+        if len(selected) >= top_n:
+            break
+        tickers = (stock_picks.get(item.key) or {}).get("tickers") or []
+        if tickers:
+            selected.append(item)
+    return selected

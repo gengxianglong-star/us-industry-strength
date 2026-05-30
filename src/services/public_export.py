@@ -94,9 +94,9 @@ def build_public_dashboard_payloads(
     storage: Storage,
     config: dict[str, Any],
     *,
-    rs_limit: int = 120,
+    rs_limit: int = 500,
     watchlist_limit: int = 120,
-    breadth_limit: int = 8000,
+    breadth_limit: int = 12000,
 ) -> dict[str, Any]:
     exported_at = datetime.now(timezone.utc).isoformat()
     latest = storage.get_latest_date()

@@ -77,6 +77,16 @@ def classify_new_stock_cohort(bar_count: int, min_main_rows: int) -> str | None:
     return None
 
 
+def _top_industries_with_picks(
+    storage: Storage,
+    snapshot_date: str,
+    scored: list[ScoredIndustry],
+    config: dict[str, Any],
+) -> list[ScoredIndustry]:
+    picks = storage.get_stock_picks_for_snapshot(snapshot_date)
+    return filter_top_strong(scored, config, stock_picks=picks)
+
+
 def _offsets_for_cohort(cohort: str) -> dict[str, int]:
     spec = NEW_STOCK_COHORTS[cohort]
     offsets: dict[str, int] = {}
@@ -288,7 +298,7 @@ def backfill_new_stock_rs_for_snapshot(
     )
 
     main_rows = storage.get_stock_rs_raw(snapshot_date)
-    top_industries = filter_top_strong(scored, config)
+    top_industries = _top_industries_with_picks(storage, snapshot_date, scored, config)
     top_keys = {item.key for item in top_industries}
     symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
     main_watch = _cross_watchlist_candidates(main_rows, symbol_to_industries, cross_top_percent)
@@ -379,7 +389,7 @@ def compute_and_store_new_stock_rs(
             leaderboard.append(row)
         all_scored.extend(rows)
 
-    top_industries = filter_top_strong(scored_industries, config)
+    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
     top_keys = {item.key for item in top_industries}
     symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
     new_watch = _cross_watchlist_candidates(leaderboard, symbol_to_industries, 1.0)
@@ -1098,7 +1108,7 @@ def compute_and_store_stock_rs(
     storage.save_stock_rs_snapshot(snapshot_date, rows)
     storage.save_stock_rs_issues(snapshot_date, issues_map)
 
-    top_industries = filter_top_strong(scored_industries, config)
+    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
     top_keys = {item.key for item in top_industries}
     symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
 
@@ -1168,7 +1178,7 @@ def rebuild_stock_watchlist_for_snapshot(
             "reason": "no_rs_rows",
         }
 
-    top_industries = filter_top_strong(scored_industries, config)
+    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
     top_keys = {item.key for item in top_industries}
     symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
 

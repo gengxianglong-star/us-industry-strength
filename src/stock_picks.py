@@ -13,7 +13,7 @@ from src.finviz_stock_screener import (
     fetch_industry_tickers,
     prepare_finviz_session,
 )
-from src.scoring import ScoredIndustry, filter_top_strong
+from src.scoring import ScoredIndustry, top_strong_sort_key
 from src.storage import Storage
 
 
@@ -171,8 +171,11 @@ def fetch_top_industry_stock_picks(
     scored: list[ScoredIndustry],
     config: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    top = filter_top_strong(scored, config)
-    keys = [item.key for item in top]
+    top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
+    active = [s for s in scored if not s.excluded]
+    active.sort(key=lambda x: top_strong_sort_key(x.score, x.rank_m, x.rank_q, x.key))
+    candidate_count = min(len(active), max(top_n * 3, top_n + 15))
+    keys = [item.key for item in active[:candidate_count]]
     if not keys:
         return {}
     return fetch_and_store_stock_picks(storage, snapshot_date, keys, config)

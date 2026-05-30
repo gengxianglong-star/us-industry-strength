@@ -30,6 +30,7 @@ export type SnapshotPayload = {
   industries: IndustryRow[];
   rs_meta?: Record<string, number | null | undefined>;
   rs_count?: number;
+  watchlist_preview?: WatchlistRow[];
 };
 
 export type WatchlistRow = {

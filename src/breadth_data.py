@@ -784,10 +784,10 @@ def load_breadth_data(
             payload["limit"] = limit
             return payload
 
-    rows = storage.get_breadth_daily(limit=6000)
+    rows = storage.get_breadth_daily(limit=12000)
     if not rows:
         sync_breadth_history(storage, full=True, config=cfg)
-        rows = storage.get_breadth_daily(limit=6000)
+        rows = storage.get_breadth_daily(limit=12000)
     if not rows:
         raise ValueError("Breadth data is empty — run sync first")
 
