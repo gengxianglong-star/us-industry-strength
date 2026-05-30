@@ -11,4 +11,7 @@ frontend/node_modules/
 web/dist/
 frontend/dist/
 frontend/public/data/*.json
+dashboard-data.zip
+.oracle.env
+secrets/
 *.tsbuildinfo

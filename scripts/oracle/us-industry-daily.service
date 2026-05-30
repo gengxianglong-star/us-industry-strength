@@ -1,0 +1,15 @@
+[Unit]
+Description=US Industry Strength daily pipeline (precompute + Pages publish)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__PROJECT_ROOT__
+EnvironmentFile=-__PROJECT_ROOT__/.oracle.env
+ExecStart=__PROJECT_ROOT__/scripts/oracle/daily_pipeline.sh
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

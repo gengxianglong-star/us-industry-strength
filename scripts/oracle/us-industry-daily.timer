@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekday 06:30 Asia/Shanghai — US Industry Strength daily
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 06:30:00
+Timezone=Asia/Shanghai
+Persistent=true
+Unit=us-industry-daily.service
+
+[Install]
+WantedBy=timers.target

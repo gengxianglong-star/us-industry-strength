@@ -113,6 +113,10 @@ chmod +x scripts/scheduled_daily.sh scripts/install-macos-schedule.sh
 
 手机 / 任意浏览器只读查看（无改配置、无手动 RS）：见 **[docs/deploy-readonly-pages.md](docs/deploy-readonly-pages.md)**。
 
+### 全云端自动化（Oracle 免费 VM · 不用开 Mac）
+
+工作日自动抓数、算 RS、更新宽度并发布 Pages：见 **[docs/deploy-oracle.md](docs/deploy-oracle.md)**。
+
 - 地址：`https://<user>.github.io/us-industry-strength/strong`
 - 更新：GitHub Actions 工作日自动跑 Daily → 导出 JSON → 发布 Pages
 - 本地仍用 `./run.sh serve` 获得完整交互版

@@ -14,11 +14,11 @@ done
 
 if [ "$FULL_BREADTH" = "1" ]; then
   echo "Running full breadth sync (may take a few minutes)…"
-  python scripts/sync_breadth.py --full
+  .venv/bin/python scripts/sync_breadth.py --full
 fi
 
 echo "Exporting dashboard JSON from local database…"
-python scripts/export_public_dashboard.py
+.venv/bin/python scripts/export_public_dashboard.py
 
 OUT_ZIP="$ROOT_DIR/dashboard-data.zip"
 rm -f "$OUT_ZIP"

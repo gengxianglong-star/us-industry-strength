@@ -11,14 +11,14 @@ on:
       - "requirements.txt"
       - ".github/workflows/pages.yml"
   schedule:
-    # Mon–Fri 06:30 Asia/Shanghai ≈ Sun–Thu 22:30 UTC
-    - cron: "30 22 * * 0-4"
+    # Disabled when using Oracle VM — the VM runs daily_pipeline.sh and triggers publish.
+    # - cron: "30 22 * * 0-4"
   workflow_dispatch:
     inputs:
       skip_precompute:
         description: Skip daily precompute (export + build only)
         type: boolean
-        default: false
+        default: true
 
 concurrency:
   group: pages
