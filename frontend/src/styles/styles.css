@@ -1082,8 +1082,8 @@ details.panel > summary::before {
 
 .watchlist-chart-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.62rem;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
 }
 
 details.panel > summary::-webkit-details-marker {

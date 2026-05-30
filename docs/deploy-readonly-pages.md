@@ -57,9 +57,22 @@ The workflow keeps `data/industry_strength.db` in **Actions cache**. On the firs
 
 If cloud scraping fails (Cloudflare, etc.):
 
-1. Run `./run.sh daily` on your Mac until data is current.
-2. Trigger the workflow manually — it will export your cached DB **only if** you also upload the DB (advanced), **or**
-3. Wait for a successful scheduled run after fixing `config.yaml` (`scraper.cookie_file` cannot be used on GHA unless you add secrets + file injection).
+### Recommended: publish from your Mac (full data)
+
+Your Mac already has richer data (more industries + watchlist + breadth). Package and upload it:
+
+```bash
+# optional: backfill years of breadth history first
+python scripts/sync_breadth.py --full
+
+./scripts/package_pages_data.sh
+gh release create dashboard-data dashboard-data.zip --title "Dashboard data" --notes "Local export" 2>/dev/null \
+  || gh release upload dashboard-data dashboard-data.zip --clobber
+
+# Actions → Publish read-only dashboard → Run workflow → check "Skip daily precompute"
+```
+
+The workflow loads `dashboard-data.zip` from the **`dashboard-data` release** and skips CI scraping.
 
 **Practical tip:** keep the Mac pipeline as the “source of truth” for hard-to-scrape days; Pages is for **reading** the latest successful export.
 

@@ -171,11 +171,45 @@ def fetch_top_industry_stock_picks(
     scored: list[ScoredIndustry],
     config: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
+    """Fetch screener hits until Top N slots are filled, scanning lower ranks as needed."""
     top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
     active = [s for s in scored if not s.excluded]
     active.sort(key=lambda x: top_strong_sort_key(x.score, x.rank_m, x.rank_q, x.key))
-    candidate_count = min(len(active), max(top_n * 3, top_n + 15))
-    keys = [item.key for item in active[:candidate_count]]
-    if not keys:
+    if not active:
         return {}
-    return fetch_and_store_stock_picks(storage, snapshot_date, keys, config)
+
+    batch_size = max(5, min(12, top_n))
+    all_results: dict[str, dict[str, Any]] = {}
+    filled_keys: list[str] = []
+    pending: list[str] = []
+
+    def _flush_pending() -> None:
+        nonlocal pending
+        if not pending:
+            return
+        batch_result = fetch_and_store_stock_picks(
+            storage,
+            snapshot_date,
+            pending,
+            config,
+        )
+        all_results.update(batch_result)
+        for key in pending:
+            if len(filled_keys) >= top_n:
+                break
+            tickers = (batch_result.get(key) or {}).get("tickers") or []
+            if tickers:
+                filled_keys.append(key)
+        pending = []
+
+    for item in active:
+        if len(filled_keys) >= top_n:
+            break
+        pending.append(item.key)
+        if len(pending) >= batch_size:
+            _flush_pending()
+
+    if pending and len(filled_keys) < top_n:
+        _flush_pending()
+
+    return all_results
