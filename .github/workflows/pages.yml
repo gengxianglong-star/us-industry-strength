@@ -11,8 +11,9 @@ on:
       - "requirements.txt"
       - ".github/workflows/pages.yml"
   schedule:
-    # Disabled when using Oracle VM — the VM runs daily_pipeline.sh and triggers publish.
-    # - cron: "30 22 * * 0-4"
+    # 北京时间每天早上 6:30（UTC 22:30），周一到周五
+    # 确保美股收盘数据（约北京凌晨 4 点）已更新
+    - cron: "30 22 * * 1-5"
   workflow_dispatch:
     inputs:
       skip_precompute:
