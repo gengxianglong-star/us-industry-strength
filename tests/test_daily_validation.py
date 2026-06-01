@@ -28,6 +28,15 @@ class DailyValidationTests(unittest.TestCase):
         )
         self.assertEqual(step["status"], "done")
 
+    def test_rs_high_no_bars_degraded(self) -> None:
+        step = validate_rs_main_step(
+            computed_count=5660,
+            universe_count=7062,
+            coverage_ratio=0.80,
+            no_bars_count=1400,
+        )
+        self.assertEqual(step["status"], "degraded")
+
     def test_partial_picks_degraded_not_failed(self) -> None:
         pipeline = {
             "industry_count": 144,
@@ -45,7 +54,7 @@ class DailyValidationTests(unittest.TestCase):
             "breadth": {"merged_row_count": 100},
             "breadth_skipped": True,
         }
-        config = {"thresholds": {"top_list_count": 15}, "stock_rs": {"new_stock_enabled": True}}
+        config = {"thresholds": {"top_list_count": 10}, "stock_rs": {"new_stock_enabled": True}}
 
         class _Storage:
             def get_stock_rs_meta(self, _date: str):

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchJson, IS_READONLY } from "../../lib/api";
+import { useAutomationEnsureOnStale } from "../../hooks/useAutomationEnsure";
 import {
   getTopStrongIndustries,
   rsUniverseCount,
@@ -22,7 +23,7 @@ export function useStrongPage() {
   const [rsStatus, setRsStatus] = useState("");
   const [rsStatusError, setRsStatusError] = useState(false);
   const [search, setSearch] = useState("");
-  const [topListCount, setTopListCount] = useState(15);
+  const [topListCount, setTopListCount] = useState(10);
   const busyRef = useRef(false);
 
   const applyAutoStatus = useCallback((dashboard: AutomationStatus) => {
@@ -157,6 +158,8 @@ export function useStrongPage() {
 
   const watchlist =
     rsPayload?.watchlist?.length ? rsPayload.watchlist : snapshot?.watchlist_preview || [];
+
+  useAutomationEnsureOnStale(automation);
 
   return {
     snapshot,

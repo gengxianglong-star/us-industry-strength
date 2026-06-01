@@ -9,7 +9,7 @@ thresholds:
   tier_b_score: 0.65
   core_rank_max: 25
   max_rank_spread: 60
-  top_list_count: 15
+  top_list_count: 10
   acceleration_rank_delta: 5
   pullback_midterm_rank_max: 30
   pullback_week_rank_min: 40
@@ -31,8 +31,17 @@ stock_rs:
   cross_top_percent: 0.1
   universe_cap: 0
   universe_cache_hours: 24
-  yahoo_batch_size: 20
-  yahoo_batch_workers: 6
+  yahoo_batch_size: 40
+  yahoo_batch_workers: 10
+  adaptive_fetch:
+    enabled: true
+    max_passes: 5
+    cooldown_seconds: 45
+    min_recovered_per_pass: 20
+    stall_passes_to_stop: 2
+    worker_schedule: [10, 6, 3, 1]
+    batch_size_schedule: [40, 20, 10, 5]
+    final_pass_single_symbol: true
   new_stock_enabled: true
 scraper:
   user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36

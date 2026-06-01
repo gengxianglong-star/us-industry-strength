@@ -160,6 +160,42 @@ class AutoScheduler:
         except (OSError, subprocess.TimeoutExpired) as exc:
             print(f"[automation] service install skipped: {exc}")
 
+    def ensure_now(self, *, reason: str = "browser") -> dict[str, Any]:
+        """Trigger catch-up / retry when the dashboard is opened (idempotent)."""
+        cfg = automation_settings(self._config_getter())
+        if not cfg["enabled"]:
+            return {"triggered": ["disabled"], **self.status()}
+
+        trade_date = latest_trading_date()
+        display_date = self._storage.get_latest_date()
+        lag_days = _stale_days(display_date, trade_date) if display_date else 999
+        daily = self._daily_service.get_status(self._storage, self._config_getter(), trade_date)
+        daily_status = str(daily.get("daily_status") or "")
+        triggered: list[str] = []
+
+        if daily_status == "running":
+            triggered.append("already_running")
+        elif lag_days > 0 or not self._storage.get_snapshot(trade_date):
+            self._ensure_daily(reason=reason, force_catchup=True)
+            triggered.append("daily_catchup")
+        elif daily_status in {"failed", "idle"}:
+            self._ensure_daily(reason=reason)
+            triggered.append("daily_retry" if daily_status == "failed" else "daily_start")
+        else:
+            triggered.append("daily_ok")
+
+        if daily_status != "running":
+            before_rs = self._rs_needs_work(trade_date)
+            before_breadth = self._breadth_needs_work(trade_date)
+            self._ensure_rs_if_needed(trade_date, cfg)
+            self._ensure_breadth_if_needed(trade_date)
+            if before_rs:
+                triggered.append("rs_recovery")
+            if before_breadth:
+                triggered.append("breadth_sync")
+
+        return {"triggered": triggered, **self.status()}
+
     def schedule_recovery(self, *, reason: str, delay_seconds: float = 5) -> None:
         def _run() -> None:
             time.sleep(delay_seconds)
@@ -254,8 +290,13 @@ class AutoScheduler:
         meta = self._storage.get_stock_rs_meta(trade_date) or {}
         computed = int(meta.get("computed_count") or 0)
         coverage = float(meta.get("coverage_ratio") or 0.0)
+        no_bars = int(meta.get("no_bars_count") or 0)
+        universe = int(meta.get("universe_count") or 0)
+        no_bars_ratio = (no_bars / universe) if universe else 1.0
         if rs_state == "done" and computed >= 200 and coverage >= 0.02:
-            return False
+            if no_bars_ratio < 0.08 and no_bars < 500:
+                return False
+            return True
         return computed < 200 or coverage < 0.02
 
     def _ensure_rs_if_needed(self, trade_date: str, cfg: dict[str, Any] | None = None) -> None:

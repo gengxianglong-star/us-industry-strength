@@ -103,7 +103,7 @@ chmod +x scripts/scheduled_daily.sh scripts/install-macos-schedule.sh
 - `thresholds`：行业评分阈值、趋势参数
 - `stock_filters`：Finviz 个股筛选（SMA、成交额、EPS/Sales QoQ>10% 等，见 `fa_epsqoq_o10` / `fa_salesqoq_o10`）
 - `scraper.stock_pick_workers`：行业个股抓取并发（建议 2–4，默认 3）
-- `thresholds.top_list_count`：强势行业数量（默认 15）
+- `thresholds.top_list_count`：强势行业数量（默认 10）
 - `scraper.cookie_file`：可选，浏览器导出 Cookie 以绕过 Cloudflare 验证页
 - `stock_rs`：个股 RS 抓取与交叉参数
 

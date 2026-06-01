@@ -28,6 +28,11 @@ def main() -> int:
         help="Run RS inline (required before static export)",
     )
     parser.add_argument("--force", action="store_true", help="忽略已有完成状态，强制重跑")
+    parser.add_argument(
+        "--force-full-rs",
+        action="store_true",
+        help="Disable RS incremental mode — recompute entire universe",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -53,6 +58,8 @@ def main() -> int:
             opts.full_breadth = True
         if args.sync_rs:
             opts.rs_async = False
+        if args.force_full_rs:
+            opts.force_full_rs = True
         service.run_sync(
             storage,
             config,

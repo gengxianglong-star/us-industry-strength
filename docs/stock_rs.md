@@ -11,8 +11,8 @@
 
 观察名单合并规则：
 
-- 主 RS Top10% ∩ Top15 行业 Finviz 个股（`thresholds.top_list_count`）  
-- ∪ 新股 RS 各档 Top10% ∩ Top15 行业个股  
+- 主 RS Top10% ∩ Top 10 行业 Finviz 个股（`thresholds.top_list_count`）  
+- ∪ 新股 RS 各档 Top10% ∩ Top 10 行业个股  
 - **合并为一张最终观察名单**（按 `rs_score` 排序），**不标注来源**  
 - 若极端情况下 symbol 重复：**保留主 RS 侧结果**（正常不应发生）
 
@@ -42,7 +42,7 @@
 
 ## 交叉与观察名单
 
-1. Top15 强势行业 → Finviz 筛股（含 EPS/Sales QoQ>30% 等）→ `stock_picks`  
+1. Top 10 强势行业 → Finviz 筛股（含 EPS/Sales QoQ>30% 等）→ `stock_picks`  
 2. 主 RS 排名前 10% 且 symbol 在行业筛股中 → 候选  
 3. 新股各档榜单（已是档内 Top10%）且 symbol 在行业筛股中 → 候选  
 4. 合并去重 → `stock_watchlist` → 决策中心 **Finviz 日 K**

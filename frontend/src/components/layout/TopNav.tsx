@@ -1,4 +1,5 @@
 import { NavLink } from "react-router-dom";
+import { NavIconBreadth, NavIconStrong } from "./NavIcons";
 
 export function TopNav() {
   return (
@@ -7,15 +8,15 @@ export function TopNav() {
         className={({ isActive }) => `top-nav-item${isActive ? " active" : ""}`}
         to="/breadth"
       >
-        <span className="top-nav-item-icon" aria-hidden="true" />
-        <span>Breadth</span>
+        <NavIconBreadth />
+        <span>Market Breadth</span>
       </NavLink>
       <NavLink
         className={({ isActive }) => `top-nav-item${isActive ? " active" : ""}`}
         to="/strong"
         end
       >
-        <span className="top-nav-item-icon" aria-hidden="true" />
+        <NavIconStrong />
         <span>Strong Industry</span>
       </NavLink>
     </nav>

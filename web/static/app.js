@@ -177,14 +177,14 @@ function computeLongTrend(row) {
 
 function getTopStrongIndustries(data) {
   return data.industries
-    .filter((i) => i.is_top_strong)
+    .filter((i) => i.is_top_strong && (i.stock_picks || []).length > 0)
     .sort((a, b) => b.score - a.score);
 }
 
-let currentTopListCount = 15;
+let currentTopListCount = 10;
 
 function syncTopListLabels(count) {
-  currentTopListCount = Number(count) || 15;
+  currentTopListCount = Number(count) || 10;
 }
 
 function rsUniverseCount(snapshot) {
@@ -292,6 +292,17 @@ function renderWatchlistCharts(payload) {
     .join("");
 }
 
+function formatAdaptiveStop(reason) {
+  const labels = {
+    min_recovered: "min recovered",
+    no_retryable: "complete",
+    stall: "stalled",
+    max_passes: "max passes",
+  };
+  if (!reason) return "—";
+  return labels[reason] || reason;
+}
+
 function renderCoveragePanel(snapshot, rsPayload) {
   const target = document.getElementById("coveragePanel");
   if (!target) return;
@@ -306,6 +317,10 @@ function renderCoveragePanel(snapshot, rsPayload) {
     (meta.new_stock_h_count ?? 0) +
     (meta.new_stock_3q_count ?? 0);
   const covered = (meta.computed_count ?? 0) + newStockRsCount;
+  const adaptiveLine =
+    Number(meta.adaptive_passes) > 0
+      ? `<span class="coverage-item">Adaptive RS: ${meta.adaptive_passes} passes · recovered +${meta.adaptive_recovered_total ?? 0} · stopped: ${formatAdaptiveStop(meta.adaptive_stop_reason)}</span>`
+      : "";
   target.innerHTML = `
     <span class="coverage-item">Universe ${meta.universe_count}</span>
     <span class="coverage-item">Covered ${covered}</span>
@@ -313,6 +328,7 @@ function renderCoveragePanel(snapshot, rsPayload) {
     <span class="coverage-item">New IPO RS ${newStockRsCount}</span>
     <span class="coverage-item">New list ${meta.new_stock_leaderboard_count ?? 0}</span>
     <span class="coverage-item">No bars ${meta.no_bars_count}</span>
+    ${adaptiveLine}
   `;
 }
 
@@ -662,8 +678,8 @@ function fillConfigForm(cfg) {
   document.getElementById("tierBScore").value = t.tier_b_score ?? 0.65;
   document.getElementById("coreRankMax").value = t.core_rank_max ?? 25;
   document.getElementById("maxRankSpread").value = t.max_rank_spread ?? 60;
-  document.getElementById("topListCount").value = t.top_list_count ?? 15;
-  syncTopListLabels(t.top_list_count ?? 15);
+  document.getElementById("topListCount").value = t.top_list_count ?? 10;
+  syncTopListLabels(t.top_list_count ?? 10);
   document.getElementById("accelerationRankDelta").value = t.acceleration_rank_delta ?? 5;
   document.getElementById("pullbackMidtermRankMax").value = t.pullback_midterm_rank_max ?? 30;
   document.getElementById("pullbackWeekRankMin").value = t.pullback_week_rank_min ?? 40;

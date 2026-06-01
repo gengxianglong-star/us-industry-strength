@@ -443,12 +443,12 @@ class DailyJobService:
         elif lag_days > 0 and status.get("daily_status") == "running":
             headline = f"Updating {target_date}… (displaying {display_date})"
 
-        top15_count = 0
+        top_strong_count = 0
         watchlist_count = 0
         rows = storage.get_snapshot(display_date)
         if rows:
-            top_n = int(config.get("thresholds", {}).get("top_list_count", 15))
-            top15_count = len(top_strong_from_rows(rows, top_n=top_n))
+            top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
+            top_strong_count = len(top_strong_from_rows(rows, top_n=top_n))
             watchlist_count = storage.count_stock_watchlist(display_date)
 
         breadth_latest = None
@@ -471,7 +471,7 @@ class DailyJobService:
             "current_step": status.get("current_step"),
             "progress": progress,
             "summary": {
-                "top15_count": top15_count,
+                "top_strong_count": top_strong_count,
                 "watchlist_count": watchlist_count,
                 "rs_count": rs_count,
                 "industry_count": len(rows) if rows else 0,
@@ -486,7 +486,7 @@ class DailyJobService:
             "pipeline": status.get("pipeline") or {},
             "status": status.get("status"),
             "error": status.get("error"),
-            "top15": [],
+            "top_strong": [],
             "watchlist": [],
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }

@@ -15,11 +15,11 @@
   <a class="skip-link" href="#main-content">Skip to main content</a>
   <nav class="top-nav" aria-label="Main navigation">
     <a class="top-nav-item" href="/breadth">
-      <span class="top-nav-item-icon" aria-hidden="true"></span>
-      <span>Breadth</span>
+      <span class="top-nav-item-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="1.5" y="9" width="3" height="5.5" rx="0.75" fill="currentColor" opacity="0.45"/><rect x="6.5" y="5.5" width="3" height="9" rx="0.75" fill="currentColor" opacity="0.7"/><rect x="11.5" y="2" width="3" height="12.5" rx="0.75" fill="currentColor"/></svg></span>
+      <span>Market Breadth</span>
     </a>
     <a class="top-nav-item active" href="/strong" aria-current="page">
-      <span class="top-nav-item-icon" aria-hidden="true"></span>
+      <span class="top-nav-item-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 11.5 6.5 7 11 9.5 14 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 4h3v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 13.5h12" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" opacity="0.35"/></svg></span>
       <span>Strong Industry</span>
     </a>
   </nav>
@@ -41,8 +41,7 @@
       <div class="panel-header-row panel-header-row-status-only">
         <span id="rsStatus" class="inline-status" role="status" aria-live="polite" aria-atomic="true"></span>
       </div>
-      <div class="decision-grid">
-        <div class="table-wrap decision-core-wrap">
+      <div class="table-wrap decision-core-wrap">
           <table id="coreTable" aria-label="Strong industries top list">
             <thead>
               <tr>
@@ -62,9 +61,13 @@
             <tbody></tbody>
           </table>
         </div>
-        <div class="decision-watchlist-wrap" aria-label="Final watchlist daily charts">
-          <div id="watchlistChartGrid" class="watchlist-chart-grid"></div>
-        </div>
+    </section>
+
+    <section class="panel panel-watchlist" id="watchlistPanel" aria-label="Final watchlist daily charts">
+      <h2 class="subheading">Final Watchlist</h2>
+      <p class="hint">Daily charts for names that cleared RS + Finviz screen cross.</p>
+      <div class="watchlist-chart-scroll">
+        <div id="watchlistChartGrid" class="watchlist-chart-grid"></div>
       </div>
     </section>
 
@@ -94,7 +97,7 @@
       </div>
       <div class="table-wrap table-scroll medium-scroll">
         <h3 class="subheading">New Stock RS Leaderboard (Top 10% per cohort)</h3>
-        <p class="hint">M/Q/H/3Q cohorts (22–259 bars). Only top 10% per cohort can cross with Top15 Finviz picks for the final watchlist.</p>
+        <p class="hint">M/Q/H/3Q cohorts (22–259 bars). Only top 10% per cohort can cross with Top 10 Finviz picks for the final watchlist.</p>
         <table id="newStockTable" aria-label="New stock RS leaderboard">
           <thead>
             <tr>
@@ -172,7 +175,7 @@
             <label>Tier B score ≥ <span class="help-tip" data-tip="Min score for B tier. Must be ≤ Tier A.">?</span><input type="number" id="tierBScore" step="0.01" min="0" max="1" required /></label>
             <label>Core rank cap <span class="help-tip" data-tip="1M/3M/6M ranks must all be ≤ this for Core tag.">?</span><input type="number" id="coreRankMax" min="1" required /></label>
             <label>Max rank spread <span class="help-tip" data-tip="Max minus min rank across five horizons. Lower = tighter alignment.">?</span><input type="number" id="maxRankSpread" min="0" required /></label>
-            <label>Top list size <span class="help-tip" data-tip="Strong industry count and Finviz scrape depth (15 default).">?</span><input type="number" id="topListCount" min="1" required /></label>
+            <label>Top list size <span class="help-tip" data-tip="Strong industry count and Finviz scrape depth (10 default).">?</span><input type="number" id="topListCount" min="1" required /></label>
             <label>Accel rank gap <span class="help-tip" data-tip="Min 1W vs 1M rank improvement for Accel tag.">?</span><input type="number" id="accelerationRankDelta" min="0" required /></label>
             <label>PB midterm rank cap <span class="help-tip" data-tip="Max 1M/3M/6M rank for Strong Pullback tag.">?</span><input type="number" id="pullbackMidtermRankMax" min="1" required /></label>
             <label>PB 1W rank floor <span class="help-tip" data-tip="Min 1W rank for Strong Pullback; 1W return must be negative.">?</span><input type="number" id="pullbackWeekRankMin" min="1" required /></label>

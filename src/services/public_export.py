@@ -100,7 +100,7 @@ def build_public_dashboard_payloads(
 ) -> dict[str, Any]:
     exported_at = datetime.now(timezone.utc).isoformat()
     latest = storage.get_latest_date()
-    top_n = int(config.get("thresholds", {}).get("top_list_count", 15))
+    top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
 
     if latest:
         rows = storage.get_snapshot(latest)

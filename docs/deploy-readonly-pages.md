@@ -11,7 +11,7 @@ Live URL (after setup):
 
 | Feature | Read-only Pages | Local `run.sh serve` |
 |---------|-----------------|----------------------|
-| Top 15 + watchlist charts | Yes | Yes |
+| Top 10 + watchlist charts | Yes | Yes |
 | RS evidence tables | Yes | Yes |
 | Breadth cockpit + charts | Yes | Yes |
 | Edit config / save thresholds | No | Yes |

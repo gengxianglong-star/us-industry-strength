@@ -184,6 +184,12 @@ def automation_status() -> dict[str, Any]:
     return AUTO_SCHEDULER.status()
 
 
+@app.post("/api/automation/ensure")
+def automation_ensure() -> dict[str, Any]:
+    """Browser-open hook: start catch-up / retry failed jobs without manual CLI."""
+    return AUTO_SCHEDULER.ensure_now(reason="browser")
+
+
 @app.get("/api/breadth")
 def get_breadth_data(
     refresh: bool = Query(default=False),

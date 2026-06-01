@@ -248,9 +248,86 @@ def _is_iso_date(value: str) -> bool:
     return 2007 <= year <= (datetime.utcnow().year + 1)
 
 
-def _discover_sheet_gids() -> list[str]:
-    """仅同步 Market Monitor 主表，避免多 tab 合并覆盖或拉取过慢。"""
-    return [PRIMARY_MARKET_MONITOR_GID]
+def _discover_gids_from_pubhtml(settings: dict[str, Any]) -> list[str]:
+    """List sheet tab gids from the published workbook HTML."""
+    cmd = [
+        _curl_binary(),
+        "-fsSL",
+        "--http1.1",
+        "--max-time",
+        str(int(settings.get("read_timeout_seconds", 120))),
+        "-A",
+        settings["user_agent"],
+    ]
+    proxy = str(settings.get("proxy_url") or "").strip()
+    if proxy:
+        cmd.extend(["--proxy", proxy])
+    if not settings.get("verify_ssl", True):
+        cmd.append("--insecure")
+    cmd.append(SHEET_PUBHTML_URL)
+    result = subprocess.run(cmd, capture_output=True, check=False)
+    if result.returncode != 0:
+        stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(stderr or f"curl exit {result.returncode}")
+    text = result.stdout.decode("utf-8", errors="replace")
+    return sorted(set(re.findall(r"gid=(\d+)", text)), key=int)
+
+
+def _gid_has_breadth_data(gid: str, settings: dict[str, Any]) -> bool:
+    """True when a tab exports at least ~1 month of valid Market Monitor rows."""
+    try:
+        _, _, data_rows = _fetch_gid_rows_remote(gid, settings)
+        rows = _normalize_gid_rows(gid, f"gid_{gid}", data_rows)
+        return len(rows) >= 20
+    except Exception:
+        return False
+
+
+def _discover_sheet_gids(
+    config: dict[str, Any] | None = None,
+    *,
+    full: bool = False,
+    storage: Storage | None = None,
+) -> list[str]:
+    """Return sheet gids to sync.
+
+    Stockbee history is split across many yearly tabs. Full sync discovers all tabs
+    from pubhtml; incremental sync only hits the live tab plus sheets touched recently.
+    """
+    cfg = config or load_config()
+    settings = _breadth_settings(cfg)
+    primary = PRIMARY_MARKET_MONITOR_GID
+
+    if not full and storage is not None:
+        lookback_cutoff = (
+            datetime.now(timezone.utc).date() - timedelta(days=INCREMENTAL_LOOKBACK_DAYS)
+        ).isoformat()
+        gids: list[str] = [primary]
+        for item in storage.get_breadth_sheet_meta():
+            gid = str(item.get("sheet_gid") or "").strip()
+            if not gid or gid == primary:
+                continue
+            last_date = str(item.get("last_date") or "")
+            if last_date and last_date >= lookback_cutoff:
+                gids.append(gid)
+        return list(dict.fromkeys(gids))
+
+    try:
+        candidates = _discover_gids_from_pubhtml(settings)
+    except Exception:
+        candidates = [primary]
+
+    valid: list[str] = []
+    for gid in candidates:
+        if gid == primary or _gid_has_breadth_data(gid, settings):
+            if gid not in valid:
+                valid.append(gid)
+
+    if primary not in valid:
+        valid.insert(0, primary)
+    else:
+        valid = [primary] + [g for g in valid if g != primary]
+    return valid
 
 
 def _breadth_settings(config: dict[str, Any] | None) -> dict[str, Any]:
@@ -572,7 +649,9 @@ def sync_breadth_history(
 ) -> dict[str, Any]:
     global _CACHE_DATA, _CACHE_AT, _CACHE_SIGNATURE
     cfg = config or load_config()
-    gids = _discover_sheet_gids()
+    gids = _discover_sheet_gids(cfg, full=full, storage=storage)
+    if progress_callback:
+        progress_callback(0, len(gids), "discover")
     existing_meta = storage.get_breadth_sheet_meta()
     last_date_by_gid = {
         str(item.get("sheet_gid")): str(item.get("last_date") or "")

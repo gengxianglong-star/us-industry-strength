@@ -10,6 +10,17 @@ import {
 } from "./components/StrongTables";
 import { useStrongPage } from "./useStrongPage";
 
+function formatAdaptiveStop(reason?: string | null) {
+  const labels: Record<string, string> = {
+    min_recovered: "min recovered",
+    no_retryable: "complete",
+    stall: "stalled",
+    max_passes: "max passes",
+  };
+  if (!reason) return "—";
+  return labels[reason] || reason;
+}
+
 export function StrongPage() {
   const {
     snapshot,
@@ -53,8 +64,7 @@ export function StrongPage() {
             {rsStatus}
           </span>
         </div>
-        <div className="decision-grid">
-          <div className="table-wrap decision-core-wrap">
+        <div className="table-wrap decision-core-wrap">
             <table aria-label="Strong industries top list">
               <thead>
                 <tr>
@@ -79,10 +89,14 @@ export function StrongPage() {
               </thead>
               <CoreIndustryTable snapshot={snapshot} />
             </table>
-          </div>
-          <div className="decision-watchlist-wrap" aria-label="Final watchlist daily charts">
-            <WatchlistChartGrid watchlist={watchlist} />
-          </div>
+        </div>
+      </section>
+
+      <section className="panel panel-watchlist" aria-label="Final watchlist daily charts">
+        <h2 className="subheading">Final Watchlist</h2>
+        <p className="hint">Daily charts for names that cleared RS + Finviz screen cross.</p>
+        <div className="watchlist-chart-scroll">
+          <WatchlistChartGrid watchlist={watchlist} />
         </div>
       </section>
 
@@ -98,6 +112,13 @@ export function StrongPage() {
               <span className="coverage-item">New IPO RS {newStockRsCount}</span>
               <span className="coverage-item">New list {meta.new_stock_leaderboard_count ?? 0}</span>
               <span className="coverage-item">No bars {meta.no_bars_count}</span>
+              {Number(meta.adaptive_passes) > 0 ? (
+                <span className="coverage-item">
+                  Adaptive RS: {meta.adaptive_passes} passes · recovered +
+                  {meta.adaptive_recovered_total ?? 0} · stopped:{" "}
+                  {formatAdaptiveStop(meta.adaptive_stop_reason)}
+                </span>
+              ) : null}
             </>
           ) : (
             <span className="hint">Coverage: waiting on RS run</span>
@@ -161,7 +182,7 @@ export function StrongPage() {
         <div className="table-wrap table-scroll medium-scroll">
           <h3 className="subheading">New Stock RS Leaderboard (Top 10% per cohort)</h3>
           <p className="hint">
-            M/Q/H/3Q cohorts (22–259 bars). Only top 10% per cohort can cross with Top15 Finviz picks for the
+            M/Q/H/3Q cohorts (22–259 bars). Only top 10% per cohort can cross with Top 10 Finviz picks for the
             final watchlist.
           </p>
           <table aria-label="New stock RS leaderboard">

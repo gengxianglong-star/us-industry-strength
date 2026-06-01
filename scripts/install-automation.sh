@@ -36,9 +36,15 @@ fi
 install_plist "${ROOT_DIR}/scripts/com.us-industry-strength.server.plist" "com.us-industry-strength.server"
 install_plist "${ROOT_DIR}/scripts/com.us-industry-strength.daily.plist" "com.us-industry-strength.daily"
 
+if [ -x "${ROOT_DIR}/scripts/create-desktop-launcher.sh" ]; then
+  bash "${ROOT_DIR}/scripts/create-desktop-launcher.sh" || true
+fi
+
 echo ""
 echo "全自动已就绪："
 echo "  - Web 服务：登录自启，崩溃自动重启 → http://127.0.0.1:8080"
 echo "  - 内置调度：启动补跑 + 工作日 06:30 + 失败每 20 分钟重试"
+echo "  - 打开网页：自动补跑/修复（POST /api/automation/ensure）"
+echo "  - 桌面图标：双击 Open US Industry Strength.app（服务未开时自动拉起 + 打开 Edge）"
 echo "  - 备份 cron：launchd daily 任务（服务离线时仍更新）"
 echo "  - 日志：${ROOT_DIR}/logs/"

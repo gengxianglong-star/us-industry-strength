@@ -154,7 +154,7 @@ export function ConfigPanel({ onTopListChange }: { onTopListChange?: (n: number)
               Max rank spread <input type="number" value={t.max_rank_spread ?? 60} onChange={(e) => updateThreshold("max_rank_spread", parseInt(e.target.value, 10))} required />
             </label>
             <label>
-              Top list size <input type="number" value={t.top_list_count ?? 15} onChange={(e) => updateThreshold("top_list_count", parseInt(e.target.value, 10))} required />
+              Top list size <input type="number" value={t.top_list_count ?? 10} onChange={(e) => updateThreshold("top_list_count", parseInt(e.target.value, 10))} required />
             </label>
             <label>
               Accel rank gap <input type="number" value={t.acceleration_rank_delta ?? 5} onChange={(e) => updateThreshold("acceleration_rank_delta", parseInt(e.target.value, 10))} required />

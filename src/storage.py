@@ -255,6 +255,7 @@ class Storage:
             ("new_stock_watchlist_added", "INTEGER NOT NULL DEFAULT 0"),
             ("worker_error_count", "INTEGER NOT NULL DEFAULT 0"),
             ("worker_error_sample", "TEXT"),
+            ("adaptive_fetch_json", "TEXT"),
         ]
         for name, typedef in additions:
             if name not in cols:
@@ -915,8 +916,8 @@ class Storage:
                     new_stock_m_count, new_stock_q_count, new_stock_h_count,
                     new_stock_3q_count, new_stock_leaderboard_count,
                     new_stock_watchlist_added, worker_error_count, worker_error_sample,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    adaptive_fetch_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot_date,
@@ -934,6 +935,16 @@ class Storage:
                     int(meta.get("new_stock_watchlist_added", 0)),
                     int(meta.get("worker_error_count", 0) or 0),
                     json.dumps(sample, ensure_ascii=False),
+                    json.dumps(
+                        {
+                            "pass_count": int(meta.get("adaptive_passes", 0) or 0),
+                            "passes": meta.get("adaptive_pass_details") or [],
+                            "recovered_total": int(meta.get("adaptive_recovered_total", 0) or 0),
+                            "converged": bool(meta.get("adaptive_converged")),
+                            "stop_reason": str(meta.get("adaptive_stop_reason") or ""),
+                        },
+                        ensure_ascii=False,
+                    ),
                     updated_at,
                 ),
             )
@@ -1040,6 +1051,16 @@ class Storage:
             data["worker_error_sample"] = json.loads(data.get("worker_error_sample") or "[]")
         except json.JSONDecodeError:
             data["worker_error_sample"] = []
+        try:
+            adaptive = json.loads(data.get("adaptive_fetch_json") or "{}")
+        except json.JSONDecodeError:
+            adaptive = {}
+        if isinstance(adaptive, dict):
+            data["adaptive_passes"] = int(adaptive.get("pass_count", 0) or 0)
+            data["adaptive_pass_details"] = adaptive.get("passes") or []
+            data["adaptive_recovered_total"] = int(adaptive.get("recovered_total", 0) or 0)
+            data["adaptive_converged"] = bool(adaptive.get("converged"))
+            data["adaptive_stop_reason"] = str(adaptive.get("stop_reason") or "")
         return data
 
     def save_stock_rs_issues(self, snapshot_date: str, issues: dict[str, str]) -> None:

@@ -544,8 +544,10 @@ def _rs_meta_payload(
     coverage_ratio: float,
     new_stock_result: dict[str, Any] | None = None,
     worker_errors: list[str] | None = None,
+    adaptive_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     new_stock_result = new_stock_result or {}
+    adaptive_stats = adaptive_stats or {}
     return {
         "universe_count": universe_count,
         "computed_count": computed_count,
@@ -565,6 +567,11 @@ def _rs_meta_payload(
         ),
         "worker_error_count": len(worker_errors or []),
         "worker_error_sample": (worker_errors or [])[:3],
+        "adaptive_passes": int(adaptive_stats.get("adaptive_passes", 0) or 0),
+        "adaptive_pass_details": adaptive_stats.get("adaptive_pass_details") or [],
+        "adaptive_recovered_total": int(adaptive_stats.get("adaptive_recovered_total", 0) or 0),
+        "adaptive_converged": bool(adaptive_stats.get("adaptive_converged")),
+        "adaptive_stop_reason": str(adaptive_stats.get("adaptive_stop_reason") or ""),
     }
 
 
@@ -847,6 +854,363 @@ def _run_yahoo_batch_rs_fetch(
         list(executor.map(_process_batch, batches))
 
 
+RETRYABLE_RS_REASONS = frozenset({"no_bars", "perf_invalid"})
+
+_DEFAULT_ADAPTIVE_CFG: dict[str, Any] = {
+    "enabled": True,
+    "max_passes": 5,
+    "cooldown_seconds": 45,
+    "min_recovered_per_pass": 20,
+    "stall_passes_to_stop": 2,
+    "worker_schedule": [10, 6, 3, 1],
+    "batch_size_schedule": [40, 20, 10, 5],
+    "final_pass_single_symbol": True,
+}
+
+
+def _resolve_adaptive_cfg(rs_cfg: dict[str, Any]) -> dict[str, Any]:
+    raw = rs_cfg.get("adaptive_fetch") or {}
+    cfg = {**_DEFAULT_ADAPTIVE_CFG, **raw}
+    cfg["enabled"] = bool(cfg.get("enabled", True))
+    cfg["max_passes"] = max(1, min(8, int(cfg.get("max_passes", 5))))
+    cfg["cooldown_seconds"] = max(0, min(300, int(cfg.get("cooldown_seconds", 45))))
+    cfg["min_recovered_per_pass"] = max(1, int(cfg.get("min_recovered_per_pass", 20)))
+    cfg["stall_passes_to_stop"] = max(1, int(cfg.get("stall_passes_to_stop", 2)))
+    cfg["final_pass_single_symbol"] = bool(cfg.get("final_pass_single_symbol", True))
+    worker_sched = [
+        max(1, min(12, int(x))) for x in (cfg.get("worker_schedule") or _DEFAULT_ADAPTIVE_CFG["worker_schedule"])
+    ]
+    batch_sched = [
+        max(5, min(50, int(x)))
+        for x in (cfg.get("batch_size_schedule") or _DEFAULT_ADAPTIVE_CFG["batch_size_schedule"])
+    ]
+    cfg["worker_schedule"] = worker_sched or list(_DEFAULT_ADAPTIVE_CFG["worker_schedule"])
+    cfg["batch_size_schedule"] = batch_sched or list(_DEFAULT_ADAPTIVE_CFG["batch_size_schedule"])
+    return cfg
+
+
+def _retryable_symbols(
+    issues_map: dict[str, str],
+    *,
+    symbol_set: set[str] | None = None,
+) -> list[str]:
+    symbols = [
+        symbol
+        for symbol, reason in issues_map.items()
+        if reason in RETRYABLE_RS_REASONS and (symbol_set is None or symbol in symbol_set)
+    ]
+    return sorted(symbols)
+
+
+def _issue_reason_counts(issues_map: dict[str, str]) -> dict[str, int]:
+    counts = {"no_bars": 0, "insufficient_history": 0, "perf_invalid": 0}
+    for reason in issues_map.values():
+        if reason in counts:
+            counts[reason] += 1
+    return counts
+
+
+def _adaptive_pass_record(
+    *,
+    pass_num: int,
+    workers: int,
+    batch_size: int,
+    mode: str,
+    attempted: int,
+    computed_count: int,
+    issue_counts: dict[str, int],
+    recovered: int | None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "pass": pass_num,
+        "workers": workers,
+        "batch_size": batch_size,
+        "mode": mode,
+        "attempted": attempted,
+        "computed_after": computed_count,
+        "no_bars_after": issue_counts["no_bars"],
+        "insufficient_after": issue_counts["insufficient_history"],
+        "perf_invalid_after": issue_counts["perf_invalid"],
+    }
+    if recovered is not None:
+        record["recovered"] = recovered
+    return record
+
+
+def _adaptive_should_stop(
+    *,
+    pass_num: int,
+    max_passes: int,
+    recovered: int,
+    stall_passes: int,
+    min_recovered: int,
+    at_final_tier: bool,
+    final_single_complete: bool,
+    retryable_remaining: int,
+    stall_passes_to_stop: int,
+) -> tuple[bool, str]:
+    if pass_num >= max_passes:
+        return True, "max_passes"
+    if retryable_remaining == 0:
+        return True, "no_retryable"
+    if recovered == 0 and stall_passes >= stall_passes_to_stop:
+        return True, "stall"
+    if (
+        at_final_tier
+        and final_single_complete
+        and recovered < min_recovered
+        and pass_num > 1
+    ):
+        return True, "min_recovered"
+    return False, ""
+
+
+def _run_yahoo_single_symbol_rs_fetch(
+    *,
+    target_symbols: list[str],
+    max_workers: int,
+    request_timeout: int,
+    user_agent: str,
+    storage: Storage,
+    snapshot_date: str,
+    min_price_rows: int,
+    perf_map: dict[str, dict[str, Any]],
+    issues_map: dict[str, str],
+    insufficient_bars: dict[str, list[dict[str, Any]]],
+    save_price_history: bool,
+    progress_callback: Callable[[int, int], None] | None,
+    worker_errors: list[str],
+    progress_base: int = 0,
+    progress_total: int | None = None,
+) -> None:
+    total_symbols = len(target_symbols)
+    if not total_symbols:
+        return
+    progress_total = progress_total or total_symbols
+    processed = 0
+    apply_lock = threading.Lock()
+
+    def _fetch_one(symbol: str) -> dict[str, Any]:
+        with requests.Session() as session:
+            session.headers.update({"User-Agent": user_agent})
+            bars = fetch_yahoo_daily_bars(symbol, session, timeout=request_timeout)
+        return _symbol_payload_from_bars(
+            symbol,
+            bars,
+            min_price_rows=min_price_rows,
+            source="yahoo",
+        )
+
+    def _run_symbol(symbol: str) -> None:
+        nonlocal processed
+        try:
+            payload = _fetch_one(symbol)
+        except Exception as exc:  # noqa: BLE001
+            if len(worker_errors) < 20:
+                worker_errors.append(f"{symbol}: {exc}")
+            payload = {"symbol": symbol, "status": "no_bars", "reason": "no_bars"}
+        with apply_lock:
+            _apply_symbol_payload(
+                payload,
+                storage=storage,
+                snapshot_date=snapshot_date,
+                perf_map=perf_map,
+                issues_map=issues_map,
+                insufficient_bars=insufficient_bars,
+                save_price_history=save_price_history,
+            )
+            processed += 1
+            if progress_callback and (processed % 25 == 0 or processed >= total_symbols):
+                progress_callback(min(progress_base + processed, progress_total), progress_total)
+
+    workers = max(1, min(max_workers, total_symbols))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        list(executor.map(_run_symbol, target_symbols))
+
+
+def _run_adaptive_yahoo_rs_fetch(
+    *,
+    target_symbols: list[str],
+    symbol_set: set[str],
+    adaptive_cfg: dict[str, Any],
+    request_timeout: int,
+    user_agent: str,
+    storage: Storage,
+    snapshot_date: str,
+    min_price_rows: int,
+    perf_map: dict[str, dict[str, Any]],
+    issues_map: dict[str, str],
+    insufficient_bars: dict[str, list[dict[str, Any]]],
+    save_price_history: bool,
+    progress_callback: Callable[[int, int], None] | None,
+    worker_errors: list[str],
+) -> dict[str, Any]:
+    worker_sched = adaptive_cfg["worker_schedule"]
+    batch_sched = adaptive_cfg["batch_size_schedule"]
+    max_passes = int(adaptive_cfg["max_passes"])
+    cooldown = int(adaptive_cfg["cooldown_seconds"])
+    min_recovered = int(adaptive_cfg["min_recovered_per_pass"])
+    stall_limit = int(adaptive_cfg["stall_passes_to_stop"])
+    final_single = bool(adaptive_cfg["final_pass_single_symbol"])
+
+    pass_records: list[dict[str, Any]] = []
+    recovered_total = 0
+    stall_passes = 0
+    stop_reason = "no_retryable"
+    progress_total = max(1, len(target_symbols))
+
+    workers = worker_sched[0]
+    batch_size = batch_sched[0]
+    print(
+        f"[RS adaptive] pass 1/{max_passes}: batch workers={workers} "
+        f"batch_size={batch_size} symbols={len(target_symbols)}"
+    )
+    _run_yahoo_batch_rs_fetch(
+        target_symbols=target_symbols,
+        yahoo_batch_size=batch_size,
+        yahoo_batch_workers=workers,
+        request_timeout=request_timeout,
+        user_agent=user_agent,
+        storage=storage,
+        snapshot_date=snapshot_date,
+        min_price_rows=min_price_rows,
+        perf_map=perf_map,
+        issues_map=issues_map,
+        insufficient_bars=insufficient_bars,
+        save_price_history=save_price_history,
+        progress_callback=progress_callback,
+    )
+    issue_counts = _issue_reason_counts(issues_map)
+    pass_records.append(
+        _adaptive_pass_record(
+            pass_num=1,
+            workers=workers,
+            batch_size=batch_size,
+            mode="batch",
+            attempted=len(target_symbols),
+            computed_count=len(perf_map),
+            issue_counts=issue_counts,
+            recovered=None,
+        )
+    )
+
+    final_single_complete = False
+    for pass_num in range(2, max_passes + 1):
+        retryable = _retryable_symbols(issues_map, symbol_set=symbol_set)
+        if not retryable:
+            stop_reason = "no_retryable"
+            break
+
+        if cooldown > 0:
+            print(f"[RS adaptive] cooldown {cooldown}s before pass {pass_num}")
+            time.sleep(cooldown)
+
+        schedule_idx = min(pass_num - 1, len(worker_sched) - 1)
+        workers = worker_sched[schedule_idx]
+        batch_size = batch_sched[min(pass_num - 1, len(batch_sched) - 1)]
+        at_final_tier = schedule_idx >= len(worker_sched) - 1
+        retryable_before = len(retryable)
+
+        if at_final_tier and final_single:
+            mode = "single"
+            print(
+                f"[RS adaptive] pass {pass_num}/{max_passes}: single-symbol "
+                f"workers=1 symbols={len(retryable)}"
+            )
+            _run_yahoo_single_symbol_rs_fetch(
+                target_symbols=retryable,
+                max_workers=1,
+                request_timeout=request_timeout,
+                user_agent=user_agent,
+                storage=storage,
+                snapshot_date=snapshot_date,
+                min_price_rows=min_price_rows,
+                perf_map=perf_map,
+                issues_map=issues_map,
+                insufficient_bars=insufficient_bars,
+                save_price_history=save_price_history,
+                progress_callback=progress_callback,
+                worker_errors=worker_errors,
+                progress_base=len(target_symbols),
+                progress_total=progress_total + len(retryable),
+            )
+            final_single_complete = True
+        else:
+            mode = "batch"
+            print(
+                f"[RS adaptive] pass {pass_num}/{max_passes}: batch workers={workers} "
+                f"batch_size={batch_size} symbols={len(retryable)}"
+            )
+            _run_yahoo_batch_rs_fetch(
+                target_symbols=retryable,
+                yahoo_batch_size=batch_size,
+                yahoo_batch_workers=workers,
+                request_timeout=request_timeout,
+                user_agent=user_agent,
+                storage=storage,
+                snapshot_date=snapshot_date,
+                min_price_rows=min_price_rows,
+                perf_map=perf_map,
+                issues_map=issues_map,
+                insufficient_bars=insufficient_bars,
+                save_price_history=save_price_history,
+                progress_callback=progress_callback,
+            )
+
+        issue_counts = _issue_reason_counts(issues_map)
+        retryable_after = len(_retryable_symbols(issues_map, symbol_set=symbol_set))
+        recovered = max(0, retryable_before - retryable_after)
+        recovered_total += recovered
+        pass_records.append(
+            _adaptive_pass_record(
+                pass_num=pass_num,
+                workers=1 if mode == "single" else workers,
+                batch_size=1 if mode == "single" else batch_size,
+                mode=mode,
+                attempted=len(retryable),
+                computed_count=len(perf_map),
+                issue_counts=issue_counts,
+                recovered=recovered,
+            )
+        )
+        print(
+            f"[RS adaptive] pass {pass_num} recovered={recovered} "
+            f"no_bars={issue_counts['no_bars']} retryable={retryable_after}"
+        )
+
+        should_stop, reason = _adaptive_should_stop(
+            pass_num=pass_num,
+            max_passes=max_passes,
+            recovered=recovered,
+            stall_passes=stall_passes,
+            min_recovered=min_recovered,
+            at_final_tier=at_final_tier,
+            final_single_complete=final_single_complete or (not final_single and at_final_tier),
+            retryable_remaining=retryable_after,
+            stall_passes_to_stop=stall_limit,
+        )
+        if should_stop:
+            stop_reason = reason
+            break
+        if recovered == 0:
+            stall_passes += 1
+        else:
+            stall_passes = 0
+
+    converged = stop_reason in {"no_retryable", "min_recovered", "stall"}
+    print(
+        f"[RS adaptive] stop={stop_reason} passes={len(pass_records)} "
+        f"recovered_total={recovered_total} converged={converged}"
+    )
+    return {
+        "adaptive_passes": len(pass_records),
+        "adaptive_pass_details": pass_records,
+        "adaptive_recovered_total": recovered_total,
+        "adaptive_converged": converged,
+        "adaptive_stop_reason": stop_reason,
+    }
+
+
 def _calc_performance(bars: list[dict[str, Any]]) -> dict[str, float] | None:
     if len(bars) < PERF_INDEX_OFFSETS["year"] + 1:
         return None
@@ -929,6 +1293,7 @@ def compute_and_store_stock_rs(
     insufficient_bars: dict[str, list[dict[str, Any]]] = {}
 
     worker_errors: list[str] = []
+    adaptive_stats: dict[str, Any] = {}
 
     user_agent = "Mozilla/5.0"
     total_symbols = len(target_symbols)
@@ -978,21 +1343,40 @@ def compute_and_store_stock_rs(
                     if progress_callback and (processed % 25 == 0 or processed == total_symbols):
                         progress_callback(processed, total_symbols)
         else:
-            _run_yahoo_batch_rs_fetch(
-                target_symbols=target_symbols,
-                yahoo_batch_size=yahoo_batch_size,
-                yahoo_batch_workers=yahoo_batch_workers,
-                request_timeout=request_timeout,
-                user_agent=user_agent,
-                storage=storage,
-                snapshot_date=snapshot_date,
-                min_price_rows=min_price_rows,
-                perf_map=perf_map,
-                issues_map=issues_map,
-                insufficient_bars=insufficient_bars,
-                save_price_history=save_price_history,
-                progress_callback=progress_callback,
-            )
+            adaptive_cfg = _resolve_adaptive_cfg(rs_cfg)
+            if adaptive_cfg["enabled"]:
+                adaptive_stats = _run_adaptive_yahoo_rs_fetch(
+                    target_symbols=target_symbols,
+                    symbol_set=symbol_set,
+                    adaptive_cfg=adaptive_cfg,
+                    request_timeout=request_timeout,
+                    user_agent=user_agent,
+                    storage=storage,
+                    snapshot_date=snapshot_date,
+                    min_price_rows=min_price_rows,
+                    perf_map=perf_map,
+                    issues_map=issues_map,
+                    insufficient_bars=insufficient_bars,
+                    save_price_history=save_price_history,
+                    progress_callback=progress_callback,
+                    worker_errors=worker_errors,
+                )
+            else:
+                _run_yahoo_batch_rs_fetch(
+                    target_symbols=target_symbols,
+                    yahoo_batch_size=yahoo_batch_size,
+                    yahoo_batch_workers=yahoo_batch_workers,
+                    request_timeout=request_timeout,
+                    user_agent=user_agent,
+                    storage=storage,
+                    snapshot_date=snapshot_date,
+                    min_price_rows=min_price_rows,
+                    perf_map=perf_map,
+                    issues_map=issues_map,
+                    insufficient_bars=insufficient_bars,
+                    save_price_history=save_price_history,
+                    progress_callback=progress_callback,
+                )
     elif progress_callback:
         progress_callback(0, 0)
 
@@ -1061,6 +1445,7 @@ def compute_and_store_stock_rs(
                     "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
                 },
                 worker_errors=worker_errors,
+                adaptive_stats=adaptive_stats,
             ),
         )
         return {
@@ -1076,6 +1461,7 @@ def compute_and_store_stock_rs(
             "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
             "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
             "worker_errors": worker_errors,
+            **adaptive_stats,
         }
 
     ranks = {tf: _rank_by_key(rows, PERF_KEY_MAP[tf]) for tf in TIMEFRAMES}
@@ -1138,6 +1524,7 @@ def compute_and_store_stock_rs(
                 "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
             },
             worker_errors=worker_errors,
+            adaptive_stats=adaptive_stats,
         ),
     )
 
@@ -1155,6 +1542,7 @@ def compute_and_store_stock_rs(
         "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
         "worker_errors": worker_errors,
         "worker_error_count": len(worker_errors),
+        **adaptive_stats,
     }
 
 

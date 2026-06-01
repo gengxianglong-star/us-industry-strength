@@ -74,7 +74,11 @@ def validate_rs_main_step(
     no_bars_count: int,
 ) -> dict[str, Any]:
     no_bars_ratio = (no_bars_count / universe_count) if universe_count else 1.0
-    if computed_count >= 500 and coverage_ratio >= 0.05 and no_bars_ratio < 0.95:
+    if no_bars_ratio >= 0.20:
+        status = "failed" if computed_count < 500 else "degraded"
+    elif no_bars_ratio >= 0.08:
+        status = "degraded" if computed_count >= 200 else "failed"
+    elif computed_count >= 500 and coverage_ratio >= 0.05 and no_bars_ratio < 0.95:
         status = "done"
     elif computed_count >= 200 and coverage_ratio >= 0.02:
         status = "degraded"
@@ -88,6 +92,7 @@ def validate_rs_main_step(
         "universe_count": universe_count,
         "coverage_ratio": round(float(coverage_ratio), 4),
         "no_bars_count": no_bars_count,
+        "no_bars_ratio": round(float(no_bars_ratio), 4),
     }
 
 
@@ -185,7 +190,7 @@ def build_step_validations(
     storage: Storage,
     snapshot_date: str,
 ) -> dict[str, Any]:
-    top_expected = int(config.get("thresholds", {}).get("top_list_count", 15))
+    top_expected = int(config.get("thresholds", {}).get("top_list_count", 10))
     rs_cfg = config.get("stock_rs", {})
     rs = pipeline_result.get("rs") or {}
     breadth = pipeline_result.get("breadth") or {}
@@ -330,7 +335,7 @@ def build_validation_from_storage(
     meta = storage.get_stock_rs_meta(snapshot_date) or {}
     synthetic = {
         "industry_count": len(rows),
-        "top_count": int(config.get("thresholds", {}).get("top_list_count", 15)),
+        "top_count": int(config.get("thresholds", {}).get("top_list_count", 10)),
         "stock_pick_errors": 0,
         "picks_summary": {"total": 0, "stale": 0, "with_tickers": 0},
         "rs": {
