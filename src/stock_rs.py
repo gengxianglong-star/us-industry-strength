@@ -823,6 +823,8 @@ def _run_yahoo_batch_rs_fetch(
 
     def _process_batch(batch: list[str]) -> None:
         nonlocal processed
+        if processed > 0:
+            time.sleep(0.3)  # Inter-batch delay to avoid Yahoo rate limiting
         bars_map = _fetch_yahoo_batch_with_retry(
             batch,
             request_timeout=request_timeout,

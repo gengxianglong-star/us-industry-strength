@@ -81,11 +81,19 @@ jobs:
       - name: Run daily precompute
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
         run: python scripts/precompute_daily.py --sync-rs --force
-        continue-on-error: true
 
       - name: Export static dashboard JSON
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
         run: python scripts/export_public_dashboard.py
+
+      - name: Verify exported data exists
+        if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
+        run: |
+          if [ ! -f frontend/public/data/snapshot.json ] || [ ! -s frontend/public/data/snapshot.json ]; then
+            echo "ERROR: No snapshot data exported. Pipeline failed."
+            exit 1
+          fi
+          echo "Snapshot data verified: $(wc -c < frontend/public/data/snapshot.json) bytes"
 
       - uses: actions/setup-node@v4
         with:
