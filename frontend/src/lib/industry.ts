@@ -24,11 +24,31 @@ export type IndustryRow = {
   stock_screener_url?: string;
 };
 
+export type RsMeta = {
+  universe_count?: number;
+  computed_count?: number;
+  no_bars_count?: number;
+  insufficient_history_count?: number;
+  perf_invalid_count?: number;
+  coverage_ratio?: number;
+  new_stock_m_count?: number;
+  new_stock_q_count?: number;
+  new_stock_h_count?: number;
+  new_stock_3q_count?: number;
+  new_stock_leaderboard_count?: number;
+  new_stock_watchlist_added?: number;
+  worker_error_count?: number;
+  adaptive_passes?: number;
+  adaptive_recovered_total?: number;
+  adaptive_converged?: boolean;
+  adaptive_stop_reason?: string;
+};
+
 export type SnapshotPayload = {
   snapshot_date: string;
   top_strong_count?: number;
   industries: IndustryRow[];
-  rs_meta?: Record<string, number | null | undefined>;
+  rs_meta?: RsMeta;
   rs_count?: number;
   watchlist_preview?: WatchlistRow[];
 };
@@ -45,7 +65,7 @@ export type RsPayload = {
   rows: Array<Record<string, unknown>>;
   watchlist: WatchlistRow[];
   new_stock_leaderboard: Array<Record<string, unknown>>;
-  rs_meta?: Record<string, number | null | undefined>;
+  rs_meta?: RsMeta;
 };
 
 export type AutomationStatus = {
@@ -120,7 +140,10 @@ export function computeLongTrend(row: IndustryRow) {
 }
 
 export function getTopStrongIndustries(data: SnapshotPayload) {
-  return data.industries.filter((i) => i.is_top_strong).sort((a, b) => b.score - a.score);
+  return data.industries
+    .filter((i) => i.is_top_strong && (i.stock_picks?.length ?? 0) > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, data.top_strong_count ?? 10);
 }
 
 export function pct(v: number) {
@@ -156,7 +179,7 @@ export function finvizDailyChartUrl(symbol: string) {
 
 export function rsUniverseCount(
   snapshot: SnapshotPayload | null,
-  rsMeta?: Record<string, number | null | undefined> | null,
+  rsMeta?: RsMeta | null,
 ) {
   const meta = snapshot?.rs_meta || rsMeta;
   if (meta) {
