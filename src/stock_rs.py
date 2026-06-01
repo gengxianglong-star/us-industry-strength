@@ -14,6 +14,7 @@ from typing import Any, Callable
 import requests
 
 from src.config_loader import TIMEFRAMES
+from src.math_utils import percentile_rank, rank_dict_by_key
 from src.scoring import ScoredIndustry, filter_top_strong
 from src.storage import Storage
 
@@ -152,7 +153,7 @@ def _score_new_stock_rows(
     timeframes = NEW_STOCK_COHORTS[cohort]["timeframes"]
     weights = _normalized_weights_for_timeframes(config, timeframes)
     ranks = {
-        tf: _rank_by_key(rows, _perf_key_for_timeframe(tf)) for tf in timeframes
+        tf: rank_dict_by_key(rows, _perf_key_for_timeframe(tf)) for tf in timeframes
     }
     total = len(rows)
     for row in rows:
@@ -160,7 +161,7 @@ def _score_new_stock_rows(
             rk = _rank_key_for_timeframe(tf)
             row[rk] = ranks[tf][row["symbol"]]
         row["rs_score"] = sum(
-            weights[tf] * _percentile(ranks[tf][row["symbol"]], total) for tf in timeframes
+            weights[tf] * percentile_rank(ranks[tf][row["symbol"]], total) for tf in timeframes
         )
         if row["rs_score"] >= tier_a:
             row["tier"] = "A"
@@ -405,11 +406,6 @@ def compute_and_store_new_stock_rs(
         "new_watch_candidates": new_watch,
     }
 
-
-def _percentile(rank: int, total: int) -> float:
-    if total <= 1:
-        return 1.0
-    return 1.0 - (rank - 1) / (total - 1)
 
 
 def _download_nasdaq_file(filename: str, timeout: int = 25) -> str:
@@ -780,6 +776,17 @@ def _yahoo_rs_batches(symbols: list[str], batch_size: int) -> list[list[str]]:
     return [symbols[i : i + batch_size] for i in range(0, len(symbols), batch_size)]
 
 
+_yahoo_session_cache = threading.local()
+
+
+def _get_yahoo_session(user_agent: str) -> requests.Session:
+    """Return a thread-local requests.Session, reused across batch calls."""
+    if not hasattr(_yahoo_session_cache, "session"):
+        _yahoo_session_cache.session = requests.Session()
+        _yahoo_session_cache.session.headers.update({"User-Agent": user_agent})
+    return _yahoo_session_cache.session
+
+
 def _fetch_yahoo_batch_with_retry(
     batch: list[str],
     *,
@@ -789,15 +796,12 @@ def _fetch_yahoo_batch_with_retry(
 ) -> dict[str, list[dict[str, Any]]]:
     if not batch:
         return {}
-    with requests.Session() as session:
-        session.headers.update({"User-Agent": user_agent})
-        bars_map = fetch_yahoo_batch_daily_bars(batch, session, timeout=request_timeout)
+    session = _get_yahoo_session(user_agent)
+    bars_map = fetch_yahoo_batch_daily_bars(batch, session, timeout=request_timeout)
     if bars_map:
         return bars_map
     time.sleep(retry_pause_seconds)
-    with requests.Session() as session:
-        session.headers.update({"User-Agent": user_agent})
-        return fetch_yahoo_batch_daily_bars(batch, session, timeout=request_timeout)
+    return fetch_yahoo_batch_daily_bars(batch, session, timeout=request_timeout)
 
 
 def _run_yahoo_batch_rs_fetch(
@@ -1229,11 +1233,6 @@ def _calc_performance(bars: list[dict[str, Any]]) -> dict[str, float] | None:
     return result
 
 
-def _rank_by_key(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
-    ordered = sorted(rows, key=lambda x: x[key], reverse=True)
-    return {row["symbol"]: idx + 1 for idx, row in enumerate(ordered)}
-
-
 def compute_and_store_stock_rs(
     storage: Storage,
     snapshot_date: str,
@@ -1466,7 +1465,7 @@ def compute_and_store_stock_rs(
             **adaptive_stats,
         }
 
-    ranks = {tf: _rank_by_key(rows, PERF_KEY_MAP[tf]) for tf in TIMEFRAMES}
+    ranks = {tf: rank_dict_by_key(rows, PERF_KEY_MAP[tf]) for tf in TIMEFRAMES}
     total = len(rows)
     weights = config.get("_normalized_weights") or {
         "week": 0.05,
@@ -1483,7 +1482,7 @@ def compute_and_store_stock_rs(
         row["rank_h"] = ranks["half"][row["symbol"]]
         row["rank_y"] = ranks["year"][row["symbol"]]
         row["rs_score"] = sum(
-            weights[tf] * _percentile(ranks[tf][row["symbol"]], total) for tf in TIMEFRAMES
+            weights[tf] * percentile_rank(ranks[tf][row["symbol"]], total) for tf in TIMEFRAMES
         )
         if row["rs_score"] >= tier_a:
             row["tier"] = "A"

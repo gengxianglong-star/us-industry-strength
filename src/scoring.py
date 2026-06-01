@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from src.config_loader import TIMEFRAMES
+from src.math_utils import percentile_rank
 from src.finviz_scraper import IndustryRow
 
 PERF_ATTR = {
@@ -47,12 +48,6 @@ def _rank_by_performance(rows: list[IndustryRow], timeframe: str) -> dict[str, i
     attr = PERF_ATTR[timeframe]
     ordered = sorted(rows, key=lambda r: getattr(r, attr), reverse=True)
     return {row.key: idx + 1 for idx, row in enumerate(ordered)}
-
-
-def _percentile(rank: int, total: int) -> float:
-    if total <= 1:
-        return 1.0
-    return 1.0 - (rank - 1) / (total - 1)
 
 
 def top_strong_sort_key(
@@ -102,7 +97,7 @@ def score_industries(rows: list[IndustryRow], config: dict[str, Any]) -> list[Sc
         )
 
         item.score = sum(
-            weights[tf] * _percentile(ranks[tf][row.key], total) for tf in TIMEFRAMES
+            weights[tf] * percentile_rank(ranks[tf][row.key], total) for tf in TIMEFRAMES
         )
 
         rank_values = [item.rank_w, item.rank_m, item.rank_q, item.rank_h, item.rank_y]
