@@ -12,6 +12,14 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir,
       emptyOutDir: true,
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            vendor: ["react", "react-dom", "react-router-dom"],
+            chart: ["chart.js"],
+          },
+        },
+      },
     },
     server: {
       port: 5173,

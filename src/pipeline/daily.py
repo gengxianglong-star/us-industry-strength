@@ -7,11 +7,14 @@ from typing import Any
 
 from src.breadth_data import sync_breadth_history
 from src.finviz_scraper import fetch_industries
+from src.logging_config import get_logger
 from src.scoring import filter_top_strong, score_industries
 from src.stock_picks import fetch_top_industry_stock_picks
 from src.stock_rs import backfill_new_stock_rs_for_snapshot, compute_and_store_stock_rs, load_us_universe_with_cache
 from src.storage import Storage
 from src.services.rs_jobs import RsJobService
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -27,7 +30,7 @@ class DailyPipelineOptions:
 
 def _log(options: DailyPipelineOptions, message: str) -> None:
     if options.verbose:
-        print(message)
+        logger.info(message)
 
 
 def run_daily_pipeline(
@@ -154,6 +157,7 @@ def run_daily_pipeline(
                                 )
                                 rs_result = {**rs_result, **new_rs}
                             except Exception as exc:  # noqa: BLE001
+                                logger.exception("new stock RS backfill failed")
                                 rs_result = {**rs_result, "new_stock_error": str(exc)}
             result["rs"] = rs_result
             if not rs_result.get("async_started"):
@@ -197,6 +201,7 @@ def run_daily_pipeline(
             )
         return result
     except Exception as exc:  # noqa: BLE001
+        logger.exception("daily pipeline failed for snapshot_date=%s", snapshot_date)
         storage.upsert_snapshot_run(
             snapshot_date,
             "failed",

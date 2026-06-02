@@ -13,8 +13,11 @@ from src.finviz_stock_screener import (
     fetch_industry_tickers,
     prepare_finviz_session,
 )
+from src.logging_config import get_logger
 from src.scoring import ScoredIndustry, top_strong_sort_key
 from src.storage import Storage
+
+logger = get_logger(__name__)
 
 
 def _stale_fallback_enabled(config: dict[str, Any]) -> bool:
@@ -121,6 +124,7 @@ def fetch_and_store_stock_picks(
             )
             return key, payload
         except Exception as exc:  # noqa: BLE001 - persist error for UI
+            logger.warning("stock pick failed for %s: %s", key, exc)
             payload = _save_pick_failure_with_stale_fallback(
                 storage,
                 snapshot_date,

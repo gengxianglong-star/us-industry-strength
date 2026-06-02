@@ -11,7 +11,10 @@ from uuid import uuid4
 from src.breadth_data import sync_breadth_history
 from src.config_loader import load_config
 from src.jobs.claim import claim_background_job
+from src.logging_config import get_logger
 from src.storage import Storage
+
+logger = get_logger(__name__)
 
 BREADTH_JOB_SCOPE = "__breadth__"
 BREADTH_JOB_KIND = "sync"
@@ -87,6 +90,7 @@ class BreadthSyncService:
             try:
                 result = db_job.get("result") or {}
             except Exception:  # noqa: BLE001
+                logger.debug("breadth sync result parse failed (ignored)", exc_info=True)
                 result = {}
             return self._decorate_state({
                 "status": "done",
@@ -209,6 +213,7 @@ class BreadthSyncService:
                     error=None,
                 )
             except Exception as exc:  # noqa: BLE001
+                logger.exception("breadth sync failed")
                 ended_at = time.time()
                 err_text = str(exc)
                 storage.upsert_rs_job_run(

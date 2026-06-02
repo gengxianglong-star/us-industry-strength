@@ -59,12 +59,62 @@ def _normalize_weights(config: dict[str, Any]) -> None:
     }
 
 
-def load_config(path: Path | None = None) -> dict[str, Any]:
+def _validate_config(config: dict[str, Any]) -> list[str]:
+    """Validate config at load time; returns a list of warnings (non-fatal)."""
+    warnings: list[str] = []
+
+    rs_cfg = config.get("stock_rs") or {}
+    adaptive = rs_cfg.get("adaptive_fetch") or {}
+    if adaptive.get("enabled", True):
+        max_passes = int(adaptive.get("max_passes", 5))
+        worker_sched = list(adaptive.get("worker_schedule") or [10, 6, 3, 1])
+        batch_sched = list(adaptive.get("batch_size_schedule") or [40, 20, 10, 5])
+
+        # Adaptive fetch uses schedule[idx] where idx = min(pass_num - 1, len(sched) - 1).
+        # With final_pass_single_symbol, the last tier uses single-symbol mode, so
+        # worker_sched and batch_sched need at least max_passes - 1 entries for safe
+        # batch-mode tiers plus the final single-symbol tier.
+        if adaptive.get("final_pass_single_symbol", True):
+            min_workers = max_passes - 1  # all but last are batch tiers
+            min_batches = max_passes - 1
+        else:
+            min_workers = max_passes
+            min_batches = max_passes
+
+        if len(worker_sched) < min_workers:
+            warnings.append(
+                f"stock_rs.adaptive_fetch.worker_schedule has {len(worker_sched)} "
+                f"entries but needs at least {min_workers} for max_passes={max_passes}"
+            )
+        if len(batch_sched) < min_batches:
+            warnings.append(
+                f"stock_rs.adaptive_fetch.batch_size_schedule has {len(batch_sched)} "
+                f"entries but needs at least {min_batches} for max_passes={max_passes}"
+            )
+
+    return warnings
+
+
+def load_config(path: Path | None = None, *, init_logging: bool = True) -> dict[str, Any]:
     config_path = path or DEFAULT_CONFIG_PATH
     with config_path.open(encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
     _normalize_weights(config)
+
+    if init_logging:
+        from src.logging_config import setup_logging
+
+        setup_logging(config)
+
+    warnings = _validate_config(config)
+    if warnings:
+        from src.logging_config import get_logger
+
+        logger = get_logger(__name__)
+        for w in warnings:
+            logger.warning("config validation: %s", w)
+
     return config
 
 

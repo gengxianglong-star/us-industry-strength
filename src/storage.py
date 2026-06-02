@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from src.scoring import ScoredIndustry
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -229,14 +233,36 @@ class Storage:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._local = threading.local()
+        self._closed = False
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        """Return a thread-local SQLite connection, creating one lazily per thread.
+
+        Connections are cached on ``threading.local()`` so a thread that
+        performs many reads (e.g. a request handler or background worker)
+        reuses the same connection instead of opening a new one each time.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(str(self.db_path), timeout=10)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            self._local.conn = conn
         return conn
+
+    def close(self) -> None:
+        """Close all thread-local connections (best-effort)."""
+        self._closed = True
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.ProgrammingError:
+                pass
+            self._local.conn = None
 
     def _init_db(self) -> None:
         with self._connect() as conn:

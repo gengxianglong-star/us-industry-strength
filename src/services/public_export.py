@@ -9,10 +9,13 @@ from typing import Any
 
 from src.breadth_data import DEFAULT_THRESHOLDS, load_breadth_data
 from src.config_loader import load_config
+from src.logging_config import get_logger
 from src.services.auto_scheduler import _stale_days, automation_settings
 from src.services.health import _result, check_db
 from src.services.snapshots import build_snapshot_response
 from src.storage import Storage, latest_trading_date
+
+logger = get_logger(__name__)
 
 EXPORT_FILES = (
     "meta.json",
@@ -162,6 +165,7 @@ def build_public_dashboard_payloads(
             config=config,
         )
     except Exception as exc:  # noqa: BLE001
+        logger.warning("public export breadth load failed: %s", exc)
         breadth = {
             "error": str(exc),
             "rows": [],

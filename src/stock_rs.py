@@ -14,9 +14,12 @@ from typing import Any, Callable
 import requests
 
 from src.config_loader import TIMEFRAMES
+from src.logging_config import get_logger
 from src.math_utils import percentile_rank, rank_dict_by_key
 from src.scoring import ScoredIndustry, filter_top_strong
 from src.storage import Storage
+
+logger = get_logger(__name__)
 
 PERF_INDEX_OFFSETS = {
     "week": 5,
@@ -419,7 +422,7 @@ def _download_nasdaq_file(filename: str, timeout: int = 25) -> str:
         try:
             ftp.quit()
         except Exception:
-            pass
+            logger.debug("ftp quit failed (ignored)", exc_info=True)
     return "\n".join(chunks)
 
 
@@ -1012,6 +1015,7 @@ def _run_yahoo_single_symbol_rs_fetch(
         try:
             payload = _fetch_one(symbol)
         except Exception as exc:  # noqa: BLE001
+            logger.warning("stock RS fetch failed for %s: %s", symbol, exc)
             if len(worker_errors) < 20:
                 worker_errors.append(f"{symbol}: {exc}")
             payload = {"symbol": symbol, "status": "no_bars", "reason": "no_bars"}
@@ -1067,9 +1071,9 @@ def _run_adaptive_yahoo_rs_fetch(
 
     workers = worker_sched[0]
     batch_size = batch_sched[0]
-    print(
-        f"[RS adaptive] pass 1/{max_passes}: batch workers={workers} "
-        f"batch_size={batch_size} symbols={len(target_symbols)}"
+    logger.info(
+        "RS adaptive pass 1/%s: batch workers=%s batch_size=%s symbols=%s",
+        max_passes, workers, batch_size, len(target_symbols),
     )
     _run_yahoo_batch_rs_fetch(
         target_symbols=target_symbols,
@@ -1108,7 +1112,9 @@ def _run_adaptive_yahoo_rs_fetch(
             break
 
         if cooldown > 0:
-            print(f"[RS adaptive] cooldown {cooldown}s before pass {pass_num}")
+            logger.info(
+                "RS adaptive cooldown %ss before pass %s", cooldown, pass_num,
+            )
             time.sleep(cooldown)
 
         schedule_idx = min(pass_num - 1, len(worker_sched) - 1)
@@ -1119,9 +1125,9 @@ def _run_adaptive_yahoo_rs_fetch(
 
         if at_final_tier and final_single:
             mode = "single"
-            print(
-                f"[RS adaptive] pass {pass_num}/{max_passes}: single-symbol "
-                f"workers=1 symbols={len(retryable)}"
+            logger.info(
+                "RS adaptive pass %s/%s: single-symbol workers=1 symbols=%s",
+                pass_num, max_passes, len(retryable),
             )
             _run_yahoo_single_symbol_rs_fetch(
                 target_symbols=retryable,
@@ -1143,9 +1149,9 @@ def _run_adaptive_yahoo_rs_fetch(
             final_single_complete = True
         else:
             mode = "batch"
-            print(
-                f"[RS adaptive] pass {pass_num}/{max_passes}: batch workers={workers} "
-                f"batch_size={batch_size} symbols={len(retryable)}"
+            logger.info(
+                "RS adaptive pass %s/%s: batch workers=%s batch_size=%s symbols=%s",
+                pass_num, max_passes, workers, batch_size, len(retryable),
             )
             _run_yahoo_batch_rs_fetch(
                 target_symbols=retryable,
@@ -1179,9 +1185,9 @@ def _run_adaptive_yahoo_rs_fetch(
                 recovered=recovered,
             )
         )
-        print(
-            f"[RS adaptive] pass {pass_num} recovered={recovered} "
-            f"no_bars={issue_counts['no_bars']} retryable={retryable_after}"
+        logger.info(
+            "RS adaptive pass %s recovered=%s no_bars=%s retryable=%s",
+            pass_num, recovered, issue_counts["no_bars"], retryable_after,
         )
 
         should_stop, reason = _adaptive_should_stop(
@@ -1204,9 +1210,9 @@ def _run_adaptive_yahoo_rs_fetch(
             stall_passes = 0
 
     converged = stop_reason in {"no_retryable", "min_recovered", "stall"}
-    print(
-        f"[RS adaptive] stop={stop_reason} passes={len(pass_records)} "
-        f"recovered_total={recovered_total} converged={converged}"
+    logger.info(
+        "RS adaptive stop=%s passes=%s recovered_total=%s converged=%s",
+        stop_reason, len(pass_records), recovered_total, converged,
     )
     return {
         "adaptive_passes": len(pass_records),
@@ -1328,6 +1334,7 @@ def compute_and_store_stock_rs(
                     try:
                         payload = future.result()
                     except Exception as exc:  # noqa: BLE001
+                        logger.warning("stooq RS fetch failed for %s: %s", symbol, exc)
                         if len(worker_errors) < 20:
                             worker_errors.append(f"{symbol}: {exc}")
                         payload = {"symbol": symbol, "status": "no_bars", "reason": "no_bars"}

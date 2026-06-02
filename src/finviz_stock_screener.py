@@ -12,6 +12,10 @@ from urllib.parse import quote
 
 import requests
 
+from src.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 SCREENER_BASE = "https://finviz.com/screener.ashx"
 FINVIZ_HOME = "https://finviz.com/"
 TICKER_PATTERNS = (
@@ -224,12 +228,16 @@ def fetch_industry_tickers(
                     last_error = None
                     break
                 except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "finviz screener fetch attempt %d/%d failed: %s",
+                        attempt + 1, request_retries, exc,
+                    )
                     last_error = exc
                     if owns_session and active_session is not None:
                         try:
                             active_session.close()
                         except Exception:
-                            pass
+                            logger.debug("finviz session close failed (ignored)", exc_info=True)
                         active_session = None
                         owns_session = False
                     time.sleep(min(5.0, delay * (attempt + 1)))

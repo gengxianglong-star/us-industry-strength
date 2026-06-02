@@ -9,7 +9,10 @@ from typing import Any
 from uuid import uuid4
 
 from src.jobs.claim import claim_background_job
+from src.logging_config import get_logger
 from src.pipeline.daily import DailyPipelineOptions, run_daily_pipeline
+
+logger = get_logger(__name__)
 from src.services.daily_validation import (
     build_step_validations,
     build_validation_from_storage,
@@ -309,6 +312,7 @@ class DailyJobService:
                     result={"snapshot_date": date_key},
                 )
             except Exception as exc:  # noqa: BLE001
+                logger.exception("daily job failed for snapshot_date=%s", date_key)
                 end_ts = time.time()
                 self._set_state(
                     date_key,

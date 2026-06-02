@@ -12,12 +12,15 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from src.logging_config import get_logger
 from src.services.breadth_jobs import BREADTH_JOB_KIND, BREADTH_JOB_SCOPE, BreadthSyncService
 from src.services.daily_jobs import DailyJobService
 from src.services.daily_validation import _latest_breadth_trade_date, _stale_days
 from src.services.rs_jobs import RsJobService
 from src.services.snapshots import scored_industries_from_rows
 from src.storage import Storage, latest_trading_date
+
+logger = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 STATE_PATH = ROOT / "data" / "automation_state.json"
@@ -156,9 +159,9 @@ class AutoScheduler:
             return
         try:
             subprocess.run(["/bin/bash", str(script)], cwd=str(ROOT), check=False, timeout=120)
-            print("[automation] attempted first-run service install (macOS launchd)")
+            logger.info("attempted first-run service install (macOS launchd)")
         except (OSError, subprocess.TimeoutExpired) as exc:
-            print(f"[automation] service install skipped: {exc}")
+            logger.info("service install skipped: %s", exc)
 
     def ensure_now(self, *, reason: str = "browser") -> dict[str, Any]:
         """Trigger catch-up / retry when the dashboard is opened (idempotent)."""
@@ -324,7 +327,7 @@ class AutoScheduler:
             "result_status": result.get("status"),
         }
         _save_state(state)
-        print(f"[automation] RS recovery ({trade_date}) -> {result.get('status')}")
+        logger.info("RS recovery (%s) -> %s", trade_date, result.get("status"))
 
     def _breadth_automation_enabled(self) -> bool:
         daily = (self._config_getter().get("automation") or {}).get("daily") or {}
@@ -354,7 +357,7 @@ class AutoScheduler:
             "result_status": result.get("status"),
         }
         _save_state(state)
-        print(f"[automation] breadth sync ({trade_date}) -> {result.get('status')}")
+        logger.info("breadth sync (%s) -> %s", trade_date, result.get("status"))
 
     def _ensure_daily(self, *, reason: str, force_catchup: bool = False) -> None:
         cfg = automation_settings(self._config_getter())
@@ -402,7 +405,7 @@ class AutoScheduler:
         if reason == "schedule":
             state["last_scheduled_run"] = trade_date
         _save_state(state)
-        print(f"[automation] daily triggered ({reason}) -> {result.get('status')}")
+        logger.info("daily triggered (%s) -> %s", reason, result.get("status"))
 
     def _should_run_schedule(self, now: datetime, cfg: dict[str, Any]) -> bool:
         if cfg.get("weekdays_only") and now.weekday() >= 5:
@@ -426,5 +429,6 @@ class AutoScheduler:
         try:
             tz = ZoneInfo(tz_name)
         except Exception:  # noqa: BLE001
+            logger.debug("invalid timezone '%s', falling back to Asia/Shanghai", tz_name)
             tz = ZoneInfo("Asia/Shanghai")
         return datetime.now(tz)

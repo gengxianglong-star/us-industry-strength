@@ -16,8 +16,11 @@ from typing import Any
 import requests
 
 from src.config_loader import load_config
+from src.logging_config import get_logger
 from src.proxy_util import resolve_proxy_url
 from src.storage import Storage
+
+logger = get_logger(__name__)
 
 SHEET_ID = "1O6OhS7ciA8zwfycBfGPbP2fWJnR0pn2UUvFZVDP9jpE"
 SHEET_PUBHTML_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/pubhtml"
@@ -280,6 +283,7 @@ def _gid_has_breadth_data(gid: str, settings: dict[str, Any]) -> bool:
         rows = _normalize_gid_rows(gid, f"gid_{gid}", data_rows)
         return len(rows) >= 20
     except Exception:
+        logger.debug("breadth tab validation failed (ignored)", exc_info=True)
         return False
 
 
@@ -315,6 +319,7 @@ def _discover_sheet_gids(
     try:
         candidates = _discover_gids_from_pubhtml(settings)
     except Exception:
+        logger.debug("breadth gid discovery failed, using primary only", exc_info=True)
         candidates = [primary]
 
     valid: list[str] = []
@@ -569,6 +574,10 @@ def _fetch_gid_rows_remote(gid: str, settings: dict[str, Any]) -> tuple[list[str
                     raise ValueError("CSV 解析后无数据行")
                 return parsed
             except Exception as exc:
+                logger.warning(
+                    "breadth fetch attempt %d/%d failed: %s",
+                    attempt + 1, retries, exc,
+                )
                 last_exc = exc
                 if not curl_only and use_curl:
                     try:
@@ -578,6 +587,7 @@ def _fetch_gid_rows_remote(gid: str, settings: dict[str, Any]) -> tuple[list[str
                         if parsed[2]:
                             return parsed
                     except Exception as req_exc:
+                        logger.debug("breadth HTTP fallback also failed: %s", req_exc)
                         last_exc = req_exc
                 if attempt + 1 < retries:
                     time.sleep(min(2**attempt, 10))
@@ -603,6 +613,7 @@ def _fetch_gid_rows(
         try:
             return _fetch_gid_rows_remote(gid, settings)
         except Exception as exc:
+            logger.warning("breadth remote fetch failed, trying local fallback: %s", exc)
             if local_path and local_path.is_file():
                 return _read_local_csv_export(local_path)
             if isinstance(exc, RuntimeError):
@@ -711,6 +722,7 @@ def sync_breadth_history(
         try:
             validation = validate_breadth_against_source(storage, config=cfg)
         except Exception as exc:  # noqa: BLE001
+            logger.warning("breadth validation failed: %s", exc)
             validation = {"ok": False, "skipped": False, "warning": str(exc)}
     return {
         "mode": "full" if full else "incremental",

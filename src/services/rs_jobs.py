@@ -9,8 +9,11 @@ from typing import Any
 from uuid import uuid4
 
 from src.jobs.claim import claim_background_job
+from src.logging_config import get_logger
 from src.stock_rs import backfill_new_stock_rs_for_snapshot, compute_and_store_stock_rs
 from src.storage import Storage
+
+logger = get_logger(__name__)
 
 
 def _finalize_after_rs(
@@ -210,6 +213,7 @@ class RsJobService:
                     finished=True,
                 )
             except Exception as exc:  # noqa: BLE001
+                logger.exception("RS job failed for snapshot_date=%s kind=%s", snapshot_date, job_kind)
                 end_ts = time.time()
                 previous = self._get_progress(snapshot_date, job_kind)
                 status = "cancelled" if isinstance(exc, JobCancelledError) else "error"

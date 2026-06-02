@@ -84,3 +84,9 @@ automation:
     rs_async: true
 database:
   path: data/industry_strength.db
+api:
+  enabled: false
+  key: ""
+logging:
+  level: INFO
+  file: ""

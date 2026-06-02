@@ -9,7 +9,10 @@ from typing import Any
 import requests
 
 from src.breadth_data import PRIMARY_MARKET_MONITOR_GID, _breadth_settings, _fetch_gid_rows_remote
+from src.logging_config import get_logger
 from src.storage import Storage
+
+logger = get_logger(__name__)
 
 
 def _result(ok: bool, latency_ms: int, detail: str = "", **extra: Any) -> dict[str, Any]:
@@ -25,6 +28,7 @@ def check_db(storage: Storage) -> dict[str, Any]:
             conn.execute("SELECT 1").fetchone()
         return _result(True, int((time.perf_counter() - started) * 1000))
     except Exception as exc:  # noqa: BLE001
+        logger.debug("health check failed: %s", exc)
         return _result(False, int((time.perf_counter() - started) * 1000), detail=str(exc))
 
 
@@ -60,6 +64,7 @@ def check_finviz(config: dict[str, Any]) -> dict[str, Any]:
         response.raise_for_status()
         return _result(True, int((time.perf_counter() - started) * 1000))
     except Exception as exc:  # noqa: BLE001
+        logger.debug("health check failed: %s", exc)
         return _result(False, int((time.perf_counter() - started) * 1000), detail=str(exc))
 
 
@@ -69,6 +74,7 @@ def check_breadth_source(config: dict[str, Any]) -> dict[str, Any]:
         _, _, rows = _fetch_gid_rows_remote(PRIMARY_MARKET_MONITOR_GID, _breadth_settings(config))
         return _result(True, int((time.perf_counter() - started) * 1000), row_count=len(rows))
     except Exception as exc:  # noqa: BLE001
+        logger.debug("health check failed: %s", exc)
         return _result(False, int((time.perf_counter() - started) * 1000), detail=str(exc))
 
 

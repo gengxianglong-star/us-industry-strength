@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Depends
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
+
+from src.auth import require_api_key
 
 from src.config_loader import (
     DEFAULT_CONFIG_PATH,
@@ -42,7 +45,10 @@ from src.services.daily_jobs import (
     snapshots_needing_finalize_after_rs,
 )
 from src.services.rs_jobs import RsJobService
+from src.logging_config import get_logger
 from src.storage import Storage, today_snapshot_date
+
+logger = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
@@ -50,9 +56,42 @@ WEB_DIST = WEB_DIR / "dist"
 SPA_INDEX = WEB_DIST / "index.html"
 USE_SPA = SPA_INDEX.is_file()
 
-app = FastAPI(title="US Industry Strength")
+@asynccontextmanager
+async def _app_lifespan(app: FastAPI):
+    """Startup / shutdown lifecycle (replaces deprecated on_event)."""
+    # ── startup ──
+    storage._init_db()
+    recovered = storage.recover_stale_jobs(stale_seconds=1800)
+    finalize_dates = list(dict.fromkeys(
+        [*recovered.get("finalize", []), *snapshots_needing_finalize_after_rs(storage)]
+    ))
+    for snap_date in finalize_dates:
+        try:
+            finalize_snapshot_run(storage, config, snap_date)
+            logger.info(
+                "startup finalized snapshot run after RS: %s", snap_date,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "startup finalize failed for %s: %s", snap_date, exc,
+            )
+    if recovered["snapshot_runs"] or recovered["rs_jobs"]:
+        logger.info("startup recovered stale jobs: %s", recovered)
+    AUTO_SCHEDULER.start()
+    if recovered["snapshot_runs"] or recovered["rs_jobs"] or recovered.get("finalize"):
+        AUTO_SCHEDULER.schedule_recovery(reason="stale_recovered")
+    yield
+    # ── shutdown ──
+    AUTO_SCHEDULER.stop()
+
+
+app = FastAPI(title="US Industry Strength", lifespan=_app_lifespan)
 config = load_config()
 storage = Storage(db_path(config))
+
+# Sync to app.state so auth dependency can read config.
+app.state.config = config
+app.state.storage = storage
 
 RS_JOB_SERVICE = RsJobService()
 BREADTH_SYNC_SERVICE = BreadthSyncService()
@@ -64,31 +103,6 @@ AUTO_SCHEDULER = AutoScheduler(
     rs_service=RS_JOB_SERVICE,
     breadth_service=BREADTH_SYNC_SERVICE,
 )
-
-
-@app.on_event("startup")
-def _startup_tasks() -> None:
-    storage._init_db()
-    recovered = storage.recover_stale_jobs(stale_seconds=1800)
-    finalize_dates = list(dict.fromkeys(
-        [*recovered.get("finalize", []), *snapshots_needing_finalize_after_rs(storage)]
-    ))
-    for snap_date in finalize_dates:
-        try:
-            finalize_snapshot_run(storage, config, snap_date)
-            print(f"[startup] finalized snapshot run after RS: {snap_date}")
-        except Exception as exc:  # noqa: BLE001
-            print(f"[startup] finalize failed for {snap_date}: {exc}")
-    if recovered["snapshot_runs"] or recovered["rs_jobs"]:
-        print(f"[startup] recovered stale jobs: {recovered}")
-    AUTO_SCHEDULER.start()
-    if recovered["snapshot_runs"] or recovered["rs_jobs"] or recovered.get("finalize"):
-        AUTO_SCHEDULER.schedule_recovery(reason="stale_recovered")
-
-
-@app.on_event("shutdown")
-def _shutdown_tasks() -> None:
-    AUTO_SCHEDULER.stop()
 
 
 @app.exception_handler(ApiError)
@@ -130,8 +144,11 @@ def handle_unexpected_error(_: Request, exc: Exception) -> JSONResponse:
 
 
 def _reload_config() -> None:
-    global config
+    global config, storage
     config = load_config()
+    storage = Storage(db_path(config))
+    app.state.config = config
+    app.state.storage = storage
 
 
 @app.get("/api/config")
@@ -151,7 +168,7 @@ def api_health(quick: bool = Query(default=False)) -> dict[str, Any]:
     return build_health_report(storage, config, quick=quick)
 
 
-@app.post("/api/daily/run")
+@app.post("/api/daily/run", dependencies=[Depends(require_api_key)])
 def daily_run(
     snapshot_date: str | None = Query(default=None),
     force: bool = Query(default=False),
@@ -184,7 +201,7 @@ def automation_status() -> dict[str, Any]:
     return AUTO_SCHEDULER.status()
 
 
-@app.post("/api/automation/ensure")
+@app.post("/api/automation/ensure", dependencies=[Depends(require_api_key)])
 def automation_ensure() -> dict[str, Any]:
     """Browser-open hook: start catch-up / retry failed jobs without manual CLI."""
     return AUTO_SCHEDULER.ensure_now(reason="browser")
@@ -198,7 +215,7 @@ def get_breadth_data(
     return load_breadth_data(storage, force_refresh=refresh, limit=limit, config=config)
 
 
-@app.post("/api/breadth/sync")
+@app.post("/api/breadth/sync", dependencies=[Depends(require_api_key)])
 def sync_breadth(
     full: bool = Query(default=False),
     async_mode: bool = Query(default=True),
@@ -246,6 +263,7 @@ def breadth_fetch_test(quick: bool = Query(default=False)) -> dict[str, Any]:
     try:
         _, _, data_rows = _fetch_gid_rows_remote(PRIMARY_MARKET_MONITOR_GID, settings)
     except Exception as exc:  # noqa: BLE001
+        logger.exception("breadth fetch-test failed")
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
         "ok": True,
@@ -270,7 +288,7 @@ def get_breadth_config() -> dict[str, Any]:
     return {"thresholds": cfg}
 
 
-@app.put("/api/breadth/config")
+@app.put("/api/breadth/config", dependencies=[Depends(require_api_key)])
 def update_breadth_config(body: dict[str, Any]) -> dict[str, Any]:
     payload = body.get("thresholds") if isinstance(body, dict) else None
     if not isinstance(payload, dict):
@@ -292,7 +310,7 @@ def update_breadth_config(body: dict[str, Any]) -> dict[str, Any]:
     return {"status": "ok", "thresholds": cfg}
 
 
-@app.put("/api/config")
+@app.put("/api/config", dependencies=[Depends(require_api_key)])
 def update_config(body: ConfigUpdate) -> dict[str, Any]:
     if body.thresholds.tier_b_score > body.thresholds.tier_a_score:
         raise HTTPException(
@@ -338,13 +356,13 @@ def update_config(body: ConfigUpdate) -> dict[str, Any]:
     return {"status": "ok", "config": get_config()}
 
 
-@app.post("/api/config/reload")
+@app.post("/api/config/reload", dependencies=[Depends(require_api_key)])
 def reload_config() -> dict[str, str]:
     _reload_config()
     return {"status": "ok"}
 
 
-@app.post("/api/snapshots/recompute-latest")
+@app.post("/api/snapshots/recompute-latest", dependencies=[Depends(require_api_key)])
 def recompute_latest_snapshot(
     snapshot_date: str | None = Query(default=None),
 ) -> dict[str, Any]:
@@ -412,7 +430,7 @@ def snapshot_run_status(snapshot_date: str) -> dict[str, Any]:
     return status
 
 
-@app.post("/api/snapshots/{snapshot_date}/fetch-stocks")
+@app.post("/api/snapshots/{snapshot_date}/fetch-stocks", dependencies=[Depends(require_api_key)])
 def fetch_snapshot_stocks(
     snapshot_date: str,
     top_only: bool = Query(default=True),
@@ -459,7 +477,7 @@ def fetch_snapshot_stocks(
     }
 
 
-@app.post("/api/snapshots/{snapshot_date}/compute-rs")
+@app.post("/api/snapshots/{snapshot_date}/compute-rs", dependencies=[Depends(require_api_key)])
 def compute_snapshot_rs(
     snapshot_date: str,
     async_mode: bool = Query(default=True),
@@ -482,7 +500,7 @@ def compute_snapshot_rs(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/api/snapshots/{snapshot_date}/compute-new-stock-rs")
+@app.post("/api/snapshots/{snapshot_date}/compute-new-stock-rs", dependencies=[Depends(require_api_key)])
 def compute_snapshot_new_stock_rs(
     snapshot_date: str,
     async_mode: bool = Query(default=False),
@@ -511,7 +529,7 @@ def rs_progress(
     return RS_JOB_SERVICE.get_progress(snapshot_date, storage=storage, job_kind=kind)
 
 
-@app.post("/api/snapshots/{snapshot_date}/rs-cancel")
+@app.post("/api/snapshots/{snapshot_date}/rs-cancel", dependencies=[Depends(require_api_key)])
 def rs_cancel(
     snapshot_date: str,
     kind: str = Query(default="main", pattern="^(main|new)$"),
