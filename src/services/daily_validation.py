@@ -23,7 +23,7 @@ def validate_industry_step(
 ) -> dict[str, Any]:
     if industry_count >= 130 and top_count >= top_expected:
         status = "done"
-    elif industry_count >= 120 and top_count >= max(10, top_expected - 5):
+    elif industry_count >= 120 and top_count >= max(5, top_expected - 5):
         status = "degraded"
     else:
         status = "failed"

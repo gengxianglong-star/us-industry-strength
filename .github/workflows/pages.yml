@@ -34,15 +34,13 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -52,7 +50,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Restore SQLite cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: data/industry_strength.db
           key: dashboard-db-v1-${{ hashFiles('config.yaml') }}
@@ -95,7 +93,7 @@ jobs:
           fi
           echo "Snapshot data verified: $(wc -c < frontend/public/data/snapshot.json) bytes"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
           cache: npm
@@ -111,10 +109,10 @@ jobs:
           npm run build:pages
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: frontend/dist
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
