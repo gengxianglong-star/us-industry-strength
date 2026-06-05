@@ -1,0 +1,14 @@
+@tailwind utilities;
+
+/* Cockpit component scope — minimal reset for Tailwind-safe rendering */
+.cockpit-preview *,
+.cockpit-preview *::before,
+.cockpit-preview *::after {
+  box-sizing: border-box;
+}
+
+/* Shimmer animation for the momentum bar */
+@keyframes shimmer {
+  0% { transform: translateX(-100%) skewX(-12deg); }
+  100% { transform: translateX(400%) skewX(-12deg); }
+}

@@ -81,6 +81,9 @@ class AutoScheduler:
         self._last_watchdog_ts = 0.0
         self._last_catchup_ts = 0.0
 
+    def update_storage(self, storage: Storage) -> None:
+        self._storage = storage
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return

@@ -396,7 +396,7 @@ def compute_and_store_new_stock_rs(
     top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
     top_keys = {item.key for item in top_industries}
     symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
-    new_watch = _cross_watchlist_candidates(leaderboard, symbol_to_industries, 1.0)
+    new_watch = _cross_watchlist_candidates(leaderboard, symbol_to_industries, cross_top_percent)
 
     storage.save_stock_rs_new_snapshot(snapshot_date, all_scored)
     return {

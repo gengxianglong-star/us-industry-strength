@@ -38,9 +38,8 @@ def default_stock_filter_codes(config: dict[str, Any]) -> list[str]:
     return [
         stock_filters.get("price_above_sma20", "ta_sma20_pa"),
         stock_filters.get("sma20_above_sma50", "ta_sma50_sb20"),
-        stock_filters.get("dollar_volume_min", "sh_curvol_ousd100000"),
-        stock_filters.get("eps_growth_qoq_min", "fa_epsqoq_o10"),
-        stock_filters.get("sales_growth_qoq_min", "fa_salesqoq_o10"),
+        stock_filters.get("price_above_sma200", "ta_sma200_pa"),
+        stock_filters.get("dollar_volume_min", "sh_curvol_ousd100M"),
     ]
 
 

@@ -310,6 +310,34 @@ def build_headline(snapshot_date: str, steps: dict[str, dict[str, Any]]) -> str:
     return " · ".join(parts)
 
 
+def _cached_validation_is_stale(
+    storage: Storage,
+    snapshot_date: str,
+    cached: dict[str, Any],
+) -> bool:
+    """True when persisted validation no longer matches RS / job state in DB."""
+    steps = cached.get("steps") or {}
+    rs_main = steps.get("rs_main") or {}
+    cached_rs_status = str(rs_main.get("status") or "")
+    meta = storage.get_stock_rs_meta(snapshot_date) or {}
+    meta_computed = int(meta.get("computed_count") or 0)
+    cached_computed = int(rs_main.get("computed_count") or 0)
+    main_job = storage.get_latest_rs_job_run(snapshot_date, job_kind="main")
+    main_done = bool(main_job and str(main_job.get("status") or "") == "done")
+
+    if cached_rs_status == "running" and (main_done or meta_computed >= 500):
+        return True
+    if meta_computed > 0 and cached_computed > 0:
+        delta = abs(meta_computed - cached_computed)
+        if delta > max(50, int(cached_computed * 0.05)):
+            return True
+
+    run = storage.get_snapshot_run(snapshot_date)
+    if run and str(run.get("current_step") or "") in {"awaiting_rs", "stock_rs_async_done"} and main_done:
+        return True
+    return False
+
+
 def build_validation_from_storage(
     storage: Storage,
     *,
@@ -323,7 +351,8 @@ def build_validation_from_storage(
     if run and isinstance(run.get("details"), dict):
         cached = run["details"].get("validation")
         if isinstance(cached, dict) and cached.get("steps"):
-            return cached
+            if not _cached_validation_is_stale(storage, snapshot_date, cached):
+                return cached
     rows = storage.get_snapshot(snapshot_date)
     if not rows:
         return {

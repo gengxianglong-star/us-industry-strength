@@ -7,39 +7,75 @@ import {
   pct,
   perfScales,
   rankHeat,
-  rankItemClass,
-  trendBadgeClass,
   type IndustryRow,
   type RsPayload,
   type SnapshotPayload,
 } from "../../../lib/industry";
 
+function trendPillClass(text: string) {
+  const t = normalizeTrendLabel(text);
+  if (t === "A↑") return "bg-emerald-950/50 text-emerald-400 border-emerald-800/60";
+  if (t === "A↓") return "bg-emerald-950/30 text-emerald-500/80 border-emerald-900/40";
+  if (t === "PB↑") return "bg-cyan-950/40 text-cyan-400 border-cyan-900/50";
+  if (t === "PB↓") return "bg-amber-950/40 text-amber-400 border-amber-900/50";
+  if (t === "A") return "bg-emerald-950/40 text-emerald-400 border-emerald-900/50";
+  if (t === "PB") return "bg-slate-800 text-slate-400 border-slate-700";
+  return "bg-slate-900 text-slate-500 border-slate-800";
+}
+
 export function TrendBadge({ text }: { text: string }) {
-  if (!text) return <>—</>;
+  if (!text) return <span className="text-slate-600 font-mono text-[10px]">—</span>;
   const label = normalizeTrendLabel(text);
-  return <span className={trendBadgeClass(label)}>{label}</span>;
+  return (
+    <span
+      className={`inline-flex items-center px-2 py-0.5 rounded border text-[10px] font-mono font-bold tracking-wide ${trendPillClass(label)}`}
+    >
+      {label}
+    </span>
+  );
 }
 
 export function PerfMicroBar({ value, maxAbs }: { value: number; maxAbs: number }) {
   const v = Number(value);
   if (!Number.isFinite(v)) {
-    return (
-      <span className="perf-cell">
-        <span className="perf-val">—</span>
-      </span>
-    );
+    return <span className="text-slate-600 font-mono text-[10px]">—</span>;
   }
-  const sign = v >= 0 ? "pos" : "neg";
   const scale = Math.max(Number(maxAbs) || 0.01, 0.01);
-  const width = Math.min(100, Math.max(6, (Math.abs(v) / scale) * 100));
+  const widthPct = Math.min(50, (Math.abs(v) / scale) * 50);
+  const isPos = v >= 0;
+
   return (
-    <span className="perf-cell">
-      <span className="perf-bar-wrap" aria-hidden="true">
-        <span className={`perf-bar ${sign}`} style={{ width: `${width.toFixed(1)}%` }} />
+    <div className="flex items-center gap-1.5 min-w-[92px]">
+      <div className="relative flex-1 h-2 bg-slate-950 rounded-sm overflow-hidden border border-slate-800/80">
+        <div className="absolute left-1/2 top-0 bottom-0 w-px bg-slate-600/80 z-10" aria-hidden />
+        {isPos ? (
+          <div
+            className="absolute left-1/2 top-0 bottom-0 bg-emerald-500/85 rounded-r-sm"
+            style={{ width: `${widthPct}%` }}
+          />
+        ) : (
+          <div
+            className="absolute right-1/2 top-0 bottom-0 bg-rose-500/85 rounded-l-sm"
+            style={{ width: `${widthPct}%` }}
+          />
+        )}
+      </div>
+      <span
+        className={`font-mono text-[10px] tabular-nums w-[52px] text-right shrink-0 ${
+          isPos ? "text-emerald-400" : "text-rose-400"
+        }`}
+      >
+        {pct(v)}
       </span>
-      <span className={`perf-val ${sign}`}>{pct(v)}</span>
-    </span>
+    </div>
   );
+}
+
+function rankSquareClass(rank: number) {
+  if (rank <= 10) return "bg-emerald-500 border-emerald-400 text-slate-950 font-black";
+  if (rank <= 20) return "bg-emerald-950 border-emerald-700 text-emerald-300";
+  if (rank >= 100) return "bg-rose-950 border-rose-800 text-rose-400";
+  return "bg-slate-800 border-slate-700 text-slate-400";
 }
 
 export function RankCompactRow({ row }: { row: IndustryRow }) {
@@ -52,17 +88,17 @@ export function RankCompactRow({ row }: { row: IndustryRow }) {
   ];
   return (
     <span
-      className="rank-compact"
+      className="inline-flex rounded overflow-hidden border border-slate-700"
       aria-label={`Rank W${row.rank_w} M${row.rank_m} Q${row.rank_q} H${row.rank_h} Y${row.rank_y}`}
     >
-      {items.map(([label, rank]) => (
+      {items.map(([label, rank], idx) => (
         <span
           key={label}
-          className={`rank-item ${rankItemClass(rank)}`}
+          className={`flex flex-col items-center justify-center px-1 py-0.5 min-w-[28px] border-slate-700 font-mono text-[9px] leading-none ${rankSquareClass(rank)} ${idx > 0 ? "border-l" : ""}`}
           title={`${label} rank ${rank} — lower is stronger`}
         >
-          <span className="rank-item-l">{label}</span>
-          <span className="rank-item-n">{rank}</span>
+          <span className="opacity-70 text-[8px]">{label}</span>
+          <span className="text-[10px]">{rank}</span>
         </span>
       ))}
     </span>
@@ -77,7 +113,7 @@ export function CoreIndustryTable({ snapshot }: { snapshot: SnapshotPayload | nu
     return (
       <tbody>
         <tr>
-          <td colSpan={11} className="hint">
+          <td colSpan={11} className="p-6 text-center text-slate-500 font-mono text-xs">
             No snapshot yet — daily run in progress…
           </td>
         </tr>
@@ -88,36 +124,47 @@ export function CoreIndustryTable({ snapshot }: { snapshot: SnapshotPayload | nu
   return (
     <tbody>
       {top.map((row) => (
-        <tr key={row.industry_key} data-key={row.industry_key}>
-          <td>
-            <a className="industry-link" href={row.finviz_url} target="_blank" rel="noreferrer">
+        <tr
+          key={row.industry_key}
+          data-key={row.industry_key}
+          className="border-b border-slate-800/60 hover:bg-slate-900/40 transition-colors"
+        >
+          <td className="p-3 font-semibold text-slate-200">
+            <a
+              className="text-cyan-400 hover:text-cyan-300 transition-colors"
+              href={row.finviz_url}
+              target="_blank"
+              rel="noreferrer"
+            >
               {row.name}
             </a>
           </td>
-          <td className="num">{row.stocks}</td>
-          <td className="num score-cell">{row.score.toFixed(3)}</td>
-          <td>
+          <td className="p-3 text-right font-mono text-slate-400">{row.stocks}</td>
+          <td className="p-3 text-right font-mono font-bold text-amber-400/90">
+            {row.score.toFixed(3)}
+          </td>
+          <td className="p-3">
             <PerfMicroBar value={row.perf_w} maxAbs={scales.perf_w} />
           </td>
-          <td>
+          <td className="p-3">
             <PerfMicroBar value={row.perf_m} maxAbs={scales.perf_m} />
           </td>
-          <td>
+          <td className="p-3">
             <PerfMicroBar value={row.perf_q} maxAbs={scales.perf_q} />
           </td>
-          <td>
+          <td className="p-3">
             <PerfMicroBar value={row.perf_h} maxAbs={scales.perf_h} />
           </td>
-          <td>
+          <td className="p-3">
             <PerfMicroBar value={row.perf_y} maxAbs={scales.perf_y} />
           </td>
-          <td className="ranks-cell">
+          <td className="p-3 text-center">
             <RankCompactRow row={row} />
           </td>
-          <td>
+          <td className="p-3 text-center">
             <TrendBadge text={computeShortTrend(row)} />
           </td>
-          <td>
+          <td className="p-3 text-center">
             <TrendBadge text={computeLongTrend(row)} />
           </td>
         </tr>
@@ -128,19 +175,35 @@ export function CoreIndustryTable({ snapshot }: { snapshot: SnapshotPayload | nu
 
 export function WatchlistChartGrid({ watchlist }: { watchlist: RsPayload["watchlist"] }) {
   if (!watchlist.length) {
-    return <p className="hint">Charts appear after the daily watchlist is built.</p>;
+    return (
+      <p className="text-xs text-slate-500 font-mono py-4 text-center">
+        Charts appear after the daily watchlist is built.
+      </p>
+    );
   }
   return (
-    <div className="watchlist-chart-grid">
+    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 max-h-[70vh] overflow-y-auto pr-1">
       {watchlist.map((row) => (
-        <article key={row.symbol} className="watchlist-chart-card">
+        <article
+          key={row.symbol}
+          className="bg-slate-950/80 border border-slate-800 rounded-lg overflow-hidden hover:border-cyan-500/40 hover:shadow-[0_0_12px_rgba(34,211,238,0.08)] transition-all group"
+        >
           <a
             href={`https://finviz.com/quote.ashx?t=${encodeURIComponent(row.symbol)}`}
             target="_blank"
             rel="noreferrer"
+            className="block"
           >
+            <div className="px-3 py-2 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
+              <span className="font-mono font-black text-cyan-400 group-hover:text-cyan-300">
+                {row.symbol}
+              </span>
+              <span className="text-[10px] font-mono text-slate-500">
+                RS {Number(row.rs_score).toFixed(2)}
+              </span>
+            </div>
             <img
-              className="watchlist-chart-img"
+              className="w-full h-auto block bg-black"
               src={finvizDailyChartUrl(row.symbol)}
               alt={`${row.symbol} daily chart`}
               loading="lazy"
@@ -154,9 +217,23 @@ export function WatchlistChartGrid({ watchlist }: { watchlist: RsPayload["watchl
 
 export function fmtPerf(v: unknown) {
   if (v == null || !Number.isFinite(Number(v))) return "—";
-  return `${Number(v).toFixed(1)}%`;
+  const n = Number(v);
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(1)}%`;
 }
 
 export function rankHeatClass(rank: number) {
   return rankHeat(rank);
+}
+
+export function terminalPerfClass(v: unknown) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "text-slate-500";
+  return n >= 0 ? "text-emerald-400" : "text-rose-400";
+}
+
+export function terminalRankClass(rank: number) {
+  if (rank <= 20) return "text-emerald-400 font-bold";
+  if (rank >= 100) return "text-rose-400";
+  return "text-slate-400";
 }

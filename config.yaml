@@ -16,9 +16,8 @@ thresholds:
 stock_filters:
   price_above_sma20: ta_sma20_pa
   sma20_above_sma50: ta_sma50_sb20
-  dollar_volume_min: sh_curvol_ousd100000
-  eps_growth_qoq_min: fa_epsqoq_o10
-  sales_growth_qoq_min: fa_salesqoq_o10
+  price_above_sma200: ta_sma200_pa
+  dollar_volume_min: sh_curvol_ousd100M
 stock_rs:
   request_timeout_seconds: 20
   max_workers: 24

@@ -862,7 +862,7 @@ async function pollSyncProgress() {
     txt.textContent = `Syncing ${done}/${total || "?"} (${pct})`;
     return false;
   }
-  if (p.status === "done") {
+  if (p.status === "done" || p.status === "completed") {
     txt.textContent = `Done (${p.mode || ""}, ${p.elapsed_seconds || 0}s)`;
     syncAwaiting = false;
     return true;
@@ -955,9 +955,19 @@ async function runBreadthSync(full, { auto = false } = {}) {
 }
 
 function destroyCharts() {
-  chartInstances.forEach((chart) => chart && chart.destroy());
+  chartInstances.forEach((chart) => { try { chart && chart.destroy(); } catch(_) {} });
   chartInstances = [];
   chartByCanvas = {};
+}
+
+function safeGetCanvas(id: string): HTMLCanvasElement | null {
+  // Destroy existing chart on this canvas before reuse
+  const existing = chartByCanvas[id];
+  if (existing) {
+    try { existing.destroy(); } catch(_) {}
+    delete chartByCanvas[id];
+  }
+  return document.getElementById(id) as HTMLCanvasElement | null;
 }
 
 function lineDataset(partial) {
@@ -1008,7 +1018,8 @@ function renderCharts(payload) {
   const theme = chartThemeFromCss();
   destroyCharts();
 
-  const ratioChart = new Chart(el("ratioChart"), {
+  const ratioCanvas = safeGetCanvas("ratioChart"); if (!ratioCanvas) return;
+  const ratioChart = new Chart(ratioCanvas, {
     type: "line",
     data: {
       labels,
@@ -1027,7 +1038,8 @@ function renderCharts(payload) {
   chartInstances.push(ratioChart);
   registerChart("ratioChart", ratioChart);
 
-  const upDown4Chart = new Chart(el("upDown4Chart"), {
+  const upCanvas = safeGetCanvas("upDown4Chart"); if (!upCanvas) return;
+  const upDown4Chart = new Chart(upCanvas, {
     type: "line",
     data: {
       labels,
@@ -1041,7 +1053,8 @@ function renderCharts(payload) {
   chartInstances.push(upDown4Chart);
   registerChart("upDown4Chart", upDown4Chart);
 
-  const quarter25Chart = new Chart(el("quarter25Chart"), {
+  const qCanvas = safeGetCanvas("quarter25Chart"); if (!qCanvas) return;
+  const quarter25Chart = new Chart(qCanvas, {
     type: "line",
     data: {
       labels,
@@ -1055,7 +1068,8 @@ function renderCharts(payload) {
   chartInstances.push(quarter25Chart);
   registerChart("quarter25Chart", quarter25Chart);
 
-  const month25Chart = new Chart(el("month25Chart"), {
+  const mCanvas = safeGetCanvas("month25Chart"); if (!mCanvas) return;
+  const month25Chart = new Chart(mCanvas, {
     type: "line",
     data: {
       labels,
@@ -1069,7 +1083,8 @@ function renderCharts(payload) {
   chartInstances.push(month25Chart);
   registerChart("month25Chart", month25Chart);
 
-  const extreme50Chart = new Chart(el("extreme50Chart"), {
+  const eCanvas = safeGetCanvas("extreme50Chart"); if (!eCanvas) return;
+  const extreme50Chart = new Chart(eCanvas, {
     type: "line",
     data: {
       labels,
@@ -1083,7 +1098,8 @@ function renderCharts(payload) {
   chartInstances.push(extreme50Chart);
   registerChart("extreme50Chart", extreme50Chart);
 
-  const spxBreadthChart = new Chart(el("spxBreadthChart"), {
+  const sCanvas = safeGetCanvas("spxBreadthChart"); if (!sCanvas) return;
+  const spxBreadthChart = new Chart(sCanvas, {
     type: "line",
     data: {
       labels,
@@ -1121,8 +1137,6 @@ async function loadBreadth(refresh = false) {
     const payload = await fetchJson(`/api/breadth?limit=8000${refresh ? "&refresh=true" : ""}`);
     latestPayload = { ...payload, _all_rows: payload.rows || [] };
     applyRatioBg(payload);
-    renderStatusCards(payload);
-    renderCockpitHelp(payload);
     renderPercentileCards(payload);
     renderBreadthConfig(payload);
     renderTable(payload);

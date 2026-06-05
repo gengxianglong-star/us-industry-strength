@@ -227,7 +227,9 @@ class DailyJobService:
                     "job_id": status.get("job_id"),
                     "message": "daily job already running",
                 }
-            if status.get("daily_status") in {"ready", "degraded"}:
+            pipeline_steps = ((status.get("pipeline") or {}).get("steps") or {})
+            rs_still_running = str((pipeline_steps.get("rs_main") or {}).get("status") or "") == "running"
+            if status.get("daily_status") in {"ready", "degraded"} and not rs_still_running:
                 return {
                     "status": "skipped",
                     "snapshot_date": date_key,
@@ -388,18 +390,29 @@ class DailyJobService:
 
         db_job = storage.get_latest_rs_job_run(date_key, job_kind="daily")
         if db_job and str(db_job.get("status") or "") == "running":
-            return {
-                "snapshot_date": date_key,
-                "trade_date": date_key,
-                "status": "running",
-                "job_id": db_job.get("job_id"),
-                "current_step": "pipeline",
-                "progress": pipeline_progress("pipeline"),
-                "daily_status": "running",
-                "cockpit_light": "blue",
-                "headline": f"Updating {date_key}…",
-                "pipeline": {},
-            }
+            updated_at = db_job.get("updated_at")
+            age_ok = True
+            if updated_at:
+                try:
+                    updated = datetime.fromisoformat(str(updated_at))
+                    if updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=timezone.utc)
+                    age_ok = (datetime.now(timezone.utc) - updated).total_seconds() <= self.STALE_SECONDS
+                except ValueError:
+                    age_ok = False
+            if age_ok:
+                return {
+                    "snapshot_date": date_key,
+                    "trade_date": date_key,
+                    "status": "running",
+                    "job_id": db_job.get("job_id"),
+                    "current_step": "pipeline",
+                    "progress": pipeline_progress("pipeline"),
+                    "daily_status": "running",
+                    "cockpit_light": "blue",
+                    "headline": f"Updating {date_key}…",
+                    "pipeline": {},
+                }
 
         validation = build_validation_from_storage(storage, config=config, snapshot_date=date_key)
         overall = validation.get("overall", "idle")

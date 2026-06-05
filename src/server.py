@@ -149,6 +149,7 @@ def _reload_config() -> None:
     storage = Storage(db_path(config))
     app.state.config = config
     app.state.storage = storage
+    AUTO_SCHEDULER.update_storage(storage)
 
 
 @app.get("/api/config")
@@ -212,7 +213,21 @@ def get_breadth_data(
     refresh: bool = Query(default=False),
     limit: int = Query(default=180, ge=10, le=10000),
 ) -> dict[str, Any]:
-    return load_breadth_data(storage, force_refresh=refresh, limit=limit, config=config)
+    if refresh:
+        BREADTH_SYNC_SERVICE.start_sync(storage, full=False, async_mode=True)
+    try:
+        return load_breadth_data(storage, limit=limit, config=config)
+    except ValueError as exc:
+        if "empty" in str(exc).lower():
+            sync = BREADTH_SYNC_SERVICE.start_sync(storage, full=True, async_mode=True)
+            return {
+                "rows": [],
+                "limit": limit,
+                "syncing": True,
+                "sync_status": sync.get("status"),
+                "message": str(exc),
+            }
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/api/breadth/sync", dependencies=[Depends(require_api_key)])
@@ -362,7 +377,58 @@ def reload_config() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/api/snapshots/recompute-latest", dependencies=[Depends(require_api_key)])
+# ── AI Brief ──────────────────────────────────────────────────────────
+
+@app.post("/api/ai/brief")
+async def ai_brief() -> dict[str, Any]:
+    """Generate a daily market briefing via Gemini AI."""
+    from src.services.ai_brief import generate_ai_brief, is_available
+
+    if not is_available():
+        raise HTTPException(
+            status_code=501,
+            detail="Gemini API 未配置。请在 .env 文件中设置 GEMINI_API_KEY。",
+        )
+
+    latest = storage.get_latest_date()
+    if not latest:
+        raise HTTPException(status_code=404, detail="No snapshot yet — run daily first")
+
+    rows = storage.get_snapshot(latest)
+    top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
+    from dataclasses import asdict
+    from src.services.snapshots import top_strong_from_rows
+
+    top = top_strong_from_rows(rows, top_n=top_n)
+    watchlist = storage.get_stock_watchlist(latest)
+
+    breadth_status = None
+    cockpit_modules = None
+    try:
+        from src.breadth_data import load_breadth_data
+
+        breadth_payload = load_breadth_data(storage, force_refresh=False, limit=1, config=config)
+        breadth_status = breadth_payload.get("status")
+        cockpit_modules = breadth_status
+    except Exception:
+        logger.debug("breadth data not available for AI brief", exc_info=True)
+
+    try:
+        result = await generate_ai_brief(
+            snapshot_date=latest,
+            industry_count=len(rows),
+            top_industries=[asdict(s) for s in top],
+            watchlist=watchlist,
+            breadth_status=breadth_status,
+            cockpit_modules=cockpit_modules,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return result
+
+
+# ── Snapshots ─────────────────────────────────────────────────────────
 def recompute_latest_snapshot(
     snapshot_date: str | None = Query(default=None),
 ) -> dict[str, Any]:
@@ -703,6 +769,13 @@ def breadth_page() -> FileResponse:
     if USE_SPA:
         return _spa_index()
     return FileResponse(WEB_DIR / "breadth.html")
+
+
+@app.get("/terminal")
+def quant_terminal_page() -> FileResponse:
+    if USE_SPA:
+        return _spa_index()
+    return FileResponse(WEB_DIR / "index.html")
 
 
 @app.get("/breadth/network-test")

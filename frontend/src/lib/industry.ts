@@ -22,6 +22,13 @@ export type IndustryRow = {
   stock_picks?: string[];
   stock_picks_error?: string;
   stock_screener_url?: string;
+  vs_previous?: {
+    previous_date?: string;
+    rank_m_delta?: number;
+    rank_q_delta?: number;
+    rank_h_delta?: number;
+    score_delta?: number;
+  } | null;
 };
 
 export type RsMeta = {

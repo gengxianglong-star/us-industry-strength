@@ -33,7 +33,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -48,6 +48,9 @@ jobs:
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -q
 
       - name: Restore SQLite cache
         uses: actions/cache@v5
@@ -76,9 +79,9 @@ jobs:
         run: python scripts/ensure_breadth_history.py
         continue-on-error: true
 
-      - name: Run daily precompute
+      - name: Run daily precompute (full RS universe)
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
-        run: python scripts/precompute_daily.py --sync-rs --force
+        run: python scripts/precompute_daily.py --sync-rs --force --force-full-rs
 
       - name: Export static dashboard JSON
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
@@ -92,6 +95,8 @@ jobs:
             exit 1
           fi
           echo "Snapshot data verified: $(wc -c < frontend/public/data/snapshot.json) bytes"
+          python3 -c "import json; d=json.load(open('frontend/public/data/snapshot.json')); print('snapshot_date:', d.get('snapshot_date'))"
+          test -f frontend/public/data/automation.json && python3 -c "import json; d=json.load(open('frontend/public/data/automation.json')); print('automation trade_date:', d.get('trade_date'), 'status:', d.get('daily_status'))"
 
       - uses: actions/setup-node@v5
         with:

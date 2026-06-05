@@ -13,7 +13,8 @@ class AutoSchedulerTests(unittest.TestCase):
         self.assertEqual(cfg["daily_hour"], 6)
         self.assertTrue(cfg["retry_failed"])
 
-    def test_ensure_daily_skips_when_ready(self) -> None:
+    @patch("src.services.auto_scheduler.latest_trading_date", return_value="2026-05-29")
+    def test_ensure_daily_skips_when_ready(self, _mock_trade_date: MagicMock) -> None:
         daily = MagicMock()
         daily.get_status.return_value = {"daily_status": "ready"}
         daily.start_run.return_value = {"status": "skipped"}

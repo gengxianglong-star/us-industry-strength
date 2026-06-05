@@ -190,7 +190,7 @@ def build_public_dashboard_payloads(
         "health.json": build_export_health(storage, config),
         "sync_progress.json": {
             "kind": "breadth",
-            "status": "completed",
+            "status": "done",
             "message": f"Read-only snapshot · {exported_at}",
             "running": False,
         },

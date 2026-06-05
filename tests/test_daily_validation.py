@@ -5,6 +5,7 @@ import unittest
 from src.services.daily_validation import (
     aggregate_overall_status,
     build_step_validations,
+    build_validation_from_storage,
     validate_rs_main_step,
 )
 
@@ -74,6 +75,61 @@ class DailyValidationTests(unittest.TestCase):
         )
         self.assertEqual(validation["overall"], "degraded")
         self.assertEqual(aggregate_overall_status(validation["steps"]), "degraded")
+
+    def test_stale_cached_validation_rebuilt_after_rs_done(self) -> None:
+        cached = {
+            "steps": {
+                "industry": {"status": "done"},
+                "picks": {"status": "done"},
+                "rs_main": {
+                    "status": "running",
+                    "computed_count": 100,
+                    "universe_count": 7000,
+                },
+                "rs_new": {"status": "skipped"},
+                "watchlist": {"status": "degraded"},
+                "breadth": {"status": "skipped"},
+            },
+            "overall": "degraded",
+        }
+
+        class _Storage:
+            def get_snapshot_run(self, _date: str):
+                return {"details": {"validation": cached}, "current_step": "awaiting_rs"}
+
+            def get_latest_rs_job_run(self, _date: str, job_kind: str):
+                if job_kind == "main":
+                    return {"status": "done"}
+                return None
+
+            def get_stock_rs_meta(self, _date: str):
+                return {
+                    "computed_count": 6000,
+                    "universe_count": 7000,
+                    "coverage_ratio": 0.85,
+                    "no_bars_count": 50,
+                    "new_stock_leaderboard_count": 5,
+                }
+
+            def get_snapshot(self, _date: str):
+                return [{"industry_key": "x"}] * 144
+
+            def get_stock_picks_for_snapshot(self, _date: str):
+                return {}
+
+            def count_stock_watchlist(self, _date: str) -> int:
+                return 10
+
+            def get_breadth_daily(self, limit: int = 1):
+                return [{"trade_date": "2026-05-28"}]
+
+        validation = build_validation_from_storage(
+            _Storage(),  # type: ignore[arg-type]
+            config={"thresholds": {"top_list_count": 10}, "stock_rs": {"new_stock_enabled": True}},
+            snapshot_date="2026-05-28",
+        )
+        self.assertEqual(validation["steps"]["rs_main"]["status"], "done")
+        self.assertIn(validation["overall"], {"ready", "degraded"})
 
 
 if __name__ == "__main__":

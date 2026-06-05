@@ -210,6 +210,7 @@ _CACHE_TTL_SECONDS = 300
 _CACHE_DATA: dict[str, Any] | None = None
 _CACHE_AT: float = 0.0
 _CACHE_SIGNATURE: str = ""
+_CACHE_LIMIT: int = 0
 _CACHE_LOCK = threading.Lock()
 
 
@@ -658,7 +659,7 @@ def sync_breadth_history(
     progress_callback: Any | None = None,
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    global _CACHE_DATA, _CACHE_AT, _CACHE_SIGNATURE
+    global _CACHE_DATA, _CACHE_AT, _CACHE_SIGNATURE, _CACHE_LIMIT
     cfg = config or load_config()
     gids = _discover_sheet_gids(cfg, full=full, storage=storage)
     if progress_callback:
@@ -717,6 +718,7 @@ def sync_breadth_history(
     _CACHE_DATA = None
     _CACHE_AT = 0.0
     _CACHE_SIGNATURE = ""
+    _CACHE_LIMIT = 0
     validation: dict[str, Any] = {"ok": True, "skipped": True}
     if cfg.get("validate_after_sync", False):
         try:
@@ -857,17 +859,17 @@ def load_breadth_data(
     limit: int = 180,
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    global _CACHE_DATA, _CACHE_AT, _CACHE_SIGNATURE
+    global _CACHE_DATA, _CACHE_AT, _CACHE_SIGNATURE, _CACHE_LIMIT, _CACHE_LIMIT
     cfg = config or load_config()
     now = time.time()
-    if force_refresh:
-        sync_breadth_history(storage, full=False, config=cfg)
+    fetch_limit = min(max(limit, 10), 12000)
     current_signature = storage.get_breadth_cache_signature()
     with _CACHE_LOCK:
         if (
             not force_refresh
             and _CACHE_DATA
             and _CACHE_SIGNATURE == current_signature
+            and _CACHE_LIMIT >= fetch_limit
             and (now - _CACHE_AT) < _CACHE_TTL_SECONDS
         ):
             payload = dict(_CACHE_DATA)
@@ -875,10 +877,7 @@ def load_breadth_data(
             payload["limit"] = limit
             return payload
 
-    rows = storage.get_breadth_daily(limit=12000)
-    if not rows:
-        sync_breadth_history(storage, full=True, config=cfg)
-        rows = storage.get_breadth_daily(limit=12000)
+    rows = storage.get_breadth_daily(limit=fetch_limit)
     if not rows:
         raise ValueError("Breadth data is empty — run sync first")
 
@@ -1054,6 +1053,7 @@ def load_breadth_data(
         _CACHE_DATA = payload
         _CACHE_AT = now
         _CACHE_SIGNATURE = current_signature
+        _CACHE_LIMIT = fetch_limit
     slim = dict(payload)
     slim["rows"] = payload["rows"][:limit]
     slim["limit"] = limit
