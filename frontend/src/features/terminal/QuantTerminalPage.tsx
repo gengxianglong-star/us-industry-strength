@@ -6,7 +6,7 @@ import { IndustryRotationMap } from "../strong/components/IndustryRotationMap";
 import type { AlphaFilter } from "../../lib/rotationLogic";
 import type { TrendTone } from "../../lib/rotationLogic";
 import "../../styles/cockpit.css";
-import { deriveMarketRegime, matrixOpacity, type BreadthRow } from "./terminalRegime";
+import { deriveMarketRegime, matrixCellStyle, type BreadthRow } from "./terminalRegime";
 import { useQuantTerminal } from "./useQuantTerminal";
 
 const TONE_STYLES = {
@@ -35,28 +35,35 @@ function MatrixGrid({
   label: string;
 }) {
   const chronological = useMemo(() => [...rows].reverse().slice(-60), [rows]);
-  const maxVal = useMemo(
-    () => Math.max(...chronological.map((r) => +(r[field] ?? 0)), 1),
+  const series = useMemo(
+    () => chronological.map((r) => +(r[field] ?? 0)),
     [chronological, field],
   );
   const rgb = color === "emerald" ? "16, 185, 129" : "244, 63, 94";
+  const glowRgb = color === "emerald" ? "52, 211, 153" : "251, 113, 133";
   const newest = chronological[chronological.length - 1];
 
   return (
     <div>
       <div className="flex justify-between text-[9px] mb-1 font-mono uppercase">
         <span className={color === "emerald" ? "text-emerald-500 font-bold" : "text-rose-500 font-bold"}>{label}</span>
-        <span className="text-slate-500">{chronological.length}d</span>
+        <span className="text-slate-500">{chronological.length}d · hot ≥500</span>
       </div>
       <div className="grid grid-cols-12 gap-1 bg-black/30 p-2 rounded">
         {chronological.map((row, idx) => {
           const val = +(row[field] ?? 0);
           const isLatest = row === newest;
+          const cell = matrixCellStyle(val, series, rgb);
           return (
             <div
               key={`${row.raw_date || row.date || idx}-${field}`}
-              className={`aspect-square rounded-sm transition-transform hover:scale-125 hover:z-10 cursor-crosshair ${isLatest ? "ring-1 ring-cyan-500/60" : ""}`}
-              style={{ backgroundColor: `rgba(${rgb}, ${matrixOpacity(val, maxVal)})` }}
+              className={`aspect-square rounded-sm transition-transform hover:scale-125 hover:z-10 cursor-crosshair ${
+                isLatest ? "ring-1 ring-cyan-500/60" : ""
+              } ${cell.hot ? "ring-1 ring-white/50" : ""}`}
+              style={{
+                backgroundColor: cell.backgroundColor,
+                boxShadow: cell.hot ? `0 0 10px rgba(${glowRgb}, 0.85)` : undefined,
+              }}
               title={`${row.raw_date || row.date || "—"}: ${val}`}
             />
           );

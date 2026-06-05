@@ -107,7 +107,34 @@ export function deriveMarketRegime(latest: BreadthRow): MarketRegime {
   };
 }
 
-export function matrixOpacity(value: number, max: number) {
-  if (!Number.isFinite(value) || value <= 0) return 0.08;
-  return Math.min(0.15 + value / Math.max(max, 1), 1);
+const MATRIX_HOT_THRESHOLD = 500;
+
+/** Percentile + hot-tier scaling for 4% up/down cluster heatmaps (values often 0–1500+). */
+export function matrixCellStyle(
+  value: number,
+  series: number[],
+  rgb: string,
+): { backgroundColor: string; hot: boolean } {
+  if (!Number.isFinite(value) || value <= 0) {
+    return { backgroundColor: `rgba(${rgb}, 0.08)`, hot: false };
+  }
+
+  const positives = series.filter((v) => v > 0).sort((a, b) => a - b);
+  const pct =
+    positives.length > 0
+      ? positives.filter((v) => v <= value).length / positives.length
+      : 0;
+
+  if (value >= MATRIX_HOT_THRESHOLD) {
+    const hotPeer = positives.filter((v) => v >= MATRIX_HOT_THRESHOLD);
+    const hotPct =
+      hotPeer.length > 0
+        ? hotPeer.filter((v) => v <= value).length / hotPeer.length
+        : 1;
+    const opacity = 0.88 + hotPct * 0.12;
+    return { backgroundColor: `rgba(${rgb}, ${opacity})`, hot: true };
+  }
+
+  const opacity = 0.1 + Math.pow(pct, 0.75) * 0.55;
+  return { backgroundColor: `rgba(${rgb}, ${opacity})`, hot: false };
 }

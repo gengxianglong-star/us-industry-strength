@@ -95,19 +95,66 @@ function RotationTooltip({
   );
 }
 
-function adaptiveRsDomain(values: number[]): [number, number] {
-  if (values.length === 0) return [40, 100];
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const pad = Math.max(10, (max - min) * 0.12);
-  let lo = Math.floor(min - pad);
-  let hi = Math.ceil(max + pad);
-  if (hi - lo < 35) {
-    const mid = (min + max) / 2;
-    lo = Math.floor(mid - 18);
-    hi = Math.ceil(mid + 18);
+const PLOT_MARGIN = 8;
+
+type AlphaPlotNode = RotationNode & { plot_x: number; plot_y: number };
+
+function stableJitter(key: string, amp: number): { jx: number; jy: number } {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
+  return {
+    jx: ((h & 255) / 255 - 0.5) * amp,
+    jy: (((h >> 8) & 255) / 255 - 0.5) * amp,
+  };
+}
+
+/** Spread alpha industries across the plot (they cluster at high absolute RS). */
+function buildAlphaPlot(nodes: RotationNode[]): {
+  plotNodes: AlphaPlotNode[];
+  xTicks: Array<{ plot: number; label: string }>;
+  yTicks: Array<{ plot: number; label: string }>;
+  midX: number | null;
+  midY: number | null;
+} {
+  if (nodes.length === 0) {
+    return { plotNodes: [], xTicks: [], yTicks: [], midX: null, midY: null };
   }
-  return [Math.max(0, lo), Math.min(100, hi)];
+
+  const xVals = nodes.map((n) => n.rs_3m);
+  const yVals = nodes.map((n) => n.rs_1m);
+  const xMin = Math.min(...xVals);
+  const xMax = Math.max(...xVals);
+  const yMin = Math.min(...yVals);
+  const yMax = Math.max(...yVals);
+  const xSpan = Math.max(xMax - xMin, 6);
+  const ySpan = Math.max(yMax - yMin, 6);
+
+  const toPlotX = (v: number) =>
+    PLOT_MARGIN + ((v - xMin) / xSpan) * (100 - 2 * PLOT_MARGIN);
+  const toPlotY = (v: number) =>
+    PLOT_MARGIN + ((v - yMin) / ySpan) * (100 - 2 * PLOT_MARGIN);
+
+  const plotNodes: AlphaPlotNode[] = nodes.map((n) => {
+    const { jx, jy } = stableJitter(n.industry_key, 2.2);
+    return {
+      ...n,
+      plot_x: Math.min(100 - PLOT_MARGIN, Math.max(PLOT_MARGIN, toPlotX(n.rs_3m) + jx)),
+      plot_y: Math.min(100 - PLOT_MARGIN, Math.max(PLOT_MARGIN, toPlotY(n.rs_1m) + jy)),
+    };
+  });
+
+  const tickVals = (min: number, max: number) => {
+    const mid = (min + max) / 2;
+    return [min, mid, max].map((v) => Math.round(v));
+  };
+
+  return {
+    plotNodes,
+    xTicks: tickVals(xMin, xMax).map((v) => ({ plot: toPlotX(v), label: String(v) })),
+    yTicks: tickVals(yMin, yMax).map((v) => ({ plot: toPlotY(v), label: String(v) })),
+    midX: 50 >= xMin && 50 <= xMax ? toPlotX(50) : null,
+    midY: 50 >= yMin && 50 <= yMax ? toPlotY(50) : null,
+  };
 }
 
 export function IndustryRotationMap({
@@ -124,16 +171,10 @@ export function IndustryRotationMap({
     [industries, breadthRatio10],
   );
 
-  const xDomain = useMemo(
-    () => adaptiveRsDomain(alphaNodes.map((n) => n.rs_3m)),
+  const { plotNodes, xTicks, yTicks, midX, midY } = useMemo(
+    () => buildAlphaPlot(alphaNodes),
     [alphaNodes],
   );
-  const yDomain = useMemo(
-    () => adaptiveRsDomain(alphaNodes.map((n) => n.rs_1m)),
-    [alphaNodes],
-  );
-  const midX = xDomain[0] <= 50 && 50 <= xDomain[1] ? 50 : null;
-  const midY = yDomain[0] <= 50 && 50 <= yDomain[1] ? 50 : null;
 
   return (
     <div
@@ -145,7 +186,7 @@ export function IndustryRotationMap({
           Sector Vector Matrix (Alpha Group)
         </h3>
         <p className="text-[10px] text-slate-500 uppercase mt-1">
-          X: 3M RS · Y: 1M RS · Arrow: 1W momentum · Top10 ∪ ({alphaNodes.length} industries)
+          X: 3M RS · Y: 1M RS · Alpha-relative spread · Arrow: 1W · ({alphaNodes.length} industries)
         </p>
         <div className="flex flex-wrap gap-4 text-[9px] font-mono uppercase font-bold mt-3 pt-2 border-t border-slate-800/60">
           <span className="flex items-center gap-1.5">
@@ -170,28 +211,32 @@ export function IndustryRotationMap({
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
               <XAxis
                 type="number"
-                dataKey="rs_3m"
-                domain={xDomain}
+                dataKey="plot_x"
+                domain={[0, 100]}
+                ticks={xTicks.map((t) => t.plot)}
+                tickFormatter={(plot) => xTicks.find((t) => Math.abs(t.plot - plot) < 0.5)?.label ?? ""}
                 stroke="#475569"
                 tick={{ fontSize: 10, fill: "#475569" }}
                 allowDataOverflow
               />
               <YAxis
                 type="number"
-                dataKey="rs_1m"
-                domain={yDomain}
+                dataKey="plot_y"
+                domain={[0, 100]}
+                ticks={yTicks.map((t) => t.plot)}
+                tickFormatter={(plot) => yTicks.find((t) => Math.abs(t.plot - plot) < 0.5)?.label ?? ""}
                 stroke="#475569"
                 tick={{ fontSize: 10, fill: "#475569" }}
                 allowDataOverflow
               />
               {midX != null && midY != null ? (
-                <ReferenceArea x1={midX} x2={xDomain[1]} y1={midY} y2={yDomain[1]} fill="#10b981" fillOpacity={0.03} />
+                <ReferenceArea x1={midX} x2={100 - PLOT_MARGIN} y1={midY} y2={100 - PLOT_MARGIN} fill="#10b981" fillOpacity={0.03} />
               ) : null}
               {midX != null && midY != null ? (
-                <ReferenceArea x1={xDomain[0]} x2={midX} y1={midY} y2={yDomain[1]} fill="#06b6d4" fillOpacity={0.03} />
+                <ReferenceArea x1={PLOT_MARGIN} x2={midX} y1={midY} y2={100 - PLOT_MARGIN} fill="#06b6d4" fillOpacity={0.03} />
               ) : null}
               {midX != null && midY != null ? (
-                <ReferenceArea x1={midX} x2={xDomain[1]} y1={yDomain[0]} y2={midY} fill="#f59e0b" fillOpacity={0.03} />
+                <ReferenceArea x1={midX} x2={100 - PLOT_MARGIN} y1={PLOT_MARGIN} y2={midY} fill="#f59e0b" fillOpacity={0.03} />
               ) : null}
               {midX != null ? <ReferenceLine x={midX} stroke="#334155" strokeWidth={2} /> : null}
               {midY != null ? <ReferenceLine y={midY} stroke="#334155" strokeWidth={2} /> : null}
@@ -201,7 +246,7 @@ export function IndustryRotationMap({
                 isAnimationActive={false}
               />
               <Scatter
-                data={alphaNodes}
+                data={plotNodes}
                 isAnimationActive={false}
                 shape={(props: ScatterDotProps) => <VectorScatterDot {...props} />}
               />
