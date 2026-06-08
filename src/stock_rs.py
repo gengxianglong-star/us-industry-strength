@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 import requests
 
-from src.config_loader import TIMEFRAMES
+from src.config_loader import ROOT, TIMEFRAMES
 from src.logging_config import get_logger
 from src.math_utils import percentile_rank, rank_dict_by_key
 from src.scoring import ScoredIndustry, filter_top_strong
@@ -505,15 +505,60 @@ def load_us_universe_with_cache(storage: Storage, config: dict[str, Any]) -> lis
     return universe
 
 
+def _pipeline_sanity_settings(config: dict[str, Any] | None) -> dict[str, Any]:
+    pipeline = (config or {}).get("pipeline") or {}
+    raw = pipeline.get("sanity_check") or {}
+    return {
+        "max_allowed_daily_return": float(raw.get("max_allowed_daily_return", 1.5)),
+        "min_allowed_volume": float(raw.get("min_allowed_volume", 1)),
+    }
+
+
+def _log_price_anomaly(symbol: str, detail: str) -> None:
+    log_path = ROOT / "logs" / "pipeline_anomalies.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    line = f"{datetime.now(timezone.utc).isoformat()} {symbol} {detail}\n"
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+
+
+def _bars_price_anomaly(
+    bars: list[dict[str, Any]],
+    settings: dict[str, Any],
+) -> str | None:
+    if len(bars) < 2:
+        return None
+    max_ret = float(settings.get("max_allowed_daily_return", 1.5))
+    min_vol = float(settings.get("min_allowed_volume", 1))
+    last = bars[-1]
+    prev = bars[-2]
+    volume = last.get("volume")
+    if volume is not None and float(volume) <= min_vol:
+        return f"volume={volume} <= min_allowed_volume={min_vol}"
+    close_last = last.get("close")
+    close_prev = prev.get("close")
+    if close_prev and float(close_prev) > 0 and close_last is not None:
+        daily_return = abs(float(close_last) - float(close_prev)) / float(close_prev)
+        if daily_return > max_ret:
+            return f"daily_return={daily_return:.4f} > max_allowed_daily_return={max_ret}"
+    return None
+
+
 def _symbol_payload_from_bars(
     symbol: str,
     bars: list[dict[str, Any]],
     *,
     min_price_rows: int,
     source: str,
+    sanity_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not bars:
         return {"symbol": symbol, "status": "no_bars", "reason": "no_bars"}
+    if sanity_settings:
+        anomaly = _bars_price_anomaly(bars, sanity_settings)
+        if anomaly:
+            _log_price_anomaly(symbol, anomaly)
+            return {"symbol": symbol, "status": "price_anomaly", "reason": "price_anomaly"}
     if len(bars) < min_price_rows:
         return {
             "symbol": symbol,
@@ -822,6 +867,7 @@ def _run_yahoo_batch_rs_fetch(
     insufficient_bars: dict[str, list[dict[str, Any]]],
     save_price_history: bool,
     progress_callback: Callable[[int, int], None] | None,
+    sanity_settings: dict[str, Any] | None = None,
 ) -> None:
     batches = _yahoo_rs_batches(target_symbols, yahoo_batch_size)
     total_symbols = len(target_symbols)
@@ -844,6 +890,7 @@ def _run_yahoo_batch_rs_fetch(
                     bars_map.get(symbol, []),
                     min_price_rows=min_price_rows,
                     source="yahoo",
+                    sanity_settings=sanity_settings,
                 )
                 _apply_symbol_payload(
                     payload,
@@ -991,6 +1038,7 @@ def _run_yahoo_single_symbol_rs_fetch(
     worker_errors: list[str],
     progress_base: int = 0,
     progress_total: int | None = None,
+    sanity_settings: dict[str, Any] | None = None,
 ) -> None:
     total_symbols = len(target_symbols)
     if not total_symbols:
@@ -1008,6 +1056,7 @@ def _run_yahoo_single_symbol_rs_fetch(
             bars,
             min_price_rows=min_price_rows,
             source="yahoo",
+            sanity_settings=sanity_settings,
         )
 
     def _run_symbol(symbol: str) -> None:
@@ -1054,6 +1103,7 @@ def _run_adaptive_yahoo_rs_fetch(
     save_price_history: bool,
     progress_callback: Callable[[int, int], None] | None,
     worker_errors: list[str],
+    sanity_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     worker_sched = adaptive_cfg["worker_schedule"]
     batch_sched = adaptive_cfg["batch_size_schedule"]
@@ -1089,6 +1139,7 @@ def _run_adaptive_yahoo_rs_fetch(
         insufficient_bars=insufficient_bars,
         save_price_history=save_price_history,
         progress_callback=progress_callback,
+        sanity_settings=sanity_settings,
     )
     issue_counts = _issue_reason_counts(issues_map)
     pass_records.append(
@@ -1145,6 +1196,7 @@ def _run_adaptive_yahoo_rs_fetch(
                 worker_errors=worker_errors,
                 progress_base=len(target_symbols),
                 progress_total=progress_total + len(retryable),
+                sanity_settings=sanity_settings,
             )
             final_single_complete = True
         else:
@@ -1167,6 +1219,7 @@ def _run_adaptive_yahoo_rs_fetch(
                 insufficient_bars=insufficient_bars,
                 save_price_history=save_price_history,
                 progress_callback=progress_callback,
+                sanity_settings=sanity_settings,
             )
 
         issue_counts = _issue_reason_counts(issues_map)
@@ -1301,6 +1354,7 @@ def compute_and_store_stock_rs(
 
     worker_errors: list[str] = []
     adaptive_stats: dict[str, Any] = {}
+    sanity_settings = _pipeline_sanity_settings(config)
 
     user_agent = "Mozilla/5.0"
     total_symbols = len(target_symbols)
@@ -1321,6 +1375,7 @@ def compute_and_store_stock_rs(
             bars,
             min_price_rows=min_price_rows,
             source=source,
+            sanity_settings=sanity_settings,
         )
 
     if target_symbols:
@@ -1368,6 +1423,7 @@ def compute_and_store_stock_rs(
                     save_price_history=save_price_history,
                     progress_callback=progress_callback,
                     worker_errors=worker_errors,
+                    sanity_settings=sanity_settings,
                 )
             else:
                 _run_yahoo_batch_rs_fetch(
@@ -1384,6 +1440,7 @@ def compute_and_store_stock_rs(
                     insufficient_bars=insufficient_bars,
                     save_price_history=save_price_history,
                     progress_callback=progress_callback,
+                    sanity_settings=sanity_settings,
                 )
     elif progress_callback:
         progress_callback(0, 0)

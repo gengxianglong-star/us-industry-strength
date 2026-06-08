@@ -1496,20 +1496,62 @@ def today_snapshot_date(now: datetime | None = None) -> str:
     return current.astimezone(NYSE_TZ).date().isoformat()
 
 
+# NYSE full-day closures (America/New_York calendar dates). Extend annually.
+NYSE_HOLIDAYS: frozenset[str] = frozenset(
+    {
+        # 2026
+        "2026-01-01",
+        "2026-01-19",
+        "2026-02-16",
+        "2026-04-03",
+        "2026-05-25",
+        "2026-07-03",
+        "2026-09-07",
+        "2026-11-26",
+        "2026-12-25",
+        # 2027
+        "2027-01-01",
+        "2027-01-18",
+        "2027-02-15",
+        "2027-03-26",
+        "2027-05-31",
+        "2027-07-05",
+        "2027-09-06",
+        "2027-11-25",
+        "2027-12-24",
+    }
+)
+
+
+def is_nyse_holiday(d: date) -> bool:
+    return d.isoformat() in NYSE_HOLIDAYS
+
+
 def _roll_to_weekday(d: date) -> date:
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d
 
 
+def _roll_to_trading_day(d: date) -> date:
+    while d.weekday() >= 5 or is_nyse_holiday(d):
+        d -= timedelta(days=1)
+    return d
+
+
 def latest_trading_date(now: datetime | None = None) -> str:
-    """Latest US equity session we should target (NYSE tz, weekdays, after 16:00 ET)."""
+    """Latest US equity session we should target (NYSE tz, weekdays, holidays, after 16:00 ET)."""
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     ny = current.astimezone(NYSE_TZ)
     today = ny.date()
-    d = _roll_to_weekday(today)
-    if d == today and today.weekday() < 5 and ny.hour < US_MARKET_CLOSE_HOUR:
-        d = _roll_to_weekday(today - timedelta(days=1))
+    d = _roll_to_trading_day(today)
+    if (
+        d == today
+        and today.weekday() < 5
+        and not is_nyse_holiday(today)
+        and ny.hour < US_MARKET_CLOSE_HOUR
+    ):
+        d = _roll_to_trading_day(today - timedelta(days=1))
     return d.isoformat()

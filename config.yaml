@@ -81,6 +81,10 @@ automation:
     force_full_rs: false
     skip_breadth: false
     rs_async: true
+pipeline:
+  sanity_check:
+    max_allowed_daily_return: 1.5
+    min_allowed_volume: 1
 database:
   path: data/industry_strength.db
 api:

@@ -87,16 +87,9 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
         run: python scripts/export_public_dashboard.py
 
-      - name: Verify exported data exists
+      - name: Validate exported dashboard JSON
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
-        run: |
-          if [ ! -f frontend/public/data/snapshot.json ] || [ ! -s frontend/public/data/snapshot.json ]; then
-            echo "ERROR: No snapshot data exported. Pipeline failed."
-            exit 1
-          fi
-          echo "Snapshot data verified: $(wc -c < frontend/public/data/snapshot.json) bytes"
-          python3 -c "import json; d=json.load(open('frontend/public/data/snapshot.json')); print('snapshot_date:', d.get('snapshot_date'))"
-          test -f frontend/public/data/automation.json && python3 -c "import json; d=json.load(open('frontend/public/data/automation.json')); print('automation trade_date:', d.get('trade_date'), 'status:', d.get('daily_status'))"
+        run: python scripts/validate_export_schema.py frontend/public/data
 
       - uses: actions/setup-node@v5
         with:
