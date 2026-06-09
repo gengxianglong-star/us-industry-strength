@@ -46,11 +46,8 @@ def test_build_rs_technical_watchlist_early_stops_at_cap() -> None:
     ranked = [{"symbol": f"S{i}", "rs_score": 1.0 - i * 0.01} for i in range(30)]
     good_df = _uptrend_df()
 
-    def fake_download(tickers, **kwargs):  # noqa: ANN001, ARG001
-        frames = {}
-        for sym in tickers:
-            frames[sym] = good_df
-        return pd.concat(frames, axis=1)
+    def fake_frames(tickers, **kwargs):  # noqa: ANN001, ARG001
+        return {sym: good_df for sym in tickers}
 
     config = {
         "stock_rs": {
@@ -62,7 +59,7 @@ def test_build_rs_technical_watchlist_early_stops_at_cap() -> None:
         }
     }
     with (
-        patch("src.watchlist_build._download_watchlist_bars", side_effect=fake_download),
+        patch("src.watchlist_build.download_ticker_frames", side_effect=fake_frames),
         patch("src.watchlist_build.fetch_yahoo_industries", return_value={}),
     ):
         rows = build_rs_technical_watchlist(ranked, config)

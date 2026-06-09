@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild RS technical watchlist for the latest (or given) snapshot."""
+"""Rebuild stock watchlist for the latest (or given) snapshot."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.config_loader import load_config
+from src.config_loader import db_path, load_config
 from src.services.snapshots import scored_industries_from_rows
 from src.stock_rs import rebuild_stock_watchlist_for_snapshot
 from src.storage import Storage
@@ -24,7 +24,7 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config()
-    storage = Storage(ROOT / config["database"]["path"])
+    storage = Storage(db_path(config))
     snapshot_date = args.date or storage.get_latest_date()
     if not snapshot_date:
         print("No snapshot in database.", file=sys.stderr)

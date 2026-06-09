@@ -1,8 +1,4 @@
-import {
-  pctVsMa,
-  tradingViewUrl,
-  WatchlistLightweightChart,
-} from "./WatchlistLightweightChart";
+import { tradingViewUrl, WatchlistFinvizChart } from "./WatchlistLightweightChart";
 import {
   computeLongTrend,
   computeShortTrend,
@@ -197,24 +193,9 @@ export function WatchlistChartGrid({
       </p>
     );
   }
-  const fmtMaPct = (v: number | null) => {
-    if (v == null || !Number.isFinite(v)) return "—";
-    const sign = v > 0 ? "+" : "";
-    return `${sign}${v.toFixed(1)}%`;
-  };
-
-  const maPctClass = (v: number | null) => {
-    if (v == null || !Number.isFinite(v)) return "text-slate-600";
-    if (v > 12) return "text-amber-400";
-    if (v < 0) return "text-rose-400";
-    return "text-emerald-400/90";
-  };
-
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[78vh] overflow-y-auto pr-1">
       {watchlist.map((row) => {
-        const vs10 = pctVsMa(row.chart_bars, 10);
-        const vs20 = pctVsMa(row.chart_bars, 20);
         const industry = labelIndustries(row.industries);
         return (
           <article
@@ -243,24 +224,13 @@ export function WatchlistChartGrid({
                     <span className="text-slate-500">RS {Number(row.rs_score).toFixed(2)}</span>
                   </div>
                 </div>
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5 text-[10px] font-mono">
-                  {industry ? (
-                    <span className="text-slate-500 truncate max-w-[55%]">{industry}</span>
-                  ) : null}
-                  <span className={maPctClass(vs10)} title="vs SMA10 (adj)">
-                    10 {fmtMaPct(vs10)}
-                  </span>
-                  <span className={maPctClass(vs20)} title="vs SMA20 (adj)">
-                    20 {fmtMaPct(vs20)}
-                  </span>
-                </div>
+                {industry ? (
+                  <p className="mt-0.5 text-[10px] font-mono text-slate-500 truncate">{industry}</p>
+                ) : null}
               </div>
-              <WatchlistLightweightChart bars={row.chart_bars} />
-              <div className="px-2 py-1 border-t border-slate-900 text-[9px] font-mono text-slate-600 flex gap-3">
-                <span className="text-yellow-400">10</span>
-                <span className="text-orange-400">20</span>
-                <span className="text-cyan-400">50</span>
-                <span className="text-slate-700 ml-auto">adj · daily</span>
+              <WatchlistFinvizChart symbol={row.symbol} />
+              <div className="px-2 py-1 border-t border-slate-900 text-[9px] font-mono text-slate-600">
+                Finviz · daily · SMA
               </div>
             </a>
           </article>

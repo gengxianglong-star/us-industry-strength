@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 
 from src.logging_config import get_logger
-from src.yfinance_util import disable_yfinance_disk_cache, download_prices
+from src.yfinance_util import disable_yfinance_disk_cache, download_ticker_frames
 
 disable_yfinance_disk_cache()
 
@@ -39,29 +39,12 @@ def _resolve_params(config: dict[str, Any]) -> dict[str, Any]:
             rs_cfg.get("min_avg_dollar_volume_30d_usd", DEFAULT_MIN_AVG_30D_DOLLAR_VOLUME_USD)
         ),
         "timeout": int(rs_cfg.get("request_timeout_seconds", 20)),
-        "batch_size": max(5, int(rs_cfg.get("yahoo_batch_size", 40))),
+        "batch_size": max(5, int(rs_cfg.get("yahoo_batch_size", 20))),
         "user_agent": (config.get("scraper") or {}).get(
             "user_agent",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         ),
     }
-
-
-def _ticker_dataframe(data: pd.DataFrame, symbol: str, tickers: list[str]) -> pd.DataFrame:
-    if data is None or data.empty:
-        return pd.DataFrame()
-    sym = symbol.upper()
-    if len(tickers) == 1:
-        df = data.copy()
-    elif isinstance(data.columns, pd.MultiIndex):
-        if sym not in data.columns.get_level_values(0):
-            return pd.DataFrame()
-        df = data[sym].copy()
-    else:
-        return pd.DataFrame()
-    if "Close" not in df.columns:
-        return pd.DataFrame()
-    return df.dropna(subset=["Close"])
 
 
 def passes_technical_momentum_filters(df: pd.DataFrame, min_avg_30d_dv: int) -> bool:
@@ -91,20 +74,6 @@ def _finalize_watchlist_ranks(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     for idx, row in enumerate(ordered, start=1):
         row["rs_rank"] = idx
     return ordered
-
-
-def _download_watchlist_bars(tickers: list[str], *, timeout: int) -> pd.DataFrame:
-    if not tickers:
-        return pd.DataFrame()
-    return download_prices(
-        tickers,
-        period="2y",
-        interval="1d",
-        group_by="ticker",
-        auto_adjust=True,
-        timeout=timeout,
-        threads=False,
-    )
 
 
 def fetch_yahoo_industries(
@@ -175,18 +144,28 @@ def build_rs_technical_watchlist(
 
         chunk_rows = sorted_candidates[start : start + batch_size]
         tickers = [str(row["symbol"]).upper() for row in chunk_rows]
-        try:
-            data = _download_watchlist_bars(tickers, timeout=params["timeout"])
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("yfinance batch download failed: %s", exc)
-            continue
+        logger.info(
+            "watchlist batch %d-%d downloading %d tickers (passed so far: %d)",
+            start + 1,
+            start + len(chunk_rows),
+            len(tickers),
+            len(passed),
+        )
+
+        frames = download_ticker_frames(
+            tickers,
+            period="2y",
+            timeout=params["timeout"],
+            chunk_size=batch_size,
+            min_rows=MIN_BARS_FOR_SMA200,
+        )
 
         for row in chunk_rows:
             if len(passed) >= target_cap:
                 break
             symbol = str(row["symbol"]).upper()
             try:
-                df = _ticker_dataframe(data, symbol, tickers)
+                df = frames.get(symbol, pd.DataFrame())
                 if df.empty:
                     continue
                 if passes_technical_momentum_filters(df, min_avg_30d_dv):
@@ -196,10 +175,16 @@ def build_rs_technical_watchlist(
                             "rs_score": float(row["rs_score"]),
                         }
                     )
+                    logger.info(
+                        "watchlist hit #%d: %s RS=%.3f",
+                        len(passed),
+                        symbol,
+                        float(row["rs_score"]),
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("watchlist filter failed for %s: %s", symbol, exc)
 
-        time.sleep(0.35)
+        time.sleep(0.2)
 
     industries = fetch_yahoo_industries([row["symbol"] for row in passed], config)
     rows = [

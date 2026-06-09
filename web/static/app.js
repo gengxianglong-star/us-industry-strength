@@ -225,6 +225,10 @@ function renderCandleSvg(bars) {
   return `<svg class="watchlist-chart-img" viewBox="0 0 ${W} ${H}" role="img" aria-hidden="true">${candles}</svg>`;
 }
 
+function finvizDailyChartUrl(symbol) {
+  return `https://charts2.finviz.com/chart.ashx?t=${encodeURIComponent(symbol)}&ty=c&ta=1&p=d&s=l&theme=dark`;
+}
+
 function renderWatchlistCharts(payload) {
   const container = document.getElementById("watchlistChartGrid");
   if (!container) return;
@@ -240,6 +244,7 @@ function renderWatchlistCharts(payload) {
       const industryLine = industry
         ? `<p class="watchlist-chart-industry">${industry}</p>`
         : "";
+      const chartImg = `<img class="watchlist-chart-img" src="${finvizDailyChartUrl(symbol)}" alt="${symbol} daily chart" loading="lazy" referrerpolicy="no-referrer" />`;
       return `<article class="watchlist-chart-card">
         <a href="https://finviz.com/quote.ashx?t=${encodeURIComponent(symbol)}" target="_blank" rel="noreferrer">
           <header class="watchlist-chart-header">
@@ -247,7 +252,7 @@ function renderWatchlistCharts(payload) {
             <span class="watchlist-chart-rs">RS ${Number(row.rs_score).toFixed(2)}</span>
           </header>
           ${industryLine}
-          ${renderCandleSvg(row.chart_bars)}
+          ${chartImg}
         </a>
       </article>`;
     })

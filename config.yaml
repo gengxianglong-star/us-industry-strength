@@ -28,7 +28,7 @@ stock_rs:
   tier_a_score: 0.8
   tier_b_score: 0.65
   cross_top_percent: 0.1
-  watchlist_mode: rs_technical
+  watchlist_mode: finviz_cross
   watchlist_cap: 100
   min_avg_dollar_volume_30d_usd: 100000000
   universe_cap: 0
@@ -89,7 +89,7 @@ automation:
   auto_install_service: true
   daily:
     force_full_rs: false
-    skip_stocks: true
+    skip_stocks: false
     skip_breadth: false
     rs_async: true
 pipeline:

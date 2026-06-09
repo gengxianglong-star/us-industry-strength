@@ -6,28 +6,7 @@ import {
   type AutomationStatus,
   type RsPayload,
   type SnapshotPayload,
-  type WatchlistRow,
 } from "../../lib/industry";
-
-async function mergeWatchlistChartBars(watchlist: WatchlistRow[]): Promise<WatchlistRow[]> {
-  if (watchlist.some((row) => (row.chart_bars?.length ?? 0) >= 10)) {
-    return watchlist;
-  }
-  try {
-    const res = await fetch(`${import.meta.env.BASE_URL}data/rs_watchlist.json`);
-    if (!res.ok) return watchlist;
-    const data = (await res.json()) as RsPayload;
-    const bySymbol = new Map(
-      (data.watchlist || []).map((row) => [row.symbol, row.chart_bars] as const),
-    );
-    return watchlist.map((row) => {
-      const cached = bySymbol.get(row.symbol);
-      return cached?.length ? { ...row, chart_bars: cached } : row;
-    });
-  } catch {
-    return watchlist;
-  }
-}
 
 export function useStrongPage() {
   const [snapshot, setSnapshot] = useState<SnapshotPayload | null>(null);
@@ -69,9 +48,7 @@ export function useStrongPage() {
       rs_meta: rsWatch?.rs_meta || snapshotData.rs_meta,
     });
     setTopListCount(snapshotData.top_strong_count ?? getTopStrongIndustries(snapshotData).length);
-    const watchlistRows = await mergeWatchlistChartBars(
-      rsWatch?.watchlist || snapshotData.watchlist_preview || [],
-    );
+    const watchlistRows = rsWatch?.watchlist || snapshotData.watchlist_preview || [];
     setRsPayload({
       snapshot_date: date,
       rows: [],
