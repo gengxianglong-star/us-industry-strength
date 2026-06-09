@@ -38,7 +38,7 @@ def test_fetch_symbols_bars_yf_parses_batch() -> None:
     df = _sample_df()
     multi = pd.concat({"AAPL": df, "MSFT": df}, axis=1)
 
-    with patch("src.watchlist_charts.yf.download", return_value=multi):
+    with patch("src.yfinance_util.yf.download", return_value=multi):
         out = fetch_symbols_bars_yf(["AAPL", "MSFT"])
 
     assert len(out["AAPL"]) == 50

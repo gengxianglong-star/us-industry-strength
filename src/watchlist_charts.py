@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import yfinance as yf
 
 from src.logging_config import get_logger
+from src.yfinance_util import disable_yfinance_disk_cache, download_prices
+
+disable_yfinance_disk_cache()
 
 logger = get_logger(__name__)
 
@@ -65,15 +67,14 @@ def fetch_symbols_bars_yf(symbols: list[str], *, timeout: int = 25) -> dict[str,
 
     logger.info("fetching chart bars for %d symbols via yfinance (3mo)", len(unique))
     try:
-        data = yf.download(
+        data = download_prices(
             unique,
             period="3mo",
             interval="1d",
             group_by="ticker",
-            threads=True,
-            progress=False,
             auto_adjust=True,
             timeout=timeout,
+            threads=False,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("yfinance chart batch failed: %s", exc)

@@ -7,9 +7,11 @@ from typing import Any
 
 import pandas as pd
 import requests
-import yfinance as yf
 
 from src.logging_config import get_logger
+from src.yfinance_util import disable_yfinance_disk_cache, download_prices
+
+disable_yfinance_disk_cache()
 
 logger = get_logger(__name__)
 
@@ -94,15 +96,14 @@ def _finalize_watchlist_ranks(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 def _download_watchlist_bars(tickers: list[str], *, timeout: int) -> pd.DataFrame:
     if not tickers:
         return pd.DataFrame()
-    return yf.download(
+    return download_prices(
         tickers,
         period="2y",
         interval="1d",
         group_by="ticker",
-        threads=True,
-        progress=False,
         auto_adjust=True,
         timeout=timeout,
+        threads=False,
     )
 
 

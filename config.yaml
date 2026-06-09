@@ -33,8 +33,8 @@ stock_rs:
   min_avg_dollar_volume_30d_usd: 100000000
   universe_cap: 0
   universe_cache_hours: 24
-  yahoo_batch_size: 40
-  yahoo_batch_workers: 10
+  yahoo_batch_size: 20
+  yahoo_batch_workers: 4
   adaptive_fetch:
     enabled: true
     max_passes: 5
