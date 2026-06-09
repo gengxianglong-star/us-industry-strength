@@ -729,17 +729,22 @@ def fetch_stooq_daily_bars(
     session: requests.Session,
     timeout: int = 20,
 ) -> list[dict[str, Any]]:
-    for candidate in _stooq_symbol_candidates(symbol):
+    candidates = _stooq_symbol_candidates(symbol)
+    for idx, candidate in enumerate(candidates):
         url = f"http://stooq.com/q/d/l/?s={candidate}.us&i=d"
         try:
             resp = session.get(url, timeout=timeout)
-            if resp.status_code != 200:
-                continue
-            bars = _parse_stooq_csv(resp.text)
-            if bars:
-                return bars
+            if resp.status_code == 200:
+                bars = _parse_stooq_csv(resp.text)
+                if bars:
+                    return bars
         except requests.RequestException:
-            continue
+            pass
+
+        # 如果这次没蒙对名字，稍微等半秒钟再去试下一个，防止被 Stooq 秒封 IP
+        if idx < len(candidates) - 1:
+            time.sleep(0.5)
+
     return []
 
 

@@ -168,39 +168,41 @@ class AutoScheduler:
 
     def ensure_now(self, *, reason: str = "browser") -> dict[str, Any]:
         """Trigger catch-up / retry when the dashboard is opened (idempotent)."""
-        cfg = automation_settings(self._config_getter())
-        if not cfg["enabled"]:
-            return {"triggered": ["disabled"], **self.status()}
+        # 加上线程锁，防止用户连续刷新网页时触发重复执行
+        with self._lock:
+            cfg = automation_settings(self._config_getter())
+            if not cfg["enabled"]:
+                return {"triggered": ["disabled"], **self.status()}
 
-        trade_date = latest_trading_date()
-        display_date = self._storage.get_latest_date()
-        lag_days = _stale_days(display_date, trade_date) if display_date else 999
-        daily = self._daily_service.get_status(self._storage, self._config_getter(), trade_date)
-        daily_status = str(daily.get("daily_status") or "")
-        triggered: list[str] = []
+            trade_date = latest_trading_date()
+            display_date = self._storage.get_latest_date()
+            lag_days = _stale_days(display_date, trade_date) if display_date else 999
+            daily = self._daily_service.get_status(self._storage, self._config_getter(), trade_date)
+            daily_status = str(daily.get("daily_status") or "")
+            triggered: list[str] = []
 
-        if daily_status == "running":
-            triggered.append("already_running")
-        elif lag_days > 0 or not self._storage.get_snapshot(trade_date):
-            self._ensure_daily(reason=reason, force_catchup=True)
-            triggered.append("daily_catchup")
-        elif daily_status in {"failed", "idle"}:
-            self._ensure_daily(reason=reason)
-            triggered.append("daily_retry" if daily_status == "failed" else "daily_start")
-        else:
-            triggered.append("daily_ok")
+            if daily_status == "running":
+                triggered.append("already_running")
+            elif lag_days > 0 or not self._storage.get_snapshot(trade_date):
+                self._ensure_daily(reason=reason, force_catchup=True)
+                triggered.append("daily_catchup")
+            elif daily_status in {"failed", "idle"}:
+                self._ensure_daily(reason=reason)
+                triggered.append("daily_retry" if daily_status == "failed" else "daily_start")
+            else:
+                triggered.append("daily_ok")
 
-        if daily_status != "running":
-            before_rs = self._rs_needs_work(trade_date)
-            before_breadth = self._breadth_needs_work(trade_date)
-            self._ensure_rs_if_needed(trade_date, cfg)
-            self._ensure_breadth_if_needed(trade_date)
-            if before_rs:
-                triggered.append("rs_recovery")
-            if before_breadth:
-                triggered.append("breadth_sync")
+            if daily_status != "running":
+                before_rs = self._rs_needs_work(trade_date)
+                before_breadth = self._breadth_needs_work(trade_date)
+                self._ensure_rs_if_needed(trade_date, cfg)
+                self._ensure_breadth_if_needed(trade_date)
+                if before_rs:
+                    triggered.append("rs_recovery")
+                if before_breadth:
+                    triggered.append("breadth_sync")
 
-        return {"triggered": triggered, **self.status()}
+            return {"triggered": triggered, **self.status()}
 
     def schedule_recovery(self, *, reason: str, delay_seconds: float = 5) -> None:
         def _run() -> None:
@@ -229,22 +231,24 @@ class AutoScheduler:
 
     def _loop(self) -> None:
         while not self._stop.wait(self.TICK_SECONDS):
-            cfg = automation_settings(self._config_getter())
-            if not cfg["enabled"]:
-                continue
-            now = self._now(cfg)
-            if self._should_run_schedule(now, cfg):
-                self._mark_scheduled(latest_trading_date())
-                self._ensure_daily(reason="schedule")
-            trade_date = latest_trading_date()
-            display_date = self._storage.get_latest_date()
-            lag_days = _stale_days(display_date, trade_date) if display_date else 999
-            if lag_days > 0 and self._catchup_due(cfg):
-                self._ensure_daily(reason="catchup", force_catchup=True)
-                self._ensure_rs_if_needed(trade_date, cfg)
-                self._ensure_breadth_if_needed(trade_date)
-            elif self._watchdog_due(cfg):
-                self._watchdog_tick(cfg)
+            # 后台定时巡逻时也加上锁，避开网页请求的冲突
+            with self._lock:
+                cfg = automation_settings(self._config_getter())
+                if not cfg["enabled"]:
+                    continue
+                now = self._now(cfg)
+                if self._should_run_schedule(now, cfg):
+                    self._mark_scheduled(latest_trading_date())
+                    self._ensure_daily(reason="schedule")
+                trade_date = latest_trading_date()
+                display_date = self._storage.get_latest_date()
+                lag_days = _stale_days(display_date, trade_date) if display_date else 999
+                if lag_days > 0 and self._catchup_due(cfg):
+                    self._ensure_daily(reason="catchup", force_catchup=True)
+                    self._ensure_rs_if_needed(trade_date, cfg)
+                    self._ensure_breadth_if_needed(trade_date)
+                elif self._watchdog_due(cfg):
+                    self._watchdog_tick(cfg)
 
     def _catchup_due(self, cfg: dict[str, Any]) -> bool:
         interval = max(1, int(cfg.get("catchup_interval_minutes", 2))) * 60

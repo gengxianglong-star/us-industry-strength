@@ -165,9 +165,10 @@ def _fetch_html_with_retry(
 ) -> str:
     """Fetch HTML with curl-first option, requests retry, and curl fallback."""
     user_agent, delay, cookie_file, prefer_curl = _scraper_settings(config)
-
     last_error: Exception | None = None
+
     for attempt in range(max_retries):
+        # 尝试 1: 如果配置了优先使用 curl，先用 curl 试
         if prefer_curl:
             try:
                 return _validate_industry_html(_fetch_text_with_curl(url, config), url)
@@ -175,24 +176,25 @@ def _fetch_html_with_retry(
                 last_error = exc
                 logger.debug("finviz curl attempt %d failed: %s", attempt + 1, exc)
 
+        # 尝试 2: 使用常规的 requests
         try:
             if session is None:
                 session = _prepare_session(user_agent, cookie_file)
-            html = _validate_industry_html(
-                _fetch_text_with_requests(session, url),
-                url,
-            )
-            return html
+            return _validate_industry_html(_fetch_text_with_requests(session, url), url)
         except (requests.RequestException, OSError, RuntimeError) as exc:
             last_error = exc
             logger.debug("finviz requests attempt %d failed: %s", attempt + 1, exc)
+
+        # 尝试 3: 只有在前面没有优先用过 curl 的情况下，作为最后手段用 curl 试一次
+        if not prefer_curl:
             try:
                 return _validate_industry_html(_fetch_text_with_curl(url, config), url)
             except (OSError, RuntimeError) as curl_exc:
                 last_error = curl_exc
 
+        # 如果都失败了，喝口水休息一下，准备下一轮大循环重试
         if attempt < max_retries - 1:
-            time.sleep(delay * (attempt + 1))
+            time.sleep(delay * (attempt + 1))  # 动态增加等待时间 (1秒, 2秒...)
             session = None
 
     raise RuntimeError(f"无法抓取 Finviz 页面 ({url}): {last_error}")

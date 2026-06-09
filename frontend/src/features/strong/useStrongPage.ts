@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJson, IS_READONLY } from "../../lib/api";
 import { useAutomationEnsureOnStale } from "../../hooks/useAutomationEnsure";
 import {
@@ -114,7 +114,8 @@ export function useStrongPage() {
   const watchlist =
     rsPayload?.watchlist?.length ? rsPayload.watchlist : snapshot?.watchlist_preview || [];
 
-  const pulseLine = (() => {
+  // 使用 useMemo 缓存顶部状态栏的计算结果
+  const pulseLine = useMemo(() => {
     if (!snapshot) return "Loading snapshot…";
     const top = getTopStrongIndustries(snapshot);
     let dateText = snapshot.snapshot_date || "—";
@@ -129,11 +130,14 @@ export function useStrongPage() {
       .join(", ");
     const hotText = hot || "—";
     return `${dateText} · Focus ${watchlist.length} · Hot themes: ${hotText} · RS universe scanned`;
-  })();
+  }, [snapshot, automation?.lag_days, automation?.target_date, watchlist.length]);
 
-  const filteredIndustries = (snapshot?.industries || [])
-    .filter((r) => !search.trim() || r.name.toLowerCase().includes(search.trim().toLowerCase()))
-    .sort((a, b) => b.score - a.score);
+  // 使用 useMemo 缓存行业列表的过滤和排序结果
+  const filteredIndustries = useMemo(() => {
+    return (snapshot?.industries || [])
+      .filter((r) => !search.trim() || r.name.toLowerCase().includes(search.trim().toLowerCase()))
+      .sort((a, b) => b.score - a.score);
+  }, [snapshot?.industries, search]);
 
   useAutomationEnsureOnStale(automation);
 

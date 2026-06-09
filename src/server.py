@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, Depends
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
@@ -146,11 +147,18 @@ def handle_unexpected_error(_: Request, exc: Exception) -> JSONResponse:
 
 def _reload_config() -> None:
     global config, storage
+    # 先保留旧管理员的引用
+    old_storage = storage
+
     config = load_config()
     storage = Storage(db_path(config))
     app.state.config = config
     app.state.storage = storage
     AUTO_SCHEDULER.update_storage(storage)
+
+    # 优雅地关闭旧的数据库连接，释放资源
+    if old_storage:
+        old_storage.close()
 
 
 @app.get("/api/config")
@@ -396,24 +404,28 @@ async def ai_brief() -> dict[str, Any]:
             detail="Gemini API 未配置。请在 .env 文件中设置 GEMINI_API_KEY。",
         )
 
-    latest = storage.get_latest_date()
+    # 将所有同步的数据库查询放入线程池（辅路），防止阻塞 FastAPI 的核心事件循环
+    latest = await run_in_threadpool(storage.get_latest_date)
     if not latest:
         raise HTTPException(status_code=404, detail="No snapshot yet — run daily first")
 
-    rows = storage.get_snapshot(latest)
+    rows = await run_in_threadpool(storage.get_snapshot, latest)
     top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
     from dataclasses import asdict
     from src.services.snapshots import top_strong_from_rows
 
     top = top_strong_from_rows(rows, top_n=top_n)
-    watchlist = storage.get_stock_watchlist(latest)
+    watchlist = await run_in_threadpool(storage.get_stock_watchlist, latest)
 
     breadth_status = None
     cockpit_modules = None
     try:
         from src.breadth_data import load_breadth_data
 
-        breadth_payload = load_breadth_data(storage, force_refresh=False, limit=1, config=config)
+        # 同样放入线程池执行
+        breadth_payload = await run_in_threadpool(
+            load_breadth_data, storage, force_refresh=False, limit=1, config=config
+        )
         breadth_status = breadth_payload.get("status")
         cockpit_modules = breadth_status
     except Exception:

@@ -172,18 +172,26 @@ def run_daily_pipeline(
         breadth_result: dict[str, Any] = {}
         if not opts.skip_breadth:
             storage.upsert_snapshot_run(snapshot_date, "running", current_step="breadth_sync")
-            breadth_result = sync_breadth_history(storage, full=opts.full_breadth, config=config)
-            result["breadth"] = breadth_result
-            validation = breadth_result.get("validation") or {}
-            _log(
-                opts,
-                f"市场宽度同步 mode={breadth_result.get('mode')} "
-                f"merged={breadth_result.get('merged_row_count', 0)} "
-                f"validation_ok={validation.get('ok')}",
-            )
-            if not bool(validation.get("ok", True)):
-                raise RuntimeError("breadth validation failed")
+            # 使用 try-except 包裹宽度同步，防止其失败导致整个个股分析流程不可用
+            try:
+                breadth_result = sync_breadth_history(storage, full=opts.full_breadth, config=config)
+                result["breadth"] = breadth_result
+                validation = breadth_result.get("validation") or {}
+                _log(
+                    opts,
+                    f"市场宽度同步 mode={breadth_result.get('mode')} "
+                    f"merged={breadth_result.get('merged_row_count', 0)} "
+                    f"validation_ok={validation.get('ok')}",
+                )
+                if not bool(validation.get("ok", True)):
+                    logger.warning("市场宽度数据校验未通过，但保留已有的行业与个股数据")
+                    result["breadth_error"] = "validation failed"
+            except Exception as breadth_exc:
+                logger.error("市场宽度同步发生异常，跳过此步骤: %s", breadth_exc)
+                result["breadth_error"] = str(breadth_exc)
 
+        # 只要走到这里，前三步（行业和筛股）都成功了，将其标记为 completed
+        # （如果宽度失败，页面上顶多是没宽度数据，但仍能选股）
         if not (opts.rs_async and rs_result.get("async_started")):
             storage.upsert_snapshot_run(
                 snapshot_date,
@@ -196,6 +204,7 @@ def run_daily_pipeline(
                     "stock_pick_errors": result["stock_pick_errors"],
                     "rs_computed_count": int(rs_result.get("computed_count", 0) or 0),
                     "breadth_merged_count": int(breadth_result.get("merged_row_count", 0) or 0),
+                    "breadth_error": result.get("breadth_error"),
                 },
                 finished=True,
             )

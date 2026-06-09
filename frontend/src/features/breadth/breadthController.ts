@@ -6,6 +6,15 @@ import { chartThemeFromCss } from "../../lib/chartTheme";
 
 Chart.register(...registerables);
 
+// 简易防抖函数：不管用户手速多快狂点，只在最后一次点击停顿 150 毫秒后才执行绘制
+function debounce(func: Function, wait: number) {
+  let timeout: any;
+  return function (this: any, ...args: any[]) {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func.apply(this, args), wait);
+  };
+}
+
 export type BreadthController = {
   destroy: () => void;
 };
@@ -719,10 +728,14 @@ function onCockpitCardActivate(key) {
 function bindCockpitCardLinkage(wrap) {
   if (!wrap || cockpitClickBound) return;
   cockpitClickBound = true;
+  // 用 debounce 包裹高亮逻辑，防止快速点击导致画布重复重绘
+  const debouncedActivate = debounce((key: string) => {
+    onCockpitCardActivate(key);
+  }, 150);
   wrap.addEventListener("click", (e) => {
     const card = e.target.closest("[data-cockpit-key]");
     if (!card) return;
-    onCockpitCardActivate(card.dataset.cockpitKey);
+    debouncedActivate(card.dataset.cockpitKey);
   });
   wrap.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" && e.key !== " ") return;
@@ -1219,9 +1232,20 @@ function init() {
 
   init();
   return {
-    destroy() {
+    destroy: () => {
+      // 遍历销毁所有的 Chart.js 实例，释放 Canvas 显存
+      if (chartInstances && chartInstances.length > 0) {
+        chartInstances.forEach((chart) => {
+          if (chart && typeof chart.destroy === "function") {
+            chart.destroy();
+          }
+        });
+      }
+      chartInstances = [];
+      chartByCanvas = {};
+
+      // 停止后台轮询，防止后台偷偷发请求报错
       stopSyncPolling();
-      destroyCharts();
     },
   };
 }
