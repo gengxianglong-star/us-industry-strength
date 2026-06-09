@@ -56,7 +56,7 @@ scraper:
   cookie_file: data/finviz_cookies.txt
   use_playwright: true
   playwright_channel: msedge
-  playwright_headless: false
+  playwright_headless: true
 breadth_confluence:
   min_score: 2
 breadth:
