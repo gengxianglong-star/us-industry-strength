@@ -2,25 +2,21 @@
 
 from __future__ import annotations
 
-import json
-import os
-import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from typing import Any
 
+import pandas as pd
 import requests
+import yfinance as yf
 
 from src.logging_config import get_logger
+
 logger = get_logger(__name__)
 
 DEFAULT_WATCHLIST_CAP = 100
 DEFAULT_MIN_AVG_30D_DOLLAR_VOLUME_USD = 100_000_000
 AVG_DOLLAR_VOLUME_DAYS = 30
 MIN_BARS_FOR_SMA200 = 200
-_WATCHLIST_FETCH_WORKERS = 1
-_WATCHLIST_FETCH_DELAY_SECONDS = 0.35
 
 
 def watchlist_mode(config: dict[str, Any]) -> str:
@@ -42,7 +38,6 @@ def _resolve_params(config: dict[str, Any]) -> dict[str, Any]:
         ),
         "timeout": int(rs_cfg.get("request_timeout_seconds", 20)),
         "batch_size": max(5, int(rs_cfg.get("yahoo_batch_size", 40))),
-        "batch_workers": max(1, int(rs_cfg.get("yahoo_batch_workers", 6))),
         "user_agent": (config.get("scraper") or {}).get(
             "user_agent",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -50,66 +45,43 @@ def _resolve_params(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def sma(closes: list[float], period: int) -> float | None:
-    if len(closes) < period:
-        return None
-    window = closes[-period:]
-    return sum(window) / period
+def _ticker_dataframe(data: pd.DataFrame, symbol: str, tickers: list[str]) -> pd.DataFrame:
+    if data is None or data.empty:
+        return pd.DataFrame()
+    sym = symbol.upper()
+    if len(tickers) == 1:
+        df = data.copy()
+    elif isinstance(data.columns, pd.MultiIndex):
+        if sym not in data.columns.get_level_values(0):
+            return pd.DataFrame()
+        df = data[sym].copy()
+    else:
+        return pd.DataFrame()
+    if "Close" not in df.columns:
+        return pd.DataFrame()
+    return df.dropna(subset=["Close"])
 
 
-def passes_technical_momentum_filters(bars: list[dict[str, Any]]) -> bool:
-    if len(bars) < MIN_BARS_FOR_SMA200:
+def passes_technical_momentum_filters(df: pd.DataFrame, min_avg_30d_dv: int) -> bool:
+    if len(df) < MIN_BARS_FOR_SMA200:
         return False
-    closes = [float(bar["close"]) for bar in bars]
-    price = closes[-1]
-    sma20 = sma(closes, 20)
-    sma50 = sma(closes, 50)
-    sma200 = sma(closes, 200)
-    if sma20 is None or sma50 is None or sma200 is None:
+
+    close_series = df["Close"]
+    sma20 = close_series.rolling(20).mean().iloc[-1]
+    sma50 = close_series.rolling(50).mean().iloc[-1]
+    sma200 = close_series.rolling(200).mean().iloc[-1]
+    price = close_series.iloc[-1]
+
+    if pd.isna(sma20) or pd.isna(sma50) or pd.isna(sma200):
         return False
-    return price > sma20 and sma20 > sma50 and price > sma200
+    if not (price > sma20 > sma50 and price > sma200):
+        return False
 
-
-def avg_dollar_volume(bars: list[dict[str, Any]], days: int = 30) -> float:
-    if len(bars) < days:
-        return 0.0
-    tail = bars[-days:]
-    total = 0.0
-    for bar in tail:
-        close = float(bar["close"])
-        volume = float(bar.get("volume") or 0)
-        total += close * volume
-    return total / days
-
-
-def filter_rs_technical_candidates(
-    ranked_rows: list[dict[str, Any]],
-    bars_by_symbol: dict[str, list[dict[str, Any]]],
-    *,
-    cross_top_percent: float,
-    cap: int,
-    min_avg_30d_dv: int,
-) -> list[dict[str, Any]]:
-    if not ranked_rows:
-        return []
-    cutoff = max(1, int(len(ranked_rows) * cross_top_percent))
-    passed: list[dict[str, Any]] = []
-    for row in ranked_rows[:cutoff]:
-        symbol = str(row["symbol"]).upper()
-        bars = bars_by_symbol.get(symbol)
-        if not bars or not passes_technical_momentum_filters(bars):
-            continue
-        if avg_dollar_volume(bars, AVG_DOLLAR_VOLUME_DAYS) < min_avg_30d_dv:
-            continue
-        passed.append(
-            {
-                "symbol": symbol,
-                "rs_score": float(row["rs_score"]),
-            }
-        )
-
-    passed.sort(key=lambda x: (-x["rs_score"], x["symbol"]))
-    return passed[:cap]
+    tail = df.tail(AVG_DOLLAR_VOLUME_DAYS)
+    if "Volume" not in tail.columns or len(tail) < AVG_DOLLAR_VOLUME_DAYS:
+        return False
+    avg_dv = (tail["Close"] * tail["Volume"]).mean()
+    return bool(avg_dv >= min_avg_30d_dv)
 
 
 def _finalize_watchlist_ranks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -119,141 +91,19 @@ def _finalize_watchlist_ranks(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     return ordered
 
 
-def _parse_yahoo_chart_daily_bars(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    result = payload.get("chart", {}).get("result") or []
-    if not result:
-        return []
-    first = result[0]
-    timestamps = first.get("timestamp") or []
-    quote = ((first.get("indicators") or {}).get("quote") or [{}])[0]
-    adj = ((first.get("indicators") or {}).get("adjclose") or [{}])[0]
-    closes = quote.get("close") or []
-    adj_closes = adj.get("adjclose") or []
-    volumes = quote.get("volume") or []
-    if not timestamps or not closes:
-        return []
-
-    bars: list[dict[str, Any]] = []
-    for idx, ts in enumerate(timestamps):
-        if idx >= len(closes):
-            break
-        close = closes[idx]
-        if idx < len(adj_closes) and adj_closes[idx] not in (None, 0):
-            close = adj_closes[idx]
-        if close in (None, 0):
-            continue
-        volume = volumes[idx] if idx < len(volumes) else None
-        date_iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).date().isoformat()
-        bars.append(
-            {
-                "date": date_iso,
-                "close": float(close),
-                "volume": float(volume) if volume not in (None, "") else None,
-            }
-        )
-    bars.sort(key=lambda x: x["date"])
-    return bars
-
-
-def _fetch_symbol_daily_bars_curl(symbol: str, config: dict[str, Any]) -> list[dict[str, Any]]:
-    params = _resolve_params(config)
-    url = (
-        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        f"?interval=1d&range=2y"
+def _download_watchlist_bars(tickers: list[str], *, timeout: int) -> pd.DataFrame:
+    if not tickers:
+        return pd.DataFrame()
+    return yf.download(
+        tickers,
+        period="2y",
+        interval="1d",
+        group_by="ticker",
+        threads=True,
+        progress=False,
+        auto_adjust=True,
+        timeout=timeout,
     )
-    cmd = (
-        f"curl -sL --max-time {params['timeout']} --retry 2 --retry-delay 1 "
-        f"-A \"{params['user_agent']}\" \"{url}\""
-    )
-    result = subprocess.run(
-        cmd,
-        shell=True,
-        capture_output=True,
-        text=True,
-        check=False,
-        env=os.environ.copy(),
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return []
-    try:
-        bars = _parse_yahoo_chart_daily_bars(json.loads(result.stdout))
-    except (ValueError, TypeError):
-        return []
-    if len(bars) >= MIN_BARS_FOR_SMA200:
-        return bars
-    return []
-
-
-def _fetch_symbol_daily_bars(symbol: str, config: dict[str, Any]) -> list[dict[str, Any]]:
-    from src.stock_rs import fetch_yahoo_daily_bars
-
-    bars = _fetch_symbol_daily_bars_curl(symbol, config)
-    if bars:
-        return bars
-
-    params = _resolve_params(config)
-    session = requests.Session()
-    session.trust_env = False
-    session.headers.update({"User-Agent": params["user_agent"]})
-    try:
-        bars = fetch_yahoo_daily_bars(symbol, session, timeout=params["timeout"])
-        if len(bars) >= MIN_BARS_FOR_SMA200:
-            return bars
-    except requests.RequestException as exc:
-        logger.debug("yahoo daily bars failed for %s: %s", symbol, exc)
-    return []
-
-
-def fetch_daily_bars_map(
-    symbols: list[str],
-    config: dict[str, Any],
-) -> dict[str, list[dict[str, Any]]]:
-    if not symbols:
-        return {}
-    params = _resolve_params(config)
-    unique = sorted({s.upper() for s in symbols if s})
-    out: dict[str, list[dict[str, Any]]] = {}
-    workers = min(_WATCHLIST_FETCH_WORKERS, len(unique)) or 1
-    if workers == 1:
-        for idx, symbol in enumerate(unique, start=1):
-            bars = _fetch_symbol_daily_bars(symbol, config)
-            if bars:
-                out[symbol] = bars
-            if idx % 50 == 0:
-                logger.info("watchlist bar progress %d/%d", idx, len(unique))
-            time.sleep(_WATCHLIST_FETCH_DELAY_SECONDS)
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(_fetch_symbol_daily_bars, symbol, config): symbol
-                for symbol in unique
-            }
-            for future in as_completed(futures):
-                symbol = futures[future]
-                try:
-                    bars = future.result()
-                    if bars:
-                        out[symbol] = bars
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("watchlist bar fetch failed for %s: %s", symbol, exc)
-                time.sleep(_WATCHLIST_FETCH_DELAY_SECONDS / workers)
-
-    missing = [symbol for symbol in unique if symbol not in out]
-    if missing:
-        logger.info("watchlist bar retry for %d symbols", len(missing))
-        for symbol in missing:
-            bars = _fetch_symbol_daily_bars(symbol, config)
-            if bars:
-                out[symbol] = bars
-            time.sleep(0.6)
-
-    logger.info(
-        "watchlist bars fetched %d/%d symbols (timeout=%ss)",
-        len(out),
-        len(unique),
-        params["timeout"],
-    )
-    return out
 
 
 def fetch_yahoo_industries(
@@ -296,25 +146,68 @@ def build_rs_technical_watchlist(
     ranked_rows: list[dict[str, Any]],
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Top RS% + SMA/liquidity filters; industry labels from Yahoo."""
+    """RS-ordered batch fetch with early stop at watchlist cap."""
     params = _resolve_params(config)
     cutoff = max(1, int(len(ranked_rows) * params["cross_top_percent"]))
-    symbols = [str(row["symbol"]).upper() for row in ranked_rows[:cutoff]]
-    bars_by_symbol = fetch_daily_bars_map(symbols, config)
-    candidates = filter_rs_technical_candidates(
-        ranked_rows,
-        bars_by_symbol,
-        cross_top_percent=params["cross_top_percent"],
-        cap=params["cap"],
-        min_avg_30d_dv=params["min_avg_30d_dv"],
+    sorted_candidates = sorted(
+        ranked_rows[:cutoff],
+        key=lambda x: float(x.get("rs_score", 0)),
+        reverse=True,
     )
-    industries = fetch_yahoo_industries([row["symbol"] for row in candidates], config)
+
+    target_cap = params["cap"]
+    min_avg_30d_dv = params["min_avg_30d_dv"]
+    batch_size = params["batch_size"]
+    passed: list[dict[str, Any]] = []
+
+    logger.info(
+        "watchlist build: %d RS candidates, cap=%d, batch_size=%d",
+        len(sorted_candidates),
+        target_cap,
+        batch_size,
+    )
+
+    for start in range(0, len(sorted_candidates), batch_size):
+        if len(passed) >= target_cap:
+            logger.info("watchlist cap reached; early stop before batch at offset %d", start)
+            break
+
+        chunk_rows = sorted_candidates[start : start + batch_size]
+        tickers = [str(row["symbol"]).upper() for row in chunk_rows]
+        try:
+            data = _download_watchlist_bars(tickers, timeout=params["timeout"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("yfinance batch download failed: %s", exc)
+            continue
+
+        for row in chunk_rows:
+            if len(passed) >= target_cap:
+                break
+            symbol = str(row["symbol"]).upper()
+            try:
+                df = _ticker_dataframe(data, symbol, tickers)
+                if df.empty:
+                    continue
+                if passes_technical_momentum_filters(df, min_avg_30d_dv):
+                    passed.append(
+                        {
+                            "symbol": symbol,
+                            "rs_score": float(row["rs_score"]),
+                        }
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("watchlist filter failed for %s: %s", symbol, exc)
+
+        time.sleep(0.35)
+
+    industries = fetch_yahoo_industries([row["symbol"] for row in passed], config)
     rows = [
         {
             "symbol": row["symbol"],
             "rs_score": row["rs_score"],
             "industries": [industries[row["symbol"]]] if industries.get(row["symbol"]) else [],
         }
-        for row in candidates
+        for row in passed
     ]
+    logger.info("watchlist build done: %d symbols passed filters", len(rows))
     return _finalize_watchlist_ranks(rows)

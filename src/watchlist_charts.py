@@ -1,26 +1,20 @@
-"""Daily adjusted OHLC + volume for watchlist Lightweight Charts (Yahoo)."""
+"""Daily adjusted OHLC + volume for watchlist Lightweight Charts (yfinance)."""
 
 from __future__ import annotations
 
 import json
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import requests
+import pandas as pd
+import yfinance as yf
 
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# ~2.5 months exported (enough warmup for SMA50 on the last visible bar)
 CHART_BAR_LIMIT = 50
-# Frontend displays the last 44 sessions (~2 months)
 CHART_DISPLAY_BARS = 44
-_MAX_WORKERS = 3
-_RETRY_DELAYS = (0.6, 1.2, 2.0)
 
 _ROOT = Path(__file__).resolve().parent.parent
 _EXPORT_JSON_CANDIDATES = (
@@ -29,122 +23,69 @@ _EXPORT_JSON_CANDIDATES = (
 )
 
 
-def _adjust_factor(close: float | None, adj_close: float | None) -> float:
-    if close in (None, 0) or adj_close in (None, 0):
-        return 1.0
-    return float(adj_close) / float(close)
+def _ticker_dataframe(data: pd.DataFrame, symbol: str, symbols: list[str]) -> pd.DataFrame:
+    if data is None or data.empty:
+        return pd.DataFrame()
+    sym = symbol.upper()
+    if len(symbols) == 1:
+        df = data.copy()
+    elif isinstance(data.columns, pd.MultiIndex):
+        if sym not in data.columns.get_level_values(0):
+            return pd.DataFrame()
+        df = data[sym].copy()
+    else:
+        return pd.DataFrame()
+    if "Close" not in df.columns:
+        return pd.DataFrame()
+    return df.dropna(subset=["Close"])
 
 
-def _parse_yahoo_chart_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    result = payload.get("chart", {}).get("result") or []
-    if not result:
-        return []
-    first = result[0]
-    timestamps = first.get("timestamp") or []
-    quote = ((first.get("indicators") or {}).get("quote") or [{}])[0]
-    adj = ((first.get("indicators") or {}).get("adjclose") or [{}])[0]
-    opens = quote.get("open") or []
-    highs = quote.get("high") or []
-    lows = quote.get("low") or []
-    closes = quote.get("close") or []
-    volumes = quote.get("volume") or []
-    adj_closes = adj.get("adjclose") or []
-    if not timestamps or not closes:
-        return []
-
+def _bars_from_dataframe(df: pd.DataFrame) -> list[dict[str, Any]]:
     bars: list[dict[str, Any]] = []
-    for idx, ts in enumerate(timestamps):
-        if idx >= len(closes):
-            break
-        close = closes[idx]
-        if close in (None, 0):
-            continue
-        open_ = opens[idx] if idx < len(opens) else close
-        high = highs[idx] if idx < len(highs) else close
-        low = lows[idx] if idx < len(lows) else close
-        if open_ in (None, 0) or high in (None, 0) or low in (None, 0):
-            continue
-        adj_close = adj_closes[idx] if idx < len(adj_closes) else None
-        factor = _adjust_factor(close, adj_close)
-        volume = volumes[idx] if idx < len(volumes) else None
-        date_iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).date().isoformat()
-        adj_c = float(adj_close) if adj_close not in (None, 0) else float(close)
+    for date_idx, row in df.iterrows():
         bars.append(
             {
-                "d": date_iso,
-                "o": round(float(open_) * factor, 4),
-                "h": round(float(high) * factor, 4),
-                "l": round(float(low) * factor, 4),
-                "c": round(adj_c, 4),
-                "v": int(volume) if volume not in (None, "") else 0,
+                "d": pd.Timestamp(date_idx).strftime("%Y-%m-%d"),
+                "o": round(float(row["Open"]), 4),
+                "h": round(float(row["High"]), 4),
+                "l": round(float(row["Low"]), 4),
+                "c": round(float(row["Close"]), 4),
+                "v": int(row["Volume"]) if not pd.isna(row["Volume"]) else 0,
             }
         )
-    bars.sort(key=lambda x: x["d"])
     return bars[-CHART_BAR_LIMIT:]
 
 
-def fetch_yahoo_ohlc_bars(
-    symbol: str,
-    session: requests.Session,
-    timeout: int = 25,
-) -> list[dict[str, Any]]:
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1y"
-    for attempt, delay in enumerate(_RETRY_DELAYS):
-        try:
-            resp = session.get(url, timeout=timeout)
-            if resp.status_code == 429:
-                time.sleep(delay)
-                continue
-            if resp.status_code != 200:
-                if attempt + 1 < len(_RETRY_DELAYS):
-                    time.sleep(delay)
-                    continue
-                return []
-            bars = _parse_yahoo_chart_payload(resp.json())
-            if bars:
-                return bars
-        except (requests.RequestException, ValueError):
-            if attempt + 1 < len(_RETRY_DELAYS):
-                time.sleep(delay)
-                continue
-            return []
-        time.sleep(delay)
-    return []
-
-
-def _fetch_one(symbol: str, timeout: int) -> tuple[str, list[dict[str, Any]]]:
-    session = requests.Session()
-    session.headers["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-    return symbol, fetch_yahoo_ohlc_bars(symbol, session, timeout=timeout)
-
-
-def _fetch_symbols_bars(symbols: list[str], *, timeout: int = 25) -> dict[str, list[dict[str, Any]]]:
+def fetch_symbols_bars_yf(symbols: list[str], *, timeout: int = 25) -> dict[str, list[dict[str, Any]]]:
+    """Batch-fetch display OHLC for watchlist chart cards."""
     bars_by_symbol: dict[str, list[dict[str, Any]]] = {}
-    if not symbols:
+    unique = [s.upper() for s in symbols if s]
+    if not unique:
         return bars_by_symbol
 
-    workers = min(_MAX_WORKERS, max(1, len(symbols)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_fetch_one, sym, timeout): sym for sym in symbols}
-        for fut in as_completed(futures):
-            sym = futures[fut]
-            try:
-                _, bars = fut.result()
-                bars_by_symbol[sym] = bars
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("chart bars failed for %s: %s", sym, exc)
-                bars_by_symbol[sym] = []
+    logger.info("fetching chart bars for %d symbols via yfinance (3mo)", len(unique))
+    try:
+        data = yf.download(
+            unique,
+            period="3mo",
+            interval="1d",
+            group_by="ticker",
+            threads=True,
+            progress=False,
+            auto_adjust=True,
+            timeout=timeout,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("yfinance chart batch failed: %s", exc)
+        return {sym: [] for sym in unique}
 
-    missing = [sym for sym in symbols if not bars_by_symbol.get(sym)]
-    for sym in missing:
-        time.sleep(0.8)
+    for sym in unique:
         try:
-            _, bars = _fetch_one(sym, timeout)
-            if bars:
-                bars_by_symbol[sym] = bars
-                logger.info("chart bars recovered for %s on retry pass", sym)
+            df = _ticker_dataframe(data, sym, unique)
+            bars_by_symbol[sym] = _bars_from_dataframe(df) if not df.empty else []
         except Exception as exc:  # noqa: BLE001
-            logger.warning("chart bars retry failed for %s: %s", sym, exc)
+            logger.warning("chart bars parse failed for %s: %s", sym, exc)
+            bars_by_symbol[sym] = []
     return bars_by_symbol
 
 
@@ -191,8 +132,7 @@ def attach_watchlist_chart_bars(
             need_fetch.append(sym)
 
     if need_fetch:
-        fetched = _fetch_symbols_bars(need_fetch, timeout=timeout)
-        bars_by_symbol.update(fetched)
+        bars_by_symbol.update(fetch_symbols_bars_yf(need_fetch, timeout=timeout))
 
     out: list[dict[str, Any]] = []
     for row in watchlist:
@@ -206,7 +146,7 @@ def enrich_watchlist_chart_bars(
     watchlist: list[dict[str, Any]],
     *,
     timeout: int = 25,
-    skip_if_present: bool = True,
+    skip_if_present: bool = False,
 ) -> list[dict[str, Any]]:
     if not watchlist:
         return watchlist
@@ -223,7 +163,7 @@ def enrich_watchlist_chart_bars(
     if not symbols:
         return watchlist
 
-    bars_by_symbol = _fetch_symbols_bars(symbols, timeout=timeout)
+    bars_by_symbol = fetch_symbols_bars_yf(symbols, timeout=timeout)
 
     out: list[dict[str, Any]] = []
     for row in watchlist:
