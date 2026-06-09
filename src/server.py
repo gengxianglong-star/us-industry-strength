@@ -36,6 +36,7 @@ from src.services.snapshots import (
     top_strong_from_rows,
 )
 from src.stock_rs import rebuild_stock_watchlist_for_snapshot
+from src.watchlist_charts import attach_watchlist_chart_bars
 from src.stock_picks import fetch_and_store_stock_picks
 from src.services.auto_scheduler import AutoScheduler
 from src.services.breadth_jobs import BreadthSyncService
@@ -300,7 +301,12 @@ def breadth_sync_progress() -> dict[str, Any]:
 def get_breadth_config() -> dict[str, Any]:
     cfg = dict(DEFAULT_THRESHOLDS)
     cfg.update(storage.get_breadth_threshold_overrides())
-    return {"thresholds": cfg}
+    confluence = config.get("breadth_confluence") or {}
+    min_score = int(confluence.get("min_score", 2))
+    return {
+        "thresholds": cfg,
+        "breadth_confluence": {"min_score": min_score},
+    }
 
 
 @app.put("/api/breadth/config", dependencies=[Depends(require_api_key)])
@@ -623,6 +629,7 @@ def rs_snapshot(
 ) -> dict[str, Any]:
     watchlist = storage.get_stock_watchlist(snapshot_date, limit=watchlist_limit)
     if watchlist_only:
+        watchlist = attach_watchlist_chart_bars(watchlist)
         return {
             "snapshot_date": snapshot_date,
             "rs_count": storage.count_stock_rs(snapshot_date),
@@ -744,6 +751,9 @@ def industry_history_multi(
 app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
 if USE_SPA:
     app.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="spa_assets")
+    spa_data = WEB_DIST / "data"
+    if spa_data.is_dir():
+        app.mount("/data", StaticFiles(directory=spa_data), name="spa_data")
 
 
 def _spa_index() -> FileResponse:

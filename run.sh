@@ -52,6 +52,9 @@ build_frontend() {
       return 0
     fi
   fi
+  echo "Exporting dashboard JSON (watchlist chart bars)…"
+  python scripts/export_public_dashboard.py
+
   echo "Building frontend…"
   (cd frontend && "$npm_cmd" install --no-audit --no-fund && "$npm_cmd" run build)
 }

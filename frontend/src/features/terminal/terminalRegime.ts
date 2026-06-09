@@ -138,3 +138,47 @@ export function matrixCellStyle(
   const opacity = 0.1 + Math.pow(pct, 0.75) * 0.55;
   return { backgroundColor: `rgba(${rgb}, ${opacity})`, hot: false };
 }
+
+export type ConfluenceResult = {
+  score: number;
+  activated: boolean;
+  reasons: string[];
+};
+
+const DEFAULT_CONFLUENCE_MIN_SCORE = 2;
+
+/** Hard-scoring breadth thrust confluence (rows newest-first). */
+export function calculateConfluenceScore(
+  latestRow: BreadthRow,
+  allRows: BreadthRow[],
+  minScore = DEFAULT_CONFLUENCE_MIN_SCORE,
+): ConfluenceResult {
+  const reasons: string[] = [];
+  let score = 0;
+
+  const up4Today = +(latestRow.c1_num ?? 0);
+  if (up4Today >= 500) {
+    score += 1;
+    reasons.push(`4% up clusters ${up4Today} ≥ 500`);
+  }
+
+  const recent3 = allRows.slice(0, 3);
+  if (recent3.length >= 3 && recent3.every((r) => +(r.c1_num ?? 0) >= 400)) {
+    score += 1;
+    reasons.push("4% up clusters ≥ 400 for 3 consecutive days");
+  }
+
+  const t2108Now = +(latestRow.c14_num ?? 0);
+  const last5 = allRows.slice(0, 5);
+  const hadOversold = last5.some((r) => +(r.c14_num ?? 0) < 20);
+  if (hadOversold && t2108Now >= 40) {
+    score += 1;
+    reasons.push(`T2108 ${t2108Now.toFixed(1)}% after <20% within 5d`);
+  }
+
+  return {
+    score,
+    activated: score >= minScore,
+    reasons,
+  };
+}

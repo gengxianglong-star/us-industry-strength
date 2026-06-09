@@ -14,6 +14,10 @@ type BreadthPayload = {
   coverage?: { last_date?: string; row_count?: number };
 };
 
+type BreadthConfigPayload = {
+  breadth_confluence?: { min_score?: number };
+};
+
 export type { AlphaFilter, RotationNode };
 
 export function useQuantTerminal() {
@@ -21,17 +25,20 @@ export function useQuantTerminal() {
   const [snapshot, setSnapshot] = useState<SnapshotPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [confluenceMinScore, setConfluenceMinScore] = useState(2);
 
   const reload = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const [breadthData, snap] = await Promise.all([
+      const [breadthData, snap, breadthCfg] = await Promise.all([
         fetchJson<BreadthPayload>("/api/breadth?limit=60"),
         fetchJson<SnapshotPayload>("/api/snapshots/latest"),
+        fetchJson<BreadthConfigPayload>("/api/breadth/config"),
       ]);
       setBreadth(breadthData);
       setSnapshot(snap);
+      setConfluenceMinScore(breadthCfg?.breadth_confluence?.min_score ?? 2);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load terminal data");
     } finally {
@@ -57,5 +64,6 @@ export function useQuantTerminal() {
     rotationNodes,
     ratio10,
     filterAlphaRows: (filter: AlphaFilter) => filterAlphaRows(rotationNodes, filter),
+    confluenceMinScore,
   };
 }

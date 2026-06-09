@@ -28,6 +28,9 @@ stock_rs:
   tier_a_score: 0.8
   tier_b_score: 0.65
   cross_top_percent: 0.1
+  watchlist_mode: rs_technical
+  watchlist_cap: 100
+  min_avg_dollar_volume_30d_usd: 100000000
   universe_cap: 0
   universe_cache_hours: 24
   yahoo_batch_size: 40
@@ -43,12 +46,19 @@ stock_rs:
     final_pass_single_symbol: true
   new_stock_enabled: true
 scraper:
-  user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
-  request_delay_seconds: 1.0
-  stock_pick_workers: 5
+  user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0
+  request_delay_seconds: 1.5
+  stock_pick_workers: 3
   request_retries: 3
+  prefer_curl: true
+  use_system_proxy: true
   stale_fallback_enabled: true
-  cookie_file: ""
+  cookie_file: data/finviz_cookies.txt
+  use_playwright: true
+  playwright_channel: msedge
+  playwright_headless: false
+breadth_confluence:
+  min_score: 2
 breadth:
   connect_timeout_seconds: 20
   read_timeout_seconds: 120
@@ -79,6 +89,7 @@ automation:
   auto_install_service: true
   daily:
     force_full_rs: false
+    skip_stocks: true
     skip_breadth: false
     rs_async: true
 pipeline:

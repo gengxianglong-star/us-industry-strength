@@ -8,7 +8,7 @@ export function BreadthPage() {
       title="Market Breadth Terminal"
       source="Source: Stockbee Matrix Data Stream"
     >
-      <div className="cockpit-preview max-w-[1600px] mx-auto p-4 md:p-6">
+      <div className="cockpit-preview max-w-[1600px] mx-auto px-4 md:px-6 py-6 space-y-6">
         <CockpitSection />
         <BreadthChartsSection />
       </div>

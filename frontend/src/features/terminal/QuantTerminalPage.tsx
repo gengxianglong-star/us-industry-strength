@@ -6,7 +6,7 @@ import { IndustryRotationMap } from "../strong/components/IndustryRotationMap";
 import type { AlphaFilter } from "../../lib/rotationLogic";
 import type { TrendTone } from "../../lib/rotationLogic";
 import "../../styles/cockpit.css";
-import { deriveMarketRegime, matrixCellStyle, type BreadthRow } from "./terminalRegime";
+import { calculateConfluenceScore, deriveMarketRegime, matrixCellStyle, type BreadthRow } from "./terminalRegime";
 import { useQuantTerminal } from "./useQuantTerminal";
 
 const TONE_STYLES = {
@@ -142,9 +142,14 @@ function ThrustPanel({ rows, ratio10, ratio5 }: { rows: BreadthRow[]; ratio10: n
 }
 
 export function QuantTerminalPage() {
-  const { breadth, snapshot, loading, error, reload, industries, ratio10, filterAlphaRows } = useQuantTerminal();
+  const { breadth, snapshot, loading, error, reload, industries, ratio10, filterAlphaRows, confluenceMinScore } =
+    useQuantTerminal();
   const latest: BreadthRow = breadth?.rows?.[0] || {};
   const regime = deriveMarketRegime(latest);
+  const confluence = useMemo(
+    () => calculateConfluenceScore(latest, breadth?.rows || [], confluenceMinScore),
+    [latest, breadth?.rows, confluenceMinScore],
+  );
   const tone = TONE_STYLES[regime.tone];
 
   const [filter, setFilter] = useState<AlphaFilter>(regime.filterDefault);
@@ -215,6 +220,16 @@ export function QuantTerminalPage() {
                 <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest">Breadth Intensity Matrix</h2>
                 <span className="text-[9px] text-slate-500">{snapshotDate}</span>
               </div>
+              {confluence.activated ? (
+                <div
+                  className="mb-4 flex justify-center"
+                  title={confluence.reasons.join(" · ")}
+                >
+                  <span className="px-4 py-1.5 text-[10px] font-black tracking-[0.2em] uppercase text-emerald-50 bg-emerald-700 border border-emerald-500/60 rounded shadow-[0_0_14px_rgba(16,185,129,0.45)]">
+                    [ THRUST CONFLUENCE ACTIVATED ]
+                  </span>
+                </div>
+              ) : null}
               <div className="space-y-4">
                 <MatrixGrid rows={breadth?.rows || []} field="c1_num" color="emerald" label="4% Up Clusters" />
                 <MatrixGrid rows={breadth?.rows || []} field="c2_num" color="rose" label="4% Down Clusters" />

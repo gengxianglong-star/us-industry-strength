@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import http.cookiejar
 import re
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import quote
 
 import requests
@@ -24,6 +26,12 @@ TICKER_PATTERNS = (
 )
 TOTAL_PATTERN = re.compile(r"#\d+\s*/\s*(\d+)\s*Total")
 SAVE_PORTFOLIO_PATTERN = re.compile(r"SavePortfolio\((\d+),")
+SCREENER_BODY_MARKERS = (
+    "screener-body",
+    "screener_table",
+    "is-ticker-cell",
+    "screener-export",
+)
 CLOUDFLARE_MARKERS = (
     "Just a moment...",
     "cf-browser-verification",
@@ -32,15 +40,41 @@ CLOUDFLARE_MARKERS = (
     "challenge-platform",
 )
 
+# Core filters always applied (with defaults); growth filters only when set in config.
+CORE_STOCK_FILTER_KEYS: tuple[str, ...] = (
+    "price_above_sma20",
+    "sma20_above_sma50",
+    "price_above_sma200",
+    "dollar_volume_min",
+)
+OPTIONAL_STOCK_FILTER_KEYS: tuple[str, ...] = (
+    "eps_growth_qoq_min",
+    "sales_growth_qoq_min",
+)
+STOCK_FILTER_DEFAULTS: dict[str, str] = {
+    "price_above_sma20": "ta_sma20_pa",
+    "sma20_above_sma50": "ta_sma50_sb20",
+    "price_above_sma200": "ta_sma200_pa",
+    "dollar_volume_min": "sh_curvol_ousd100M",
+    "eps_growth_qoq_min": "fa_epsqoq_o10",
+    "sales_growth_qoq_min": "fa_salesqoq_o10",
+}
+
 
 def default_stock_filter_codes(config: dict[str, Any]) -> list[str]:
     stock_filters = config.get("stock_filters", {})
-    return [
-        stock_filters.get("price_above_sma20", "ta_sma20_pa"),
-        stock_filters.get("sma20_above_sma50", "ta_sma50_sb20"),
-        stock_filters.get("price_above_sma200", "ta_sma200_pa"),
-        stock_filters.get("dollar_volume_min", "sh_curvol_ousd100M"),
-    ]
+    codes: list[str] = []
+    for key in CORE_STOCK_FILTER_KEYS:
+        code = str(stock_filters.get(key) or STOCK_FILTER_DEFAULTS[key]).strip()
+        if code:
+            codes.append(code)
+    for key in OPTIONAL_STOCK_FILTER_KEYS:
+        if key not in stock_filters:
+            continue
+        code = str(stock_filters.get(key) or "").strip()
+        if code:
+            codes.append(code)
+    return codes
 
 
 def build_screener_filters(industry_key: str, config: dict[str, Any]) -> str:
@@ -58,7 +92,11 @@ def _is_cloudflare_page(html: str) -> bool:
     return any(marker.lower() in lowered for marker in CLOUDFLARE_MARKERS)
 
 
-def _scraper_settings(config: dict[str, Any]) -> tuple[str, float, str]:
+def _default_playwright_profile() -> str:
+    return str(Path.home() / "Library/Application Support/Microsoft Edge")
+
+
+def _scraper_settings(config: dict[str, Any]) -> tuple[str, float, str, bool]:
     scraper = config.get("scraper", {})
     user_agent = scraper.get(
         "user_agent",
@@ -66,7 +104,64 @@ def _scraper_settings(config: dict[str, Any]) -> tuple[str, float, str]:
     )
     delay = float(scraper.get("request_delay_seconds", 1.5))
     cookie_file = str(scraper.get("cookie_file") or "").strip()
-    return user_agent, delay, cookie_file
+    prefer_curl = bool(scraper.get("prefer_curl", True))
+    return user_agent, delay, cookie_file, prefer_curl
+
+
+def use_playwright_scraper(config: dict[str, Any]) -> bool:
+    return bool(config.get("scraper", {}).get("use_playwright", False))
+
+
+class PlaywrightFetchSession:
+    """Reuse one real browser profile for Finviz screener pages (Cloudflare-safe)."""
+
+    def __init__(self, page: Any) -> None:
+        self.page = page
+
+    def fetch_html(self, url: str, *, wait_ms: int = 1200) -> str:
+        self.page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+        if wait_ms > 0:
+            self.page.wait_for_timeout(wait_ms)
+        return self.page.content()
+
+
+@contextmanager
+def open_playwright_session(config: dict[str, Any]) -> Iterator[PlaywrightFetchSession]:
+    scraper = config.get("scraper", {})
+    profile = str(scraper.get("playwright_profile") or _default_playwright_profile()).strip()
+    channel = str(scraper.get("playwright_channel") or "msedge").strip()
+    headless = bool(scraper.get("playwright_headless", False))
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright 未安装。请运行: pip install playwright && python -m playwright install msedge"
+        ) from exc
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            profile,
+            channel=channel,
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            yield PlaywrightFetchSession(page)
+        finally:
+            context.close()
+
+
+def _load_cookie_jar(cookie_file: str) -> http.cookiejar.MozillaCookieJar | None:
+    path = Path(cookie_file)
+    if not path.is_file():
+        return None
+    jar = http.cookiejar.MozillaCookieJar(str(path))
+    try:
+        jar.load(ignore_discard=True, ignore_expires=True)
+    except OSError:
+        return None
+    return jar
 
 
 def _request_headers(user_agent: str) -> dict[str, str]:
@@ -81,7 +176,10 @@ def _request_headers(user_agent: str) -> dict[str, str]:
 def _prepare_session(user_agent: str, cookie_file: str) -> requests.Session:
     session = requests.Session()
     session.headers.update(_request_headers(user_agent))
-    if cookie_file and Path(cookie_file).is_file():
+    jar = _load_cookie_jar(cookie_file)
+    if jar is not None:
+        session.cookies = jar
+    elif cookie_file and Path(cookie_file).is_file():
         with Path(cookie_file).open(encoding="utf-8", errors="ignore") as handle:
             session.headers["Cookie"] = handle.read().strip()
     session.get(FINVIZ_HOME, timeout=30)
@@ -120,27 +218,60 @@ def _fetch_html_with_curl(url: str, user_agent: str, cookie_file: str) -> str:
     return result.stdout
 
 
+def _is_screener_results_page(html: str) -> bool:
+    if _is_cloudflare_page(html):
+        return False
+    lowered = html.lower()
+    if any(marker in lowered for marker in SCREENER_BODY_MARKERS):
+        return True
+    return bool(TOTAL_PATTERN.search(html) or SAVE_PORTFOLIO_PATTERN.search(html))
+
+
 def _fetch_html(
     url: str,
     config: dict[str, Any],
     session: requests.Session | None = None,
+    playwright_session: PlaywrightFetchSession | None = None,
 ) -> str:
-    user_agent, _, cookie_file = _scraper_settings(config)
+    if playwright_session is not None:
+        html = playwright_session.fetch_html(url)
+        if _is_cloudflare_page(html) or not _is_screener_results_page(html):
+            raise RuntimeError(
+                "Finviz screener 被 Cloudflare 拦截。"
+                "请在 Edge 浏览器打开 screener 并完成验证后重试。"
+            )
+        return html
+
+    user_agent, _, cookie_file, prefer_curl = _scraper_settings(config)
+    cloudflare_error = RuntimeError(
+        "Finviz screener 被 Cloudflare 拦截。"
+        "请在浏览器完成一次验证后，将 Cookie 导出到 config.yaml 的 scraper.cookie_file，"
+        "或稍后降低抓取频率再试。"
+    )
+
+    def _validate(html: str) -> str:
+        if _is_cloudflare_page(html):
+            raise cloudflare_error
+        return html
+
+    if prefer_curl:
+        try:
+            return _validate(_fetch_html_with_curl(url, user_agent, cookie_file))
+        except (RuntimeError, OSError):
+            pass
+
     html = ""
     try:
         req_session = session or _prepare_session(user_agent, cookie_file)
-        html = _fetch_html_with_requests(req_session, url)
-        if not _is_cloudflare_page(html):
+        html = _validate(_fetch_html_with_requests(req_session, url))
+        if _is_screener_results_page(html):
             return html
-    except (requests.RequestException, OSError):
+    except (requests.RequestException, OSError, RuntimeError):
         html = ""
-    html = _fetch_html_with_curl(url, user_agent, cookie_file)
-    if _is_cloudflare_page(html):
-        raise RuntimeError(
-            "Finviz screener 被 Cloudflare 拦截。"
-            "请在浏览器完成一次验证后，将 Cookie 导出到 config.yaml 的 scraper.cookie_file，"
-            "或稍后降低抓取频率再试。"
-        )
+
+    html = _validate(_fetch_html_with_curl(url, user_agent, cookie_file))
+    if not _is_screener_results_page(html):
+        raise cloudflare_error
     return html
 
 
@@ -157,6 +288,8 @@ def _parse_total(html: str) -> int:
 def _parse_tickers(html: str) -> list[str]:
     if _is_cloudflare_page(html):
         raise RuntimeError("Finviz screener 被 Cloudflare 拦截，请稍后重试")
+    if not _is_screener_results_page(html):
+        return []
 
     tickers = TICKER_PATTERNS[0].findall(html)
     if not tickers:
@@ -177,7 +310,7 @@ def _parse_tickers(html: str) -> list[str]:
 def prepare_finviz_session(
     config: dict[str, Any],
 ) -> tuple[requests.Session | None, threading.Lock]:
-    user_agent, _, cookie_file = _scraper_settings(config)
+    user_agent, _, cookie_file, _ = _scraper_settings(config)
     try:
         return _prepare_session(user_agent, cookie_file), threading.Lock()
     except (requests.RequestException, OSError):
@@ -191,8 +324,9 @@ def fetch_industry_tickers(
     session: requests.Session | None = None,
     session_lock: threading.Lock | None = None,
     skip_warmup: bool = False,
+    playwright_session: PlaywrightFetchSession | None = None,
 ) -> dict[str, Any]:
-    user_agent, delay, cookie_file = _scraper_settings(config)
+    user_agent, delay, cookie_file, _ = _scraper_settings(config)
     per_page = 20
 
     filters = build_screener_filters(industry_key, config)
@@ -209,6 +343,8 @@ def fetch_industry_tickers(
             active_session = None
 
     def _fetch_page(url: str) -> str:
+        if playwright_session is not None:
+            return _fetch_html(url, config, playwright_session=playwright_session)
         if active_session is not None and session_lock is not None:
             with session_lock:
                 return _fetch_html(url, config, session=active_session)

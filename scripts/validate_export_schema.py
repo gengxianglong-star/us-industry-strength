@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "frontend" / "public" / "data"
 MIN_BYTES = 10_240
+MAX_RS_BYTES = 350_000
 
 REQUIRED_FILES = (
     "meta.json",
@@ -61,6 +62,10 @@ def validate_export_dir(out_dir: Path) -> list[str]:
             industries = snap.get("industries")
             if not isinstance(industries, list) or len(industries) < 50:
                 errors.append("snapshot.json: industries list too small or invalid")
+            elif industries:
+                sample = industries[0]
+                if isinstance(sample, dict) and "trajectory_5d" not in sample:
+                    errors.append("snapshot.json: industries missing trajectory_5d")
 
     rs_path = out_dir / "rs.json"
     if rs_path.is_file():
@@ -78,6 +83,14 @@ def validate_export_dir(out_dir: Path) -> list[str]:
                 errors.append("rs.json: rows must be a list")
             if not isinstance(rs.get("watchlist"), list):
                 errors.append("rs.json: watchlist must be a list")
+            rs_size = rs_path.stat().st_size
+            if rs_size > MAX_RS_BYTES:
+                errors.append(f"rs.json: size {rs_size} > {MAX_RS_BYTES} bytes")
+            rows = rs.get("rows") or []
+            if rows and isinstance(rows[0], dict):
+                for forbidden in ("name", "exchange"):
+                    if forbidden in rows[0]:
+                        errors.append(f"rs.json: rows must not include slimmed field {forbidden!r}")
 
     meta_path = out_dir / "meta.json"
     if meta_path.is_file():

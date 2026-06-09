@@ -50,19 +50,15 @@ def check_proxy(config: dict[str, Any]) -> dict[str, Any]:
 
 def check_finviz(config: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
-    scraper = config.get("scraper", {})
-    user_agent = scraper.get(
-        "user_agent",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-    )
     try:
-        response = requests.get(
-            "https://finviz.com/groups.ashx?g=industry&v=210&o=name",
-            timeout=12,
-            headers={"User-Agent": user_agent},
+        from src.finviz_scraper import fetch_industries_health_check
+
+        ok, detail = fetch_industries_health_check(config)
+        return _result(
+            ok,
+            int((time.perf_counter() - started) * 1000),
+            detail=detail or None,
         )
-        response.raise_for_status()
-        return _result(True, int((time.perf_counter() - started) * 1000))
     except Exception as exc:  # noqa: BLE001
         logger.debug("health check failed: %s", exc)
         return _result(False, int((time.perf_counter() - started) * 1000), detail=str(exc))

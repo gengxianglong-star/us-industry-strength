@@ -1,10 +1,29 @@
-import { useState, useEffect } from 'react';
-import { Target, Activity, Zap, Anchor, ShieldAlert, BarChart2 } from 'lucide-react';
-import { fetchJson } from '../../lib/api';
-import '../../styles/cockpit.css';
+import { useEffect, useMemo, useState } from "react";
+import { Target, Activity, Zap, Sparkles } from "lucide-react";
+import { Area, AreaChart, Line, LineChart, ResponsiveContainer, YAxis } from "recharts";
+import { fetchJson } from "../../lib/api";
+import "../../styles/cockpit.css";
+
+interface BreadthRow {
+  date?: string;
+  raw_date?: string;
+  c1_num?: number;
+  c2_num?: number;
+  c3_num?: number;
+  c4_num?: number;
+  c5_num?: number;
+  c6_num?: number;
+  c7_num?: number;
+  c8_num?: number;
+  c9_num?: number;
+  c10_num?: number;
+  c11_num?: number;
+  c12_num?: number;
+  c14_num?: number;
+}
 
 interface BreadthPayload {
-  rows?: any[];
+  rows?: BreadthRow[];
   coverage?: {
     last_date?: string;
     first_date?: string;
@@ -17,31 +36,34 @@ type HealthReport = {
   checks?: Record<string, { ok?: boolean }>;
 };
 
-type TerminalHealth = 'healthy' | 'degraded' | 'offline';
+type TerminalHealth = "healthy" | "degraded" | "offline";
+
+const UP4_SPARKLINE_THRESHOLD = 500;
+const DN4_SPARKLINE_THRESHOLD = 400;
 
 const HEALTH_UI: Record<
   TerminalHealth,
   { label: string; wrap: string; text: string; dot: string; pulse: boolean }
 > = {
   healthy: {
-    label: 'System Healthy',
-    wrap: 'bg-emerald-950/20 border-emerald-900/50',
-    text: 'text-emerald-500',
-    dot: 'bg-emerald-500 drop-shadow-[0_0_5px_rgba(16,185,129,0.8)]',
+    label: "System Healthy",
+    wrap: "bg-emerald-950/20 border-emerald-900/40",
+    text: "text-emerald-500",
+    dot: "bg-emerald-500 drop-shadow-[0_0_5px_rgba(16,185,129,0.8)]",
     pulse: true,
   },
   degraded: {
-    label: 'Data Stale — Verify',
-    wrap: 'bg-amber-950/20 border-amber-900/50',
-    text: 'text-amber-500',
-    dot: 'bg-amber-500 drop-shadow-[0_0_5px_rgba(245,158,11,0.8)]',
+    label: "Data Stale — Verify",
+    wrap: "bg-amber-950/20 border-amber-900/40",
+    text: "text-amber-500",
+    dot: "bg-amber-500 drop-shadow-[0_0_5px_rgba(245,158,11,0.8)]",
     pulse: true,
   },
   offline: {
-    label: 'System Offline',
-    wrap: 'bg-rose-950/20 border-rose-900/50',
-    text: 'text-rose-500',
-    dot: 'bg-rose-500',
+    label: "System Offline",
+    wrap: "bg-rose-950/20 border-rose-900/40",
+    text: "text-rose-500",
+    dot: "bg-rose-500",
     pulse: false,
   },
 };
@@ -55,28 +77,357 @@ function resolveTerminalHealth(
   payload: BreadthPayload | null,
   health: HealthReport | null,
 ): TerminalHealth {
-  if (!health || health.status === 'error') return 'offline';
+  if (!health || health.status === "error") return "offline";
   const checks = health.checks || {};
-  if (!checks.db?.ok) return 'offline';
+  if (!checks.db?.ok) return "offline";
 
   const latestDate = payload?.rows?.[0]?.date || payload?.rows?.[0]?.raw_date;
   const coverageLast = payload?.coverage?.last_date;
-  if (!latestDate && !coverageLast) return 'degraded';
+  if (!latestDate && !coverageLast) return "degraded";
 
-  if (health.status === 'degraded') return 'degraded';
-  if (!checkPresent(checks.proxy) || !checkPresent(checks.breadth_source)) return 'degraded';
-  return 'healthy';
+  if (health.status === "degraded") return "degraded";
+  if (!checkPresent(checks.proxy) || !checkPresent(checks.breadth_source)) return "degraded";
+  return "healthy";
+}
+
+type SparklineProps = {
+  data: BreadthRow[];
+  dataKey: keyof BreadthRow;
+  threshold: number;
+  color?: string;
+  neutralColor?: string;
+};
+
+function MicroSparkline({
+  data,
+  dataKey,
+  threshold,
+  color = "#10b981",
+  neutralColor = "#1e293b",
+}: SparklineProps) {
+  return (
+    <ResponsiveContainer width="100%" height={24}>
+      <LineChart data={data} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
+        <YAxis domain={["auto", "auto"]} hide />
+        <Line
+          type="monotone"
+          dataKey={dataKey as string}
+          stroke={neutralColor}
+          strokeWidth={1.5}
+          dot={(props: { cx?: number; cy?: number; payload?: BreadthRow }) => {
+            const val = Number(props.payload?.[dataKey] ?? 0);
+            if (val >= threshold && props.cx != null && props.cy != null) {
+              return <circle cx={props.cx} cy={props.cy} r={3} fill={color} stroke={color} />;
+            }
+            return null;
+          }}
+          isAnimationActive={false}
+        />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+const T2108_OVERSOLD = 20;
+const T2108_OVERBOUGHT = 80;
+
+function CustomT2108Thermometer({ value }: { value: number }) {
+  const clamped = Math.max(0, Math.min(100, value));
+  const oversold = clamped <= T2108_OVERSOLD;
+  const overbought = clamped >= T2108_OVERBOUGHT;
+
+  const scaleSpan = 180;
+  const zeroY = 210;
+  const mercuryHeight = (clamped / 100) * scaleSpan;
+  const mercuryY = zeroY - mercuryHeight;
+
+  let mercuryColorId = "mercurySilver";
+  let bulbColorId = "bulbSilver";
+  let glowFilterId: string | undefined;
+  let indicatorColor = "text-slate-400";
+
+  if (overbought) {
+    mercuryColorId = "mercuryRed";
+    bulbColorId = "bulbRed";
+    glowFilterId = "url(#neonGlowRed)";
+    indicatorColor = "text-rose-400 drop-shadow-[0_0_4px_rgba(244,63,94,0.6)]";
+  } else if (oversold) {
+    mercuryColorId = "mercuryGreen";
+    bulbColorId = "bulbGreen";
+    glowFilterId = "url(#neonGlowGreen)";
+    indicatorColor = "text-emerald-400 drop-shadow-[0_0_4px_rgba(16,185,129,0.6)]";
+  }
+
+  return (
+    <div className="flex flex-col h-full items-center bg-[#090d16]/40 border border-slate-900/60 rounded-xl p-4 shadow-inner relative overflow-hidden">
+      <div className="text-[10px] font-mono font-black uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1">
+        <Sparkles
+          size={11}
+          className={overbought || oversold ? "text-amber-400 animate-pulse" : "text-slate-600"}
+        />
+        T2108 Scale
+      </div>
+
+      <div className="flex-1 w-full flex justify-center items-center min-h-[260px]">
+        <svg viewBox="0 0 90 280" className="w-24 h-[270px]" aria-label={`T2108 ${clamped.toFixed(1)} percent`}>
+          <defs>
+            <linearGradient id="metalBacking" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#1e293b" />
+              <stop offset="25%" stopColor="#0f172a" />
+              <stop offset="75%" stopColor="#020617" />
+              <stop offset="100%" stopColor="#1e293b" />
+            </linearGradient>
+
+            <linearGradient id="glassReflection" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="rgba(255,255,255,0.04)" />
+              <stop offset="20%" stopColor="rgba(255,255,255,0.22)" />
+              <stop offset="40%" stopColor="rgba(255,255,255,0)" />
+              <stop offset="85%" stopColor="rgba(0,0,0,0.5)" />
+              <stop offset="100%" stopColor="rgba(255,255,255,0.12)" />
+            </linearGradient>
+
+            <linearGradient id="mercuryRed" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="#ef4444" />
+              <stop offset="35%" stopColor="#fca5a5" />
+              <stop offset="70%" stopColor="#dc2626" />
+              <stop offset="100%" stopColor="#991b1b" />
+            </linearGradient>
+            <linearGradient id="mercuryGreen" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="#10b981" />
+              <stop offset="35%" stopColor="#a7f3d0" />
+              <stop offset="70%" stopColor="#059669" />
+              <stop offset="100%" stopColor="#065f46" />
+            </linearGradient>
+            <linearGradient id="mercurySilver" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="#94a3b8" />
+              <stop offset="35%" stopColor="#f1f5f9" />
+              <stop offset="70%" stopColor="#64748b" />
+              <stop offset="100%" stopColor="#334155" />
+            </linearGradient>
+
+            <radialGradient id="bulbRed" cx="35%" cy="35%" r="65%">
+              <stop offset="0%" stopColor="#fca5a5" />
+              <stop offset="45%" stopColor="#ef4444" />
+              <stop offset="80%" stopColor="#991b1b" />
+              <stop offset="100%" stopColor="#450a0a" />
+            </radialGradient>
+            <radialGradient id="bulbGreen" cx="35%" cy="35%" r="65%">
+              <stop offset="0%" stopColor="#a7f3d0" />
+              <stop offset="45%" stopColor="#10b981" />
+              <stop offset="80%" stopColor="#065f46" />
+              <stop offset="100%" stopColor="#022c22" />
+            </radialGradient>
+            <radialGradient id="bulbSilver" cx="35%" cy="35%" r="65%">
+              <stop offset="0%" stopColor="#f8fafc" />
+              <stop offset="45%" stopColor="#cbd5e1" />
+              <stop offset="80%" stopColor="#475569" />
+              <stop offset="100%" stopColor="#0f172a" />
+            </radialGradient>
+
+            <filter id="neonGlowRed" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="4" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+            <filter id="neonGlowGreen" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="4" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+          </defs>
+
+          <rect x="2" y="2" width="86" height="276" rx="8" fill="url(#metalBacking)" stroke="#090d16" strokeWidth="2" />
+          <rect x="5" y="5" width="80" height="270" rx="6" fill="none" stroke="#334155" strokeWidth="0.5" opacity="0.4" />
+
+          <g fontFamily="monospace" fontSize="8" fontWeight="bold">
+            <line x1="26" y1="30" x2="36" y2="30" stroke="#64748b" strokeWidth="1" />
+            <text x="21" y="33" fill="#64748b" textAnchor="end">
+              100
+            </text>
+
+            <line x1="24" y1="66" x2="36" y2="66" stroke="#ef4444" strokeWidth="1.2" />
+            <text x="19" y="69" fill="#ef4444" textAnchor="end">
+              80
+            </text>
+
+            <line x1="26" y1="102" x2="36" y2="102" stroke="#475569" strokeWidth="1" />
+            <text x="21" y="105" fill="#475569" textAnchor="end">
+              60
+            </text>
+
+            <line x1="26" y1="138" x2="36" y2="138" stroke="#475569" strokeWidth="1" />
+            <text x="21" y="141" fill="#475569" textAnchor="end">
+              40
+            </text>
+
+            <line x1="24" y1="174" x2="36" y2="174" stroke="#10b981" strokeWidth="1.2" />
+            <text x="19" y="177" fill="#10b981" textAnchor="end">
+              20
+            </text>
+
+            <line x1="26" y1="210" x2="36" y2="210" stroke="#64748b" strokeWidth="1" />
+            <text x="21" y="213" fill="#64748b" textAnchor="end">
+              0
+            </text>
+          </g>
+
+          <g stroke="#334155" strokeWidth="0.5" opacity="0.7">
+            <line x1="30" y1="48" x2="36" y2="48" />
+            <line x1="30" y1="84" x2="36" y2="84" />
+            <line x1="30" y1="120" x2="36" y2="120" />
+            <line x1="30" y1="156" x2="36" y2="156" />
+            <line x1="30" y1="192" x2="36" y2="192" />
+          </g>
+
+          <rect x="42" y="22" width="6" height="195" rx="3" fill="#020617" stroke="#1e293b" strokeWidth="0.5" />
+
+          <rect
+            x="43.5"
+            y={mercuryY}
+            width="3"
+            height={Math.max(0, mercuryHeight)}
+            rx="1"
+            fill={`url(#${mercuryColorId})`}
+            filter={glowFilterId}
+            style={{ transition: "y 1.2s cubic-bezier(0.19, 1, 0.22, 1), height 1.2s cubic-bezier(0.19, 1, 0.22, 1)" }}
+          />
+
+          {mercuryHeight > 0 ? (
+            <circle
+              cx="45"
+              cy={mercuryY}
+              r="1.5"
+              fill="#ffffff"
+              opacity="0.8"
+              style={{ transition: "cy 1.2s cubic-bezier(0.19, 1, 0.22, 1)" }}
+            />
+          ) : null}
+
+          <rect x="42" y="22" width="6" height="195" rx="3" fill="url(#glassReflection)" pointerEvents="none" />
+
+          <circle cx="45" cy="242" r="14" fill="#020617" stroke="#1e293b" strokeWidth="0.8" />
+          <circle
+            cx="45"
+            cy="242"
+            r="11.5"
+            fill={`url(#${bulbColorId})`}
+            filter={glowFilterId}
+            style={{ transition: "fill 1.2s ease-in-out" }}
+          />
+          <circle cx="45" cy="242" r="11.5" fill="url(#glassReflection)" pointerEvents="none" />
+          <circle cx="41.5" cy="238.5" r="3" fill="#ffffff" opacity="0.55" pointerEvents="none" />
+        </svg>
+      </div>
+
+      <div className="text-center mt-3 z-10 font-mono">
+        <span className={`text-2xl font-black tracking-tighter tabular-nums ${indicatorColor}`}>
+          {clamped.toFixed(1)}%
+        </span>
+        {overbought ? (
+          <div className="text-[8px] text-rose-400 font-bold uppercase tracking-widest mt-0.5 animate-pulse">
+            Overbought
+          </div>
+        ) : oversold ? (
+          <div className="text-[8px] text-emerald-400 font-bold uppercase tracking-widest mt-0.5 animate-pulse">
+            Oversold
+          </div>
+        ) : (
+          <div className="text-[8px] text-slate-500 uppercase tracking-widest mt-0.5">Neutral</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type EquilibriumRailProps = {
+  label: string;
+  upVal: number;
+  dnVal: number;
+  upExtreme: boolean;
+  dnExtreme: boolean;
+};
+
+function EquilibriumRail({ label, upVal, dnVal, upExtreme, dnExtreme }: EquilibriumRailProps) {
+  const total = upVal + dnVal || 1;
+  const upPercent = (upVal / total) * 100;
+
+  return (
+    <div className="bg-[#090d16]/30 border border-slate-900/40 rounded-lg p-3 flex flex-col gap-2 relative overflow-hidden">
+      {dnExtreme ? (
+        <div className="absolute inset-0 pointer-events-none opacity-[0.03] bg-[repeating-linear-gradient(45deg,#f43f5e,#f43f5e_10px,#000_10px,#000_20px)]" />
+      ) : null}
+      {upExtreme ? (
+        <div className="absolute inset-0 pointer-events-none opacity-[0.03] bg-[repeating-linear-gradient(45deg,#10b981,#10b981_10px,#000_10px,#000_20px)]" />
+      ) : null}
+
+      <div className="flex justify-between items-center select-none">
+        <span className="text-[9px] font-mono font-bold uppercase tracking-widest text-slate-400">{label}</span>
+        {dnExtreme ? (
+          <span className="text-[8px] font-mono text-rose-400 font-bold bg-rose-950/50 px-1 rounded animate-pulse">
+            CAPITULATION
+          </span>
+        ) : upExtreme ? (
+          <span className="text-[8px] font-mono text-emerald-400 font-bold bg-emerald-950/50 px-1 rounded animate-pulse">
+            CLIMAX
+          </span>
+        ) : (
+          <span className="text-[8px] font-mono text-slate-600">BALANCED</span>
+        )}
+      </div>
+
+      <div className="flex justify-between items-baseline font-mono select-none">
+        <span
+          className={`text-sm font-black transition-colors ${
+            upExtreme ? "text-emerald-400 drop-shadow-[0_0_6px_rgba(16,185,129,0.3)]" : "text-slate-400"
+          }`}
+        >
+          {upVal} <span className="text-[8px] font-medium text-slate-600">UP</span>
+        </span>
+        <span
+          className={`text-sm font-black transition-colors ${
+            dnExtreme ? "text-rose-400 drop-shadow-[0_0_6px_rgba(244,63,94,0.3)]" : "text-slate-400"
+          }`}
+        >
+          {dnVal} <span className="text-[8px] font-medium text-slate-600">DN</span>
+        </span>
+      </div>
+
+      <div className="relative w-full h-2.5 bg-slate-950 border border-slate-800/80 rounded-full flex items-center shadow-inner">
+        <div className="absolute left-1/2 -translate-x-1/2 w-[2px] h-full bg-slate-700/50 z-10" />
+        <div
+          className={`h-full rounded-full transition-all duration-700 ease-out opacity-30 ${
+            upPercent > 50 ? "bg-emerald-500" : "bg-rose-500"
+          }`}
+          style={{ width: `${upPercent}%` }}
+        />
+        <div
+          className={`absolute w-3 h-3 rounded-full border border-white/40 shadow-md transition-all duration-700 ease-out -translate-x-1/2 z-20 ${
+            upPercent > 60
+              ? "bg-emerald-400 shadow-[0_0_8px_#10b981]"
+              : upPercent < 40
+                ? "bg-rose-400 shadow-[0_0_8px_#f43f5e]"
+                : "bg-slate-400"
+          }`}
+          style={{ left: `${upPercent}%` }}
+        />
+      </div>
+    </div>
+  );
 }
 
 export default function CockpitSection() {
   const [payload, setPayload] = useState<BreadthPayload | null>(null);
-  const [terminalHealth, setTerminalHealth] = useState<TerminalHealth>('offline');
+  const [terminalHealth, setTerminalHealth] = useState<TerminalHealth>("offline");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     Promise.all([
-      fetchJson<BreadthPayload>('/api/breadth?limit=10'),
-      fetchJson<HealthReport>('/api/health?quick=1').catch(() => null),
+      fetchJson<BreadthPayload>("/api/breadth?limit=60"),
+      fetchJson<HealthReport>("/api/health?quick=1").catch(() => null),
     ])
       .then(([breadth, health]) => {
         setPayload(breadth);
@@ -85,6 +436,21 @@ export default function CockpitSection() {
       })
       .catch(() => setLoading(false));
   }, []);
+
+  const chronologicalData = useMemo(() => {
+    if (!payload?.rows) return [];
+    return [...payload.rows].reverse();
+  }, [payload]);
+
+  const q25LineData = useMemo(
+    () =>
+      chronologicalData.map((row) => ({
+        date: row.raw_date || row.date || "",
+        up25: +(row.c5_num ?? 0),
+        dn25: +(row.c6_num ?? 0),
+      })),
+    [chronologicalData],
+  );
 
   if (loading) {
     return (
@@ -96,18 +462,14 @@ export default function CockpitSection() {
     );
   }
 
-  // ── 提取数据 ────────────────────────────────────────────────────────
-  const latestRow: any = (payload?.rows || [])[0] || {};
-  
-  // Primary
+  const latestRow: BreadthRow = (payload?.rows || [])[0] || {};
+
   const up4 = +(latestRow.c1_num ?? 0);
   const dn4 = +(latestRow.c2_num ?? 0);
   const ratio5 = +(latestRow.c3_num ?? 0);
   const ratio10 = +(latestRow.c4_num ?? 0);
   const up25q = +(latestRow.c5_num ?? 0);
   const dn25q = +(latestRow.c6_num ?? 0);
-
-  // Secondary
   const up25m = +(latestRow.c7_num ?? 0);
   const dn25m = +(latestRow.c8_num ?? 0);
   const up50m = +(latestRow.c9_num ?? 0);
@@ -116,89 +478,34 @@ export default function CockpitSection() {
   const dn13 = +(latestRow.c12_num ?? 0);
   const t2108 = +(latestRow.c14_num ?? 0);
 
-  // ── 逻辑判定引擎 ──────────────────────────────────────────────────────
-
-  // 1. Quarter Phase (主基调)
-  const isQuarterBull = up25q > dn25q;
-  const quarterExtremeUp = up25q < 200; // Extremely bullish (Reversal)
-  const quarterExtremeDn = dn25q < 200; // Extremely bearish (Top forming in 2-6 weeks)
-  const _quarterWatchReversal = up25q < 500 && up25q >= 200;
-  void _quarterWatchReversal;
-
-  // 2. Daily 4% (日内压力)
-  const getDailyStatus = (val: number, type: 'up' | 'dn') => {
-    if (val >= 1000) return { label: 'EXTREME', color: type === 'up' ? 'text-emerald-400 bg-emerald-950/40 border-emerald-500' : 'text-rose-400 bg-rose-950/40 border-rose-500' };
-    if (val >= 500) return { label: 'VERY HIGH', color: type === 'up' ? 'text-emerald-500 bg-emerald-950/20' : 'text-rose-500 bg-rose-950/20' };
-    if (type === 'up' && val >= 300) return { label: 'HIGH', color: 'text-emerald-600' };
-    return { label: 'NORMAL', color: 'text-slate-500' };
-  };
-  const up4Status = getDailyStatus(up4, 'up');
-  const dn4Status = getDailyStatus(dn4, 'dn');
-
-  // 3. Ratio 10D/5D (趋势推力)
-  const getRatioStatus = (val: number) => {
-    if (val >= 2.0) return { label: 'BULL THRUST (Long)', color: 'text-emerald-400 border-emerald-500/50 bg-emerald-950/30' };
-    if (val <= 0.5) return { label: 'BEAR THRUST (Short)', color: 'text-rose-400 border-rose-500/50 bg-rose-950/30' };
-    return { label: 'NEUTRAL', color: 'text-slate-500 border-slate-800' };
-  };
-  const ratio10Status = getRatioStatus(ratio10);
-  const ratio5Status = getRatioStatus(ratio5);
-
-  // 4. Secondary 50% Month (波段极值)
-  const get50mStatus = (val: number, type: 'up' | 'dn') => {
-    if (type === 'up') {
-      if (val >= 20) return { label: 'BEARISH (Correction)', color: 'text-rose-400' };
-      if (val < 3) return { label: 'BULLISH (Extreme Bearishness)', color: 'text-emerald-400' };
-    } else {
-      if (val >= 20) return { label: 'BEARISH (Reflex Rally)', color: 'text-amber-400' };
-    }
-    return { label: '-', color: 'text-slate-600' };
-  };
-
-  // 5. T2108 (情绪乖离)
-  const getT2108Status = (val: number) => {
-    if (val >= 80) return { label: 'OVERBOUGHT', color: 'text-rose-400 bg-rose-950/30 border-rose-500/50' };
-    if (val <= 20) return { label: 'OVERSOLD', color: 'text-emerald-400 bg-emerald-950/30 border-emerald-500/50' };
-    return { label: 'NEUTRAL', color: 'text-slate-500 border-transparent' };
-  };
-  const t2108Status = getT2108Status(t2108);
-
-  // ── 辅助渲染组件 ──────────────────────────────────────────────────────
-  const ProgressBar = ({ up, dn }: { up: number; dn: number }) => {
-    const total = up + dn || 1;
-    const upPct = (up / total) * 100;
-    return (
-      <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden flex">
-        <div className="h-full bg-emerald-500" style={{ width: `${upPct}%` }} />
-        <div className="h-full bg-rose-500" style={{ width: `${100 - upPct}%` }} />
-      </div>
-    );
-  };
-
-  const snapshotDate = latestRow.raw_date || latestRow.date || payload?.coverage?.last_date || 'AWAITING DATA';
+  const snapshotDate =
+    latestRow.raw_date || latestRow.date || payload?.coverage?.last_date || "AWAITING DATA";
   const healthUi = HEALTH_UI[terminalHealth];
+  const isBullishPhase = up25q > dn25q;
 
   return (
     <div className="space-y-6 mb-8 font-sans">
       <div className="flex flex-col md:flex-row justify-between items-end mb-6 border-b border-slate-800 pb-4">
         <div>
           <h1 className="text-xl font-black tracking-widest text-slate-100 flex items-center gap-2">
-            <Target className="text-cyan-500" /> STOCKBEE BREADTH TERMINAL
+            <Target className="text-cyan-500" /> STOCKBEE TACTICAL RADAR
           </h1>
           <p className="text-[10px] text-slate-500 uppercase mt-1 font-mono">
-            Data Source: Google Sheet Matrix • Automated Sync
-            {payload?.coverage?.row_count ? ` • ${payload.coverage.row_count.toLocaleString()} rows` : ''}
+            Exhaustion &amp; Divergence Detection System
+            {payload?.coverage?.row_count ? ` · ${payload.coverage.row_count.toLocaleString()} rows` : ""}
           </p>
         </div>
 
-        <div className="flex items-center gap-4 mt-4 md:mt-0">
+        <div className="flex items-center gap-4 mt-4 md:mt-0 font-mono">
           <div className="text-right">
-            <div className="text-[10px] text-slate-500 font-mono uppercase tracking-widest">Latest Snapshot</div>
+            <div className="text-[10px] text-slate-500 font-mono uppercase tracking-widest">
+              Latest Snapshot
+            </div>
             <div className="text-sm font-mono font-bold text-slate-300">{snapshotDate}</div>
           </div>
           <div className={`flex items-center gap-2 border px-3 py-1.5 rounded-md ${healthUi.wrap}`}>
             <div
-              className={`w-2 h-2 rounded-full ${healthUi.dot} ${healthUi.pulse ? 'animate-pulse' : ''}`}
+              className={`w-2 h-2 rounded-full ${healthUi.dot} ${healthUi.pulse ? "animate-pulse" : ""}`}
             />
             <span className={`text-[10px] font-mono font-bold uppercase tracking-widest ${healthUi.text}`}>
               {healthUi.label}
@@ -207,158 +514,202 @@ export default function CockpitSection() {
         </div>
       </div>
 
-      {/* ── 主基调 Banner (Quarter Phase) ── */}
-      <div className={`rounded-xl border px-6 py-5 flex justify-between items-center ${isQuarterBull ? 'bg-emerald-950/20 border-emerald-900/50' : 'bg-rose-950/20 border-rose-900/50'}`}>
-        <div className="flex items-center gap-4">
-          <div className={`p-3 rounded-lg border ${isQuarterBull ? 'bg-emerald-900/30 border-emerald-500/30 text-emerald-400' : 'bg-rose-900/30 border-rose-500/30 text-rose-400'}`}>
-            {isQuarterBull ? <Anchor size={24} /> : <ShieldAlert size={24} />}
-          </div>
-          <div>
-            <div className="text-[10px] font-mono tracking-widest text-slate-400 uppercase mb-1">Primary Market Phase</div>
-            <h2 className={`text-2xl font-black tracking-widest ${isQuarterBull ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {isQuarterBull ? 'BULLISH PHASE' : 'BEARISH PHASE'}
-            </h2>
-          </div>
-        </div>
-        <div className="text-right flex items-center gap-6">
-          <div className="flex flex-col items-end">
-            <span className="text-[10px] uppercase font-mono text-emerald-500">Up 25% Qtr</span>
-            <span className={`text-xl font-mono font-black ${quarterExtremeUp ? 'text-amber-400 animate-pulse' : 'text-slate-200'}`}>
-              {up25q}
-              {quarterExtremeUp && <span className="text-[10px] ml-2 bg-amber-500/20 px-1 rounded">EXTREME</span>}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-stretch">
+        {/* Primary — xl:col-span-7 */}
+        <div className="xl:col-span-7 bg-[#0b0f19] border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col gap-6">
+          <div className="flex justify-between items-center border-b border-slate-800 pb-3 select-none">
+            <h3 className="text-xs font-black text-slate-300 uppercase tracking-widest font-mono flex items-center gap-2">
+              <Activity size={14} className="text-cyan-500" /> Primary Breadth Indicators
+            </h3>
+            <span className="text-[8px] font-mono text-slate-500 bg-slate-900 px-2 py-0.5 rounded">
+              LONG &amp; SHORT MOMENTUM THRUSTS
             </span>
           </div>
-          <div className="w-px h-8 bg-slate-800" />
-          <div className="flex flex-col items-start">
-            <span className="text-[10px] uppercase font-mono text-rose-500">Down 25% Qtr</span>
-            <span className={`text-xl font-mono font-black ${quarterExtremeDn ? 'text-amber-400 animate-pulse' : 'text-slate-200'}`}>
-              {dn25q}
-              {quarterExtremeDn && <span className="text-[10px] ml-2 bg-amber-500/20 px-1 rounded">EXTREME</span>}
-            </span>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 flex-1">
+            <div className="flex flex-col gap-4 justify-between">
+              <div className="flex items-center gap-4">
+                <div className="w-20 shrink-0 select-none">
+                  <div className="text-[9px] font-mono text-slate-500 uppercase">10D Ratio</div>
+                  <div
+                    className={`text-base font-black font-mono ${ratio10 >= 2 ? "text-amber-400" : "text-slate-300"}`}
+                  >
+                    {ratio10.toFixed(2)}
+                  </div>
+                </div>
+                <div className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1">
+                  <MicroSparkline data={chronologicalData} dataKey="c4_num" threshold={2.0} color="#fbbf24" />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-4">
+                <div className="w-20 shrink-0 select-none">
+                  <div className="text-[9px] font-mono text-slate-500 uppercase">5D Ratio</div>
+                  <div
+                    className={`text-base font-black font-mono ${ratio5 >= 2 ? "text-amber-400" : "text-slate-300"}`}
+                  >
+                    {ratio5.toFixed(2)}
+                  </div>
+                </div>
+                <div className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1">
+                  <MicroSparkline data={chronologicalData} dataKey="c3_num" threshold={2.0} color="#fbbf24" />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-4 pt-2 border-t border-slate-800/50">
+                <div className="w-20 shrink-0 select-none">
+                  <div className="text-[9px] font-mono text-emerald-500 font-bold uppercase">4% UP</div>
+                  <div
+                    className={`text-base font-black font-mono ${
+                      up4 >= UP4_SPARKLINE_THRESHOLD ? "text-emerald-400" : "text-slate-300"
+                    }`}
+                  >
+                    {up4}
+                  </div>
+                </div>
+                <div className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1">
+                  <MicroSparkline
+                    data={chronologicalData}
+                    dataKey="c1_num"
+                    threshold={UP4_SPARKLINE_THRESHOLD}
+                    color="#10b981"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-4">
+                <div className="w-20 shrink-0 select-none">
+                  <div className="text-[9px] font-mono text-rose-500 font-bold uppercase">4% DN</div>
+                  <div
+                    className={`text-base font-black font-mono ${
+                      dn4 >= DN4_SPARKLINE_THRESHOLD ? "text-rose-400" : "text-slate-300"
+                    }`}
+                  >
+                    {dn4}
+                  </div>
+                </div>
+                <div className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1">
+                  <MicroSparkline
+                    data={chronologicalData}
+                    dataKey="c2_num"
+                    threshold={DN4_SPARKLINE_THRESHOLD}
+                    color="#f43f5e"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div
+              className={`rounded-lg border p-3 flex flex-col gap-2 transition-all duration-1000 ${
+                isBullishPhase
+                  ? "bg-emerald-950/10 border-emerald-900/40 shadow-[inset_0_0_15px_rgba(16,185,129,0.05)]"
+                  : "bg-rose-950/10 border-rose-900/40 shadow-[inset_0_0_15px_rgba(244,63,94,0.05)]"
+              }`}
+            >
+              <div className="flex justify-between items-center select-none">
+                <div>
+                  <span className="text-[9px] font-mono font-black text-slate-500 uppercase tracking-widest block">
+                    Quarterly Momentum
+                  </span>
+                  <span
+                    className={`text-xs font-mono font-black ${isBullishPhase ? "text-emerald-400" : "text-rose-400"}`}
+                  >
+                    {isBullishPhase ? "BULL RUNNING" : "BEAR RUNNING"}
+                  </span>
+                </div>
+                <div className="text-right text-[10px] font-mono font-bold select-none">
+                  <span className="text-emerald-400">{up25q}U</span>
+                  <span className="text-slate-600 mx-1">/</span>
+                  <span className="text-rose-400">{dn25q}D</span>
+                </div>
+              </div>
+
+              <div className="flex-1 min-h-[110px] w-full bg-black/40 rounded border border-slate-900 overflow-hidden relative">
+                <div
+                  className="absolute inset-0 pointer-events-none opacity-[0.02]"
+                  style={{
+                    backgroundImage: isBullishPhase
+                      ? "radial-gradient(#10b981 1px, transparent 1px)"
+                      : "radial-gradient(#f43f5e 1px, transparent 1px)",
+                    backgroundSize: "12px 12px",
+                  }}
+                />
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={q25LineData} margin={{ top: 10, right: 2, left: 2, bottom: 2 }}>
+                    <YAxis domain={["auto", "auto"]} hide />
+                    <defs>
+                      <linearGradient id="colorUp" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#10b981" stopOpacity={isBullishPhase ? 0.2 : 0.02} />
+                        <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                      </linearGradient>
+                      <linearGradient id="colorDn" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#f43f5e" stopOpacity={!isBullishPhase ? 0.2 : 0.02} />
+                        <stop offset="95%" stopColor="#f43f5e" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <Area
+                      type="monotone"
+                      dataKey="up25"
+                      stroke={isBullishPhase ? "#10b981" : "#334155"}
+                      strokeWidth={isBullishPhase ? 2 : 1}
+                      fillOpacity={1}
+                      fill="url(#colorUp)"
+                      isAnimationActive={false}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="dn25"
+                      stroke={!isBullishPhase ? "#f43f5e" : "#334155"}
+                      strokeWidth={!isBullishPhase ? 2 : 1}
+                      fillOpacity={1}
+                      fill="url(#colorDn)"
+                      isAnimationActive={false}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        
-        {/* ================= PRIMARY INDICATORS ================= */}
-        <div className="bg-[#0b0f19] border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col gap-5">
-          <h3 className="text-xs font-black text-slate-300 uppercase tracking-widest font-mono border-b border-slate-800 pb-2 flex items-center gap-2">
-            <Target size={14} className="text-cyan-500" /> Primary Breadth Indicators
-          </h3>
-
-          {/* Daily 4% */}
-          <div className="space-y-3">
-            <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest">Daily Pressure (4% Plus/Down)</div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-800/80">
-                <div className="flex justify-between items-start mb-1">
-                  <span className="text-emerald-500 font-bold text-sm">UP 4%</span>
-                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${up4Status.color}`}>{up4Status.label}</span>
-                </div>
-                <div className="text-2xl font-mono font-black text-slate-200">{up4}</div>
-              </div>
-              <div className="bg-slate-900/50 rounded-lg p-3 border border-slate-800/80">
-                <div className="flex justify-between items-start mb-1">
-                  <span className="text-rose-500 font-bold text-sm">DN 4%</span>
-                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${dn4Status.color}`}>{dn4Status.label}</span>
-                </div>
-                <div className="text-2xl font-mono font-black text-slate-200">{dn4}</div>
-              </div>
-            </div>
+        {/* Secondary — xl:col-span-3 */}
+        <div className="xl:col-span-3 bg-[#0d1117] border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col gap-4">
+          <div className="flex justify-between items-center border-b border-slate-800 pb-3 select-none">
+            <h3 className="text-xs font-black text-slate-300 uppercase tracking-widest font-mono flex items-center gap-2">
+              <Zap size={14} className="text-amber-500" /> Tactical Indicators
+            </h3>
+            <span className="text-[8px] text-slate-600 font-mono uppercase">Equilibrium</span>
           </div>
 
-          {/* Cumulative Ratio */}
-          <div className="space-y-3 pt-2 border-t border-slate-800/50">
-            <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest">Cumulative Thrust Ratio</div>
-            <div className="flex gap-4">
-              <div className={`flex-1 rounded-lg p-3 border ${ratio10Status.color}`}>
-                <div className="text-[10px] opacity-70 uppercase font-mono mb-1">10 Day Ratio</div>
-                <div className="flex items-baseline justify-between">
-                  <span className="text-2xl font-mono font-black">{ratio10.toFixed(2)}</span>
-                  <span className="text-[9px] font-bold tracking-wider">{ratio10Status.label}</span>
-                </div>
-              </div>
-              <div className={`flex-1 rounded-lg p-3 border ${ratio5Status.color}`}>
-                <div className="text-[10px] opacity-70 uppercase font-mono mb-1">5 Day Ratio</div>
-                <div className="flex items-baseline justify-between">
-                  <span className="text-2xl font-mono font-black">{ratio5.toFixed(2)}</span>
-                  <span className="text-[9px] font-bold tracking-wider">{ratio5Status.label}</span>
-                </div>
-              </div>
-            </div>
+          <div className="flex flex-col gap-3 justify-center flex-1">
+            <EquilibriumRail
+              label="13% / 34d Fast Swing"
+              upVal={up13}
+              dnVal={dn13}
+              upExtreme={up13 >= 1500}
+              dnExtreme={dn13 >= 1500}
+            />
+            <EquilibriumRail
+              label="25% / Month Medium"
+              upVal={up25m}
+              dnVal={dn25m}
+              upExtreme={up25m >= 400}
+              dnExtreme={dn25m >= 400}
+            />
+            <EquilibriumRail
+              label="50% / Month Exhaustion"
+              upVal={up50m}
+              dnVal={dn50m}
+              upExtreme={up50m >= 15}
+              dnExtreme={dn50m >= 15}
+            />
           </div>
         </div>
 
-        {/* ================= SECONDARY INDICATORS ================= */}
-        <div className="bg-[#0b0f19] border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col gap-5">
-          <h3 className="text-xs font-black text-slate-300 uppercase tracking-widest font-mono border-b border-slate-800 pb-2 flex items-center gap-2">
-            <Zap size={14} className="text-amber-500" /> Secondary / Tactical Indicators
-          </h3>
-
-          <div className="grid grid-cols-2 gap-4">
-            {/* Fast 34/13 Trend */}
-            <div className="col-span-2 bg-slate-900/30 rounded-lg p-3 border border-slate-800">
-              <div className="flex justify-between text-[10px] font-mono text-slate-500 uppercase mb-2">
-                <span>34/13 Fast Trend</span>
-                <span className={up13 > dn13 ? 'text-emerald-500' : 'text-rose-500'}>{up13 > dn13 ? 'BULL' : 'BEAR'}</span>
-              </div>
-              <ProgressBar up={up13} dn={dn13} />
-              <div className="flex justify-between text-xs font-mono font-bold mt-1">
-                <span className="text-emerald-400">{up13}</span>
-                <span className="text-rose-400">{dn13}</span>
-              </div>
-            </div>
-
-            {/* Monthly 25% */}
-            <div className="bg-slate-900/30 rounded-lg p-3 border border-slate-800">
-              <div className="text-[10px] font-mono text-slate-500 uppercase mb-2 text-center">Month 25%</div>
-              <div className="flex justify-between px-2">
-                <div className="text-center">
-                  <div className="text-[9px] text-emerald-500/70">UP</div>
-                  <div className="text-lg font-mono font-bold text-slate-300">{up25m}</div>
-                </div>
-                <div className="w-px bg-slate-800" />
-                <div className="text-center">
-                  <div className="text-[9px] text-rose-500/70">DN</div>
-                  <div className="text-lg font-mono font-bold text-slate-300">{dn25m}</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Monthly 50% */}
-            <div className="bg-slate-900/30 rounded-lg p-3 border border-slate-800">
-              <div className="text-[10px] font-mono text-slate-500 uppercase mb-2 text-center">Month 50% Extremes</div>
-              <div className="flex justify-between px-2">
-                <div className="text-center">
-                  <div className="text-[9px] text-emerald-500/70 mb-0.5">UP</div>
-                  <div className="text-lg font-mono font-bold text-slate-300 leading-none">{up50m}</div>
-                  <div className={`text-[8px] font-bold mt-1 ${get50mStatus(up50m, 'up').color}`}>{get50mStatus(up50m, 'up').label}</div>
-                </div>
-                <div className="w-px bg-slate-800" />
-                <div className="text-center">
-                  <div className="text-[9px] text-rose-500/70 mb-0.5">DN</div>
-                  <div className="text-lg font-mono font-bold text-slate-300 leading-none">{dn50m}</div>
-                  <div className={`text-[8px] font-bold mt-1 ${get50mStatus(dn50m, 'dn').color}`}>{get50mStatus(dn50m, 'dn').label}</div>
-                </div>
-              </div>
-            </div>
-            
-            {/* T2108 Alert */}
-            <div className={`col-span-2 rounded-lg p-3 border flex justify-between items-center ${t2108Status.color}`}>
-              <div className="flex items-center gap-2">
-                <BarChart2 size={16} className="opacity-70" />
-                <span className="text-[10px] font-mono uppercase tracking-widest opacity-80">T2108 Oscillator</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="text-[10px] font-bold tracking-widest">{t2108Status.label}</span>
-                <span className="text-2xl font-mono font-black">{t2108}%</span>
-              </div>
-            </div>
-            
-          </div>
+        {/* T2108 — xl:col-span-2 */}
+        <div className="xl:col-span-2">
+          <CustomT2108Thermometer value={t2108} />
         </div>
-
       </div>
     </div>
   );

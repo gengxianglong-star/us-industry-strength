@@ -66,7 +66,7 @@ def run_daily_pipeline(
 
     try:
         _log(opts, "正在抓取 Finviz 行业数据…")
-        rows = fetch_industries(config)
+        rows = fetch_industries(config, storage=storage)
         scored = score_industries(rows, config)
         top = filter_top_strong(scored, config)
         storage.save_snapshot(snapshot_date, scored)

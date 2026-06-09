@@ -3,8 +3,6 @@ let currentRsSnapshot = null;
 let autoRefreshBusy = false;
 let automationTimer = null;
 
-const NEW_STOCK_COHORT_LABEL = { M: "Monthly", Q: "Quarter", H: "Half", "3Q": "3Q" };
-
 const LEGACY_TAG_LABEL = {
   "核心强势": "Core",
   "不一致": "Mixed",
@@ -25,39 +23,6 @@ const LEGACY_TAG_LABEL = {
 };
 
 const HIDDEN_TAGS = new Set(["Core", "Strong PB", "Mixed", "核心强势", "强势回调", "不一致"]);
-
-const thresholdPresets = {
-  conservative: {
-    tier_a_score: 0.85,
-    tier_b_score: 0.72,
-    core_rank_max: 20,
-    max_rank_spread: 45,
-    top_list_count: 8,
-    acceleration_rank_delta: 8,
-    pullback_midterm_rank_max: 22,
-    pullback_week_rank_min: 55,
-  },
-  balanced: {
-    tier_a_score: 0.8,
-    tier_b_score: 0.66,
-    core_rank_max: 25,
-    max_rank_spread: 55,
-    top_list_count: 10,
-    acceleration_rank_delta: 6,
-    pullback_midterm_rank_max: 28,
-    pullback_week_rank_min: 45,
-  },
-  aggressive: {
-    tier_a_score: 0.74,
-    tier_b_score: 0.6,
-    core_rank_max: 35,
-    max_rank_spread: 70,
-    top_list_count: 12,
-    acceleration_rank_delta: 4,
-    pullback_midterm_rank_max: 35,
-    pullback_week_rank_min: 35,
-  },
-};
 
 function pct(v) {
   const sign = v > 0 ? "+" : "";
@@ -220,56 +185,44 @@ function renderSummary(data, dashboard = null) {
   `;
 }
 
-function renderRsTable(payload) {
-  const tbody = document.querySelector("#rsTable tbody");
-  if (!tbody) return;
-  const rows = payload?.rows || [];
-  if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="hint">No RS data yet — fills in after the daily run.</td></tr>';
-    return;
-  }
-  tbody.innerHTML = rows
-    .map(
-      (row) => `<tr>
-        <td><a class="industry-link" href="https://finviz.com/quote.ashx?t=${encodeURIComponent(row.symbol)}" target="_blank" rel="noreferrer">${row.symbol}</a></td>
-        <td>${row.rs_score.toFixed(3)}</td>
-        <td>${row.tier}</td>
-        <td class="${row.perf_w >= 0 ? "pos" : "neg"}">${pct(row.perf_w)}</td>
-        <td class="${row.perf_m >= 0 ? "pos" : "neg"}">${pct(row.perf_m)}</td>
-        <td class="${row.perf_q >= 0 ? "pos" : "neg"}">${pct(row.perf_q)}</td>
-        <td class="${row.perf_h >= 0 ? "pos" : "neg"}">${pct(row.perf_h)}</td>
-        <td class="${row.perf_y >= 0 ? "pos" : "neg"}">${pct(row.perf_y)}</td>
-        <td>${row.rank_w}/${row.rank_m}/${row.rank_q}/${row.rank_h}/${row.rank_y}</td>
-      </tr>`
-    )
-    .join("");
+function watchlistIndustryLabel(row) {
+  const map = new Map((currentSnapshot?.industries || []).map((i) => [i.industry_key, i.name]));
+  return (row.industries || []).map((k) => map.get(k) || k).filter(Boolean).join(" · ");
 }
 
-function renderWatchlistTable(payload) {
-  const tbody = document.querySelector("#watchlistTable tbody");
-  if (!tbody) return;
-  const industryNameMap = new Map(
-    ((currentSnapshot?.industries || []).map((i) => [i.industry_key, i.name]))
+function renderCandleSvg(bars) {
+  const slice = (bars || []).filter(
+    (b) => Number.isFinite(b.o) && Number.isFinite(b.h) && Number.isFinite(b.l) && Number.isFinite(b.c),
   );
-  const rows = payload?.watchlist || [];
-  if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="hint">No watchlist yet — built after daily cross-screen.</td></tr>`;
-    return;
+  if (slice.length < 2) {
+    return '<div class="watchlist-chart-placeholder">Chart unavailable</div>';
   }
-  tbody.innerHTML = rows
-    .map(
-      (row) => `<tr>
-        <td><a class="industry-link" href="https://finviz.com/quote.ashx?t=${encodeURIComponent(row.symbol)}" target="_blank" rel="noreferrer">${row.symbol}</a></td>
-        <td>${row.rs_rank}</td>
-        <td>${row.rs_score.toFixed(3)}</td>
-        <td>${(row.industries || []).map((k) => industryNameMap.get(k) || k).join(" / ")}</td>
-      </tr>`
-    )
+  const W = 400;
+  const H = 160;
+  const PAD = 6;
+  const lows = slice.map((b) => b.l);
+  const highs = slice.map((b) => b.h);
+  const min = Math.min(...lows);
+  const max = Math.max(...highs);
+  const range = max - min || 1;
+  const innerW = W - PAD * 2;
+  const innerH = H - PAD * 2;
+  const slot = innerW / slice.length;
+  const y = (price) => PAD + ((max - price) / range) * innerH;
+  const candles = slice
+    .map((bar, i) => {
+      const cx = PAD + i * slot + slot / 2;
+      const bodyTop = y(Math.max(bar.o, bar.c));
+      const bodyBot = y(Math.min(bar.o, bar.c));
+      const bodyH = Math.max(bodyBot - bodyTop, 0.8);
+      const up = bar.c >= bar.o;
+      const color = up ? "#34d399" : "#f87171";
+      const bodyW = Math.max(slot * 0.55, 1);
+      return `<line x1="${cx}" y1="${y(bar.h)}" x2="${cx}" y2="${y(bar.l)}" stroke="${color}" stroke-width="1"></line>
+        <rect x="${cx - bodyW / 2}" y="${bodyTop}" width="${bodyW}" height="${bodyH}" fill="${color}"></rect>`;
+    })
     .join("");
-}
-
-function finvizDailyChartUrl(symbol) {
-  return `https://charts2.finviz.com/chart.ashx?t=${encodeURIComponent(symbol)}&ty=c&ta=1&p=d&s=l&theme=dark`;
+  return `<svg class="watchlist-chart-img" viewBox="0 0 ${W} ${H}" role="img" aria-hidden="true">${candles}</svg>`;
 }
 
 function renderWatchlistCharts(payload) {
@@ -283,148 +236,22 @@ function renderWatchlistCharts(payload) {
   container.innerHTML = rows
     .map((row) => {
       const symbol = row.symbol;
+      const industry = watchlistIndustryLabel(row);
+      const industryLine = industry
+        ? `<p class="watchlist-chart-industry">${industry}</p>`
+        : "";
       return `<article class="watchlist-chart-card">
         <a href="https://finviz.com/quote.ashx?t=${encodeURIComponent(symbol)}" target="_blank" rel="noreferrer">
-          <img class="watchlist-chart-img" src="${finvizDailyChartUrl(symbol)}" alt="${symbol} daily chart" loading="lazy" />
+          <header class="watchlist-chart-header">
+            <span class="watchlist-chart-symbol">${symbol}</span>
+            <span class="watchlist-chart-rs">RS ${Number(row.rs_score).toFixed(2)}</span>
+          </header>
+          ${industryLine}
+          ${renderCandleSvg(row.chart_bars)}
         </a>
       </article>`;
     })
     .join("");
-}
-
-function formatAdaptiveStop(reason) {
-  const labels = {
-    min_recovered: "min recovered",
-    no_retryable: "complete",
-    stall: "stalled",
-    max_passes: "max passes",
-  };
-  if (!reason) return "—";
-  return labels[reason] || reason;
-}
-
-function renderCoveragePanel(snapshot, rsPayload) {
-  const target = document.getElementById("coveragePanel");
-  if (!target) return;
-  const meta = snapshot?.rs_meta || rsPayload?.rs_meta;
-  if (!meta) {
-    target.innerHTML = '<span class="hint">Coverage: waiting on RS run</span>';
-    return;
-  }
-  const newStockRsCount =
-    (meta.new_stock_m_count ?? 0) +
-    (meta.new_stock_q_count ?? 0) +
-    (meta.new_stock_h_count ?? 0) +
-    (meta.new_stock_3q_count ?? 0);
-  const covered = (meta.computed_count ?? 0) + newStockRsCount;
-  const adaptiveLine =
-    Number(meta.adaptive_passes) > 0
-      ? `<span class="coverage-item">Adaptive RS: ${meta.adaptive_passes} passes · recovered +${meta.adaptive_recovered_total ?? 0} · stopped: ${formatAdaptiveStop(meta.adaptive_stop_reason)}</span>`
-      : "";
-  target.innerHTML = `
-    <span class="coverage-item">Universe ${meta.universe_count}</span>
-    <span class="coverage-item">Covered ${covered}</span>
-    <span class="coverage-item">Main RS ${meta.computed_count}</span>
-    <span class="coverage-item">New IPO RS ${newStockRsCount}</span>
-    <span class="coverage-item">New list ${meta.new_stock_leaderboard_count ?? 0}</span>
-    <span class="coverage-item">No bars ${meta.no_bars_count}</span>
-    ${adaptiveLine}
-  `;
-}
-
-function fmtPerf(v) {
-  if (v == null || !Number.isFinite(Number(v))) return "—";
-  return `${Number(v).toFixed(1)}%`;
-}
-
-function renderNewStockLeaderboard(payload) {
-  const tbody = document.querySelector("#newStockTable tbody");
-  if (!tbody) return;
-  const rows = payload?.new_stock_leaderboard || [];
-  if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="hint">No new-issue RS leaderboard yet</td></tr>';
-    return;
-  }
-  tbody.innerHTML = rows
-    .map((row) => {
-      const cohort = NEW_STOCK_COHORT_LABEL[row.cohort] || row.cohort;
-      return `<tr>
-        <td>${cohort}</td>
-        <td><a class="industry-link" href="https://finviz.com/quote.ashx?t=${encodeURIComponent(row.symbol)}" target="_blank" rel="noreferrer">${row.symbol}</a></td>
-        <td>${row.bar_count ?? "—"}</td>
-        <td>${row.rs_score.toFixed(3)}</td>
-        <td>${row.tier}</td>
-        <td class="${Number(row.perf_w) >= 0 ? "pos" : "neg"}">${fmtPerf(row.perf_w)}</td>
-        <td class="${Number(row.perf_m) >= 0 ? "pos" : "neg"}">${fmtPerf(row.perf_m)}</td>
-        <td class="${Number(row.perf_q) >= 0 ? "pos" : "neg"}">${fmtPerf(row.perf_q)}</td>
-        <td class="${Number(row.perf_h) >= 0 ? "pos" : "neg"}">${fmtPerf(row.perf_h)}</td>
-        <td class="${Number(row.perf_tq) >= 0 ? "pos" : "neg"}">${fmtPerf(row.perf_tq)}</td>
-      </tr>`;
-    })
-    .join("");
-}
-
-function renderStockPicks(row) {
-  if (row.stock_picks_error) {
-    return `<span class="hint error-text">${row.stock_picks_error}</span>`;
-  }
-  const tickers = row.stock_picks || [];
-  if (!tickers.length) {
-    const link = row.stock_screener_url
-      ? `<a class="industry-link" href="${row.stock_screener_url}" target="_blank" rel="noreferrer">Finviz</a>`
-      : "—";
-    return `<span class="hint">No hits ${link}</span>`;
-  }
-  return tickers
-    .map(
-      (t) =>
-        `<a class="ticker-chip" href="https://finviz.com/quote.ashx?t=${encodeURIComponent(t)}" target="_blank" rel="noreferrer">${t}</a>`
-    )
-    .join("");
-}
-
-
-function renderTickerList(row) {
-  const tickers = row.stock_picks || [];
-  if (row.stock_picks_error) {
-    return `<p class="hint error-text">${row.stock_picks_error}</p>`;
-  }
-  if (!tickers.length) {
-    const link = row.stock_screener_url
-      ? `<a class="industry-link" href="${row.stock_screener_url}" target="_blank" rel="noreferrer">Open in Finviz</a>`
-      : '';
-    return `<p class="hint">No hits ${link}</p>`;
-  }
-  return `<ul class="ticker-list">${tickers
-    .map(
-      (t) =>
-        `<li><a class="ticker-chip" href="https://finviz.com/quote.ashx?t=${encodeURIComponent(t)}" target="_blank" rel="noreferrer">${t}</a></li>`
-    )
-    .join('')}</ul>`;
-}
-
-function renderStrongCards(data) {
-  const container = document.getElementById('strongIndustryCards');
-  if (!container) return;
-  const top = getTopStrongIndustries(data);
-  container.innerHTML = top
-    .map(
-      (row, idx) => `
-      <article class="strong-card" data-key="${row.industry_key}">
-        <header class="strong-card-header">
-          <div class="strong-card-title-wrap">
-            <span class="strong-card-rank">#${idx + 1}</span>
-            <a class="industry-link strong-card-title" href="${row.finviz_url}" target="_blank" rel="noreferrer">${row.name}</a>
-          </div>
-          <div class="strong-card-right">
-            <span class="strong-card-hits">${(row.stock_picks || []).length} names</span>
-            <span class="strong-card-meta">Score ${row.score.toFixed(3)}</span>
-          </div>
-        </header>
-        ${renderTickerList(row)}
-      </article>`
-    )
-    .join('');
 }
 
 function renderCoreTable(data) {
@@ -481,16 +308,6 @@ function renderAllTable(data, filter = "") {
     .join("");
 }
 
-function enhanceHelpTips() {
-  document.querySelectorAll(".help-tip[data-tip]").forEach((el) => {
-    el.setAttribute("tabindex", "0");
-    el.setAttribute("role", "button");
-    if (!el.getAttribute("aria-label")) {
-      el.setAttribute("aria-label", el.getAttribute("data-tip") || "Help");
-    }
-  });
-}
-
 function setButtonBusy(btn, busy, busyLabel) {
   if (!btn) return;
   if (busy) {
@@ -514,37 +331,25 @@ async function loadDecisionView(date, snapshot = null) {
     ).catch(() => null),
   ]);
   currentSnapshot = snap;
-  renderSummary(snap);
+  if (rsWatch?.rs_meta) {
+    currentSnapshot = { ...snap, rs_meta: rsWatch.rs_meta };
+  }
+  renderSummary(currentSnapshot);
   renderCoreTable(snap);
   renderAllTable(snap);
-  renderStrongCards(snap);
-  if (rsWatch) {
-    currentRsSnapshot = {
-      snapshot_date: date,
-      rows: [],
-      watchlist: rsWatch.watchlist || [],
-      new_stock_leaderboard: [],
-      rs_meta: rsWatch.rs_meta || null,
-    };
-    renderWatchlistCharts(currentRsSnapshot);
-  }
+  currentRsSnapshot = {
+    snapshot_date: date,
+    rows: [],
+    watchlist: rsWatch?.watchlist || [],
+    new_stock_leaderboard: [],
+    rs_meta: rsWatch?.rs_meta || null,
+  };
+  renderWatchlistCharts(currentRsSnapshot);
   return snap;
 }
 
-async function loadSnapshot(date, { includeRsDetails = true } = {}) {
+async function loadSnapshot(date) {
   await loadDecisionView(date);
-  if (includeRsDetails) {
-    loadRsDetails(date).catch(() => {});
-  }
-}
-
-async function loadRsDetails(date) {
-  if (currentRsSnapshot?.rows?.length) {
-    renderCoveragePanel(currentSnapshot, currentRsSnapshot);
-    return;
-  }
-  await loadRsSnapshot(date);
-  renderCoveragePanel(currentSnapshot, currentRsSnapshot);
 }
 
 function applyAutoStatus(dashboard) {
@@ -607,7 +412,6 @@ async function refreshFromServer() {
     if (statusResult.status === "fulfilled") {
       renderSummary(snapshot, statusResult.value);
     }
-    loadRsDetails(date).catch(() => {});
     return statusResult.status === "fulfilled" ? statusResult.value : null;
   }
 
@@ -625,24 +429,6 @@ async function refreshFromServer() {
   return status;
 }
 
-async function loadRsSnapshot(date) {
-  try {
-    currentRsSnapshot = await fetchJson(`/api/rs/${encodeURIComponent(date)}?limit=120&watchlist_limit=120`);
-  } catch (err) {
-    currentRsSnapshot = {
-      snapshot_date: date,
-      rows: [],
-      watchlist: [],
-      new_stock_leaderboard: [],
-    };
-  }
-  renderRsTable(currentRsSnapshot);
-  renderNewStockLeaderboard(currentRsSnapshot);
-  renderWatchlistTable(currentRsSnapshot);
-  renderWatchlistCharts(currentRsSnapshot);
-  if (currentSnapshot) renderSummary(currentSnapshot);
-}
-
 function setRsStatus(message, isError = false) {
   const el = document.getElementById("rsStatus");
   if (!el) return;
@@ -650,175 +436,15 @@ function setRsStatus(message, isError = false) {
   el.className = isError ? "inline-status error" : "inline-status";
 }
 
-function setConfigStatus(message, isError = false) {
-  const el = document.getElementById("configStatus");
-  el.textContent = message;
-  el.className = isError ? "config-status error" : "config-status";
-}
-
-function updateWeightHint(weights, normalized) {
-  const total = Object.values(weights).reduce((a, b) => a + b, 0);
-  const parts = Object.entries(normalized || {})
-    .map(([k, v]) => `${k}: ${(v * 100).toFixed(1)}%`)
-    .join(" · ");
-  document.getElementById("weightHint").textContent =
-    `Weight sum ${total.toFixed(2)} · normalized → ${parts}`;
-}
-
-function fillConfigForm(cfg) {
-  const w = cfg.weights || {};
-  document.getElementById("weightWeek").value = w.week ?? 0.1;
-  document.getElementById("weightMonth").value = w.month ?? 0.25;
-  document.getElementById("weightQuarter").value = w.quarter ?? 0.25;
-  document.getElementById("weightHalf").value = w.half ?? 0.25;
-  document.getElementById("weightYear").value = w.year ?? 0.15;
-
-  const t = cfg.thresholds || {};
-  document.getElementById("tierAScore").value = t.tier_a_score ?? 0.8;
-  document.getElementById("tierBScore").value = t.tier_b_score ?? 0.65;
-  document.getElementById("coreRankMax").value = t.core_rank_max ?? 25;
-  document.getElementById("maxRankSpread").value = t.max_rank_spread ?? 60;
-  document.getElementById("topListCount").value = t.top_list_count ?? 10;
-  syncTopListLabels(t.top_list_count ?? 10);
-  document.getElementById("accelerationRankDelta").value = t.acceleration_rank_delta ?? 5;
-  document.getElementById("pullbackMidtermRankMax").value = t.pullback_midterm_rank_max ?? 30;
-  document.getElementById("pullbackWeekRankMin").value = t.pullback_week_rank_min ?? 40;
-
-  const sf = cfg.stock_filters || {};
-  document.getElementById("stockPriceAboveSma20").value = sf.price_above_sma20 ?? "ta_sma20_pa";
-  document.getElementById("stockSma20AboveSma50").value = sf.sma20_above_sma50 ?? "ta_sma50_sb20";
-  document.getElementById("stockDollarVolumeMin").value = sf.dollar_volume_min ?? "sh_curvol_ousd100000";
-  document.getElementById("stockEpsGrowthQoq").value = sf.eps_growth_qoq_min ?? "fa_epsqoq_o10";
-  document.getElementById("stockSalesGrowthQoq").value = sf.sales_growth_qoq_min ?? "fa_salesqoq_o10";
-
-  const rs = cfg.stock_rs || {};
-  document.getElementById("rsTimeoutSeconds").value = rs.request_timeout_seconds ?? 20;
-  document.getElementById("rsMinPriceRows").value = rs.min_price_rows ?? 260;
-  document.getElementById("rsTierAScore").value = rs.tier_a_score ?? 0.8;
-  document.getElementById("rsTierBScore").value = rs.tier_b_score ?? 0.65;
-  document.getElementById("rsCrossTopPercent").value = rs.cross_top_percent ?? 0.1;
-  document.getElementById("rsUniverseCap").value = rs.universe_cap ?? 0;
-  document.getElementById("rsPreferStooq").checked = Boolean(rs.prefer_stooq);
-
-  updateWeightHint(w, cfg.weights_normalized);
-}
-
-function readConfigForm() {
-  return {
-    weights: {
-      week: parseFloat(document.getElementById("weightWeek").value),
-      month: parseFloat(document.getElementById("weightMonth").value),
-      quarter: parseFloat(document.getElementById("weightQuarter").value),
-      half: parseFloat(document.getElementById("weightHalf").value),
-      year: parseFloat(document.getElementById("weightYear").value),
-    },
-    thresholds: {
-      tier_a_score: parseFloat(document.getElementById("tierAScore").value),
-      tier_b_score: parseFloat(document.getElementById("tierBScore").value),
-      core_rank_max: parseInt(document.getElementById("coreRankMax").value, 10),
-      max_rank_spread: parseInt(document.getElementById("maxRankSpread").value, 10),
-      top_list_count: parseInt(document.getElementById("topListCount").value, 10),
-      acceleration_rank_delta: parseInt(
-        document.getElementById("accelerationRankDelta").value,
-        10
-      ),
-      pullback_midterm_rank_max: parseInt(
-        document.getElementById("pullbackMidtermRankMax").value,
-        10
-      ),
-      pullback_week_rank_min: parseInt(
-        document.getElementById("pullbackWeekRankMin").value,
-        10
-      ),
-    },
-    stock_filters: {
-      price_above_sma20: document.getElementById("stockPriceAboveSma20").value.trim(),
-      sma20_above_sma50: document.getElementById("stockSma20AboveSma50").value.trim(),
-      dollar_volume_min: document.getElementById("stockDollarVolumeMin").value.trim(),
-      eps_growth_qoq_min: document.getElementById("stockEpsGrowthQoq").value.trim(),
-      sales_growth_qoq_min: document.getElementById("stockSalesGrowthQoq").value.trim(),
-    },
-    stock_rs: {
-      request_timeout_seconds: parseInt(document.getElementById("rsTimeoutSeconds").value, 10),
-      min_price_rows: parseInt(document.getElementById("rsMinPriceRows").value, 10),
-      tier_a_score: parseFloat(document.getElementById("rsTierAScore").value),
-      tier_b_score: parseFloat(document.getElementById("rsTierBScore").value),
-      cross_top_percent: parseFloat(document.getElementById("rsCrossTopPercent").value),
-      universe_cap: parseInt(document.getElementById("rsUniverseCap").value, 10),
-      prefer_stooq: document.getElementById("rsPreferStooq").checked,
-    },
-  };
-}
-
-function applyThresholdPreset(name) {
-  const preset = thresholdPresets[name];
-  if (!preset) return;
-
-  document.getElementById("tierAScore").value = preset.tier_a_score;
-  document.getElementById("tierBScore").value = preset.tier_b_score;
-  document.getElementById("coreRankMax").value = preset.core_rank_max;
-  document.getElementById("maxRankSpread").value = preset.max_rank_spread;
-  document.getElementById("topListCount").value = preset.top_list_count;
-  document.getElementById("accelerationRankDelta").value = preset.acceleration_rank_delta;
-  document.getElementById("pullbackMidtermRankMax").value = preset.pullback_midterm_rank_max;
-  document.getElementById("pullbackWeekRankMin").value = preset.pullback_week_rank_min;
-  const presetName =
-    name === "conservative" ? "Conservative" : name === "balanced" ? "Balanced" : "Aggressive";
-  setConfigStatus(`Applied ${presetName} preset — click Save to keep`);
-}
-
-async function loadConfigForm() {
-  const cfg = await fetchJson("/api/config");
-  fillConfigForm(cfg);
-  return cfg;
-}
-
-async function saveConfig() {
-  const payload = readConfigForm();
-  setConfigStatus("Saving…");
-  const result = await fetchJson("/api/config", {
-    method: "PUT",
-    body: JSON.stringify(payload),
-  });
-  fillConfigForm(result.config);
-  setConfigStatus("Saved — applies on next daily run");
-}
-
-function bindConfigForm() {
-  const weightIds = ["weightWeek", "weightMonth", "weightQuarter", "weightHalf", "weightYear"];
-  weightIds.forEach((id) => {
-    document.getElementById(id).addEventListener("input", () => {
-      const payload = readConfigForm();
-      const total = Object.values(payload.weights).reduce((a, b) => a + b, 0);
-      const normalized = Object.fromEntries(
-        Object.entries(payload.weights).map(([k, v]) => [k, total > 0 ? v / total : 0])
-      );
-      updateWeightHint(payload.weights, normalized);
-    });
-  });
-
-  document.getElementById("configForm").addEventListener("submit", (e) => {
-    e.preventDefault();
-    saveConfig().catch((err) => setConfigStatus(err.message, true));
-  });
-}
-
 async function init() {
-  enhanceHelpTips();
   renderHealthBadge("healthBadge").catch(() => {});
   document.getElementById("searchInput").addEventListener("input", (e) => {
     if (currentSnapshot) renderAllTable(currentSnapshot, e.target.value);
   });
-  document.querySelectorAll(".preset-btn").forEach((btn) => {
-    btn.addEventListener("click", () => applyThresholdPreset(btn.dataset.preset));
-  });
-
-  bindConfigForm();
 
   try {
     await refreshFromServer();
     startAutomationWatch();
-    loadConfigForm().catch(() => {});
   } catch (err) {
     showToast(err.message, true);
   }

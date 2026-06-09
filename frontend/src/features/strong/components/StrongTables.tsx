@@ -1,7 +1,11 @@
 import {
+  pctVsMa,
+  tradingViewUrl,
+  WatchlistLightweightChart,
+} from "./WatchlistLightweightChart";
+import {
   computeLongTrend,
   computeShortTrend,
-  finvizDailyChartUrl,
   getTopStrongIndustries,
   normalizeTrendLabel,
   pct,
@@ -173,7 +177,19 @@ export function CoreIndustryTable({ snapshot }: { snapshot: SnapshotPayload | nu
   );
 }
 
-export function WatchlistChartGrid({ watchlist }: { watchlist: RsPayload["watchlist"] }) {
+export function WatchlistChartGrid({
+  watchlist,
+  industryNames,
+}: {
+  watchlist: RsPayload["watchlist"];
+  industryNames?: Map<string, string>;
+}) {
+  const labelIndustries = (keys?: string[]) =>
+    (keys || [])
+      .map((k) => industryNames?.get(k) || k)
+      .filter(Boolean)
+      .join(" · ");
+
   if (!watchlist.length) {
     return (
       <p className="text-xs text-slate-500 font-mono py-4 text-center">
@@ -181,36 +197,75 @@ export function WatchlistChartGrid({ watchlist }: { watchlist: RsPayload["watchl
       </p>
     );
   }
+  const fmtMaPct = (v: number | null) => {
+    if (v == null || !Number.isFinite(v)) return "—";
+    const sign = v > 0 ? "+" : "";
+    return `${sign}${v.toFixed(1)}%`;
+  };
+
+  const maPctClass = (v: number | null) => {
+    if (v == null || !Number.isFinite(v)) return "text-slate-600";
+    if (v > 12) return "text-amber-400";
+    if (v < 0) return "text-rose-400";
+    return "text-emerald-400/90";
+  };
+
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 max-h-[70vh] overflow-y-auto pr-1">
-      {watchlist.map((row) => (
-        <article
-          key={row.symbol}
-          className="bg-slate-950/80 border border-slate-800 rounded-lg overflow-hidden hover:border-cyan-500/40 hover:shadow-[0_0_12px_rgba(34,211,238,0.08)] transition-all group"
-        >
-          <a
-            href={`https://finviz.com/quote.ashx?t=${encodeURIComponent(row.symbol)}`}
-            target="_blank"
-            rel="noreferrer"
-            className="block"
+    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[78vh] overflow-y-auto pr-1">
+      {watchlist.map((row) => {
+        const vs10 = pctVsMa(row.chart_bars, 10);
+        const vs20 = pctVsMa(row.chart_bars, 20);
+        const industry = labelIndustries(row.industries);
+        return (
+          <article
+            key={row.symbol}
+            className="bg-black border border-slate-800 rounded-lg overflow-hidden hover:border-cyan-500/40 hover:shadow-[0_0_12px_rgba(34,211,238,0.08)] transition-all group"
           >
-            <div className="px-3 py-2 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
-              <span className="font-mono font-black text-cyan-400 group-hover:text-cyan-300">
-                {row.symbol}
-              </span>
-              <span className="text-[10px] font-mono text-slate-500">
-                RS {Number(row.rs_score).toFixed(2)}
-              </span>
-            </div>
-            <img
-              className="w-full h-auto block bg-black"
-              src={finvizDailyChartUrl(row.symbol)}
-              alt={`${row.symbol} daily chart`}
-              loading="lazy"
-            />
-          </a>
-        </article>
-      ))}
+            <a
+              href={tradingViewUrl(row.symbol, row.exchange)}
+              target="_blank"
+              rel="noreferrer"
+              className="block"
+              title="Open in TradingView"
+            >
+              <div className="px-2.5 py-1.5 border-b border-slate-800/80 bg-slate-950/80">
+                <div className="flex justify-between items-baseline gap-2">
+                  <span className="font-mono font-black text-cyan-400 text-sm group-hover:text-cyan-300">
+                    {row.symbol}
+                  </span>
+                  <div className="flex items-center gap-2 text-[10px] font-mono shrink-0">
+                    <span
+                      className={`font-bold ${rankDeltaClass(row.rank_w_delta)}`}
+                      title="1W rank Δ"
+                    >
+                      {fmtRankDelta(row.rank_w_delta)}
+                    </span>
+                    <span className="text-slate-500">RS {Number(row.rs_score).toFixed(2)}</span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5 text-[10px] font-mono">
+                  {industry ? (
+                    <span className="text-slate-500 truncate max-w-[55%]">{industry}</span>
+                  ) : null}
+                  <span className={maPctClass(vs10)} title="vs SMA10 (adj)">
+                    10 {fmtMaPct(vs10)}
+                  </span>
+                  <span className={maPctClass(vs20)} title="vs SMA20 (adj)">
+                    20 {fmtMaPct(vs20)}
+                  </span>
+                </div>
+              </div>
+              <WatchlistLightweightChart bars={row.chart_bars} />
+              <div className="px-2 py-1 border-t border-slate-900 text-[9px] font-mono text-slate-600 flex gap-3">
+                <span className="text-yellow-400">10</span>
+                <span className="text-orange-400">20</span>
+                <span className="text-cyan-400">50</span>
+                <span className="text-slate-700 ml-auto">adj · daily</span>
+              </div>
+            </a>
+          </article>
+        );
+      })}
     </div>
   );
 }
@@ -220,6 +275,21 @@ export function fmtPerf(v: unknown) {
   const n = Number(v);
   const sign = n > 0 ? "+" : "";
   return `${sign}${n.toFixed(1)}%`;
+}
+
+export function fmtRankDelta(v: unknown) {
+  if (v == null || !Number.isFinite(Number(v))) return "—";
+  const n = Number(v);
+  if (n === 0) return "0";
+  return n > 0 ? `+${n}` : String(n);
+}
+
+export function rankDeltaClass(v: unknown) {
+  if (v == null || !Number.isFinite(Number(v))) return "text-slate-500";
+  const n = Number(v);
+  if (n > 0) return "text-emerald-400";
+  if (n < 0) return "text-rose-400";
+  return "text-slate-400";
 }
 
 export function rankHeatClass(rank: number) {

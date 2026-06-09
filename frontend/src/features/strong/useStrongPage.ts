@@ -3,18 +3,31 @@ import { fetchJson, IS_READONLY } from "../../lib/api";
 import { useAutomationEnsureOnStale } from "../../hooks/useAutomationEnsure";
 import {
   getTopStrongIndustries,
-  rsUniverseCount,
   type AutomationStatus,
   type RsPayload,
   type SnapshotPayload,
+  type WatchlistRow,
 } from "../../lib/industry";
 
-const NEW_STOCK_COHORT_LABEL: Record<string, string> = {
-  M: "Monthly",
-  Q: "Quarter",
-  H: "Half",
-  "3Q": "3Q",
-};
+async function mergeWatchlistChartBars(watchlist: WatchlistRow[]): Promise<WatchlistRow[]> {
+  if (watchlist.some((row) => (row.chart_bars?.length ?? 0) >= 10)) {
+    return watchlist;
+  }
+  try {
+    const res = await fetch(`${import.meta.env.BASE_URL}data/rs_watchlist.json`);
+    if (!res.ok) return watchlist;
+    const data = (await res.json()) as RsPayload;
+    const bySymbol = new Map(
+      (data.watchlist || []).map((row) => [row.symbol, row.chart_bars] as const),
+    );
+    return watchlist.map((row) => {
+      const cached = bySymbol.get(row.symbol);
+      return cached?.length ? { ...row, chart_bars: cached } : row;
+    });
+  } catch {
+    return watchlist;
+  }
+}
 
 export function useStrongPage() {
   const [snapshot, setSnapshot] = useState<SnapshotPayload | null>(null);
@@ -46,43 +59,26 @@ export function useStrongPage() {
     const snapshotData =
       snap ?? (await fetchJson<SnapshotPayload>(`/api/snapshots/${encodeURIComponent(date)}`));
 
-    if (IS_READONLY) {
-      const rsData = await fetchJson<RsPayload>(
-        `/api/rs/${encodeURIComponent(snapshotData.snapshot_date)}?limit=500&watchlist_limit=120`,
-      );
-      setSnapshot(snapshotData);
-      setRsPayload(rsData);
-      setTopListCount(snapshotData.top_strong_count ?? getTopStrongIndustries(snapshotData).length);
-      return;
-    }
+    const rsWatch = await fetchJson<{
+      watchlist?: RsPayload["watchlist"];
+      rs_meta?: RsPayload["rs_meta"];
+    }>(`/api/rs/${encodeURIComponent(date)}?watchlist_only=true&watchlist_limit=120`).catch(() => null);
 
-    const [rsWatch, rsData] = await Promise.all([
-      fetchJson<{ watchlist?: RsPayload["watchlist"]; rs_meta?: RsPayload["rs_meta"] }>(
-        `/api/rs/${encodeURIComponent(date)}?watchlist_only=true&watchlist_limit=120`,
-      ).catch(() => null),
-      fetchJson<RsPayload>(
-        `/api/rs/${encodeURIComponent(date)}?limit=500&watchlist_limit=120`,
-      ).catch(() => null),
-    ]);
-
-    setSnapshot(snapshotData);
+    setSnapshot({
+      ...snapshotData,
+      rs_meta: rsWatch?.rs_meta || snapshotData.rs_meta,
+    });
     setTopListCount(snapshotData.top_strong_count ?? getTopStrongIndustries(snapshotData).length);
-
-    if (rsData) {
-      setRsPayload(rsData);
-      setSnapshot({ ...snapshotData, rs_meta: rsData.rs_meta || snapshotData.rs_meta });
-      return;
-    }
-
-    if (rsWatch) {
-      setRsPayload({
-        snapshot_date: date,
-        rows: [],
-        watchlist: rsWatch.watchlist || snapshotData.watchlist_preview || [],
-        new_stock_leaderboard: [],
-        rs_meta: rsWatch.rs_meta || snapshotData.rs_meta,
-      });
-    }
+    const watchlistRows = await mergeWatchlistChartBars(
+      rsWatch?.watchlist || snapshotData.watchlist_preview || [],
+    );
+    setRsPayload({
+      snapshot_date: date,
+      rows: [],
+      watchlist: watchlistRows,
+      new_stock_leaderboard: [],
+      rs_meta: rsWatch?.rs_meta || snapshotData.rs_meta,
+    });
   }, []);
 
   const refreshFromServer = useCallback(async () => {
@@ -138,7 +134,10 @@ export function useStrongPage() {
     return () => window.clearInterval(timer);
   }, [refreshFromServer, watchAutomation]);
 
-  const summaryText = (() => {
+  const watchlist =
+    rsPayload?.watchlist?.length ? rsPayload.watchlist : snapshot?.watchlist_preview || [];
+
+  const pulseLine = (() => {
     if (!snapshot) return "Loading snapshot…";
     const top = getTopStrongIndustries(snapshot);
     let dateText = snapshot.snapshot_date || "—";
@@ -147,17 +146,17 @@ export function useStrongPage() {
     if (lag > 0 && target && target !== snapshot.snapshot_date) {
       dateText = `${dateText} (catch-up ${target})`;
     }
-    const rsCount = rsUniverseCount(snapshot, rsPayload?.rs_meta) ?? undefined;
-    const rsText = rsCount != null ? rsCount.toLocaleString() : "—";
-    return `As of ${dateText} · Top ${topListCount}: ${top.length} · RS ${rsText}`;
+    const hot = top
+      .slice(0, 3)
+      .map((r) => r.name.split(/[\s/&-]/)[0])
+      .join(", ");
+    const hotText = hot || "—";
+    return `${dateText} · Focus ${watchlist.length} · Hot themes: ${hotText} · RS universe scanned`;
   })();
 
   const filteredIndustries = (snapshot?.industries || [])
     .filter((r) => !search.trim() || r.name.toLowerCase().includes(search.trim().toLowerCase()))
     .sort((a, b) => b.score - a.score);
-
-  const watchlist =
-    rsPayload?.watchlist?.length ? rsPayload.watchlist : snapshot?.watchlist_preview || [];
 
   useAutomationEnsureOnStale(automation);
 
@@ -171,8 +170,7 @@ export function useStrongPage() {
     search,
     setSearch,
     topListCount,
-    summaryText,
+    pulseLine,
     filteredIndustries,
-    NEW_STOCK_COHORT_LABEL,
   };
 }

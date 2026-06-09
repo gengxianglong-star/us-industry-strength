@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:static": "VITE_READONLY=1 vite",
     "build": "tsc --noEmit && vite build",
     "build:pages": "tsc --noEmit && vite build --outDir dist",
     "preview": "vite preview"
@@ -12,6 +13,7 @@
   "dependencies": {
     "autoprefixer": "^10.5.0",
     "chart.js": "^4.4.1",
+    "lightweight-charts": "^5.2.0",
     "lucide-react": "^1.17.0",
     "postcss": "^8.5.15",
     "react": "^19.1.0",

@@ -14,8 +14,54 @@ from src.services.auto_scheduler import _stale_days, automation_settings
 from src.services.health import _result, check_db
 from src.services.snapshots import build_snapshot_response
 from src.storage import Storage, latest_trading_date
+from src.watchlist_charts import enrich_watchlist_chart_bars
 
 logger = get_logger(__name__)
+
+_RS_ROW_KEEP = (
+    "snapshot_date",
+    "symbol",
+    "rs_score",
+    "tier",
+    "perf_w",
+    "perf_m",
+    "perf_q",
+    "perf_h",
+    "perf_y",
+    "rank_w",
+    "rank_m",
+    "rank_q",
+    "rank_h",
+    "rank_y",
+)
+
+_NEW_STOCK_ROW_KEEP = _RS_ROW_KEEP + (
+    "cohort",
+    "bar_count",
+    "perf_tq",
+    "rank_tq",
+    "rank_w_delta",
+)
+
+
+def _slim_rs_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: row[key] for key in _RS_ROW_KEEP if key in row}
+
+
+def _slim_new_stock_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: row[key] for key in _NEW_STOCK_ROW_KEEP if key in row}
+
+
+def _breadth_config_payload(config: dict[str, Any], storage: Storage) -> dict[str, Any]:
+    breadth_cfg = dict(DEFAULT_THRESHOLDS)
+    breadth_cfg.update(storage.get_breadth_threshold_overrides())
+    confluence = config.get("breadth_confluence") or {}
+    min_score = int(confluence.get("min_score", 2))
+    return {
+        "thresholds": breadth_cfg,
+        "breadth_confluence": {"min_score": min_score},
+    }
+
 
 EXPORT_FILES = (
     "meta.json",
@@ -113,19 +159,22 @@ def build_public_dashboard_payloads(
             rows=rows,
             top_n=top_n,
         )
-        watchlist = storage.get_stock_watchlist(latest, limit=watchlist_limit)
-        rs_rows = storage.get_stock_rs(latest, limit=max(rs_limit, 1))
+        watchlist = enrich_watchlist_chart_bars(
+            storage.get_stock_watchlist(latest, limit=watchlist_limit),
+        )
+        rs_rows = [_slim_rs_row(row) for row in storage.get_stock_rs(latest, limit=max(rs_limit, 1))]
+        new_stock_rows = [_slim_new_stock_row(row) for row in storage.get_stock_rs_new(latest, limit=500)]
+        new_stock_leaderboard = [
+            _slim_new_stock_row(row)
+            for row in storage.get_stock_rs_new(latest, leaderboard_only=True, limit=500)
+        ]
         rs_payload = {
             "snapshot_date": latest,
             "rs_count": storage.count_stock_rs(latest),
             "rs_meta": storage.get_stock_rs_meta(latest),
             "rows": rs_rows,
-            "new_stock_rows": storage.get_stock_rs_new(latest, limit=500),
-            "new_stock_leaderboard": storage.get_stock_rs_new(
-                latest,
-                leaderboard_only=True,
-                limit=500,
-            ),
+            "new_stock_rows": new_stock_rows,
+            "new_stock_leaderboard": new_stock_leaderboard,
             "watchlist": watchlist,
         }
         rs_watchlist = {
@@ -153,9 +202,6 @@ def build_public_dashboard_payloads(
             "watchlist": [],
         }
         rs_watchlist = rs_payload
-
-    breadth_cfg = dict(DEFAULT_THRESHOLDS)
-    breadth_cfg.update(storage.get_breadth_threshold_overrides())
 
     try:
         breadth = load_breadth_data(
@@ -186,7 +232,7 @@ def build_public_dashboard_payloads(
         "rs_watchlist.json": rs_watchlist,
         "automation.json": build_export_automation_status(storage, config),
         "breadth.json": breadth,
-        "breadth_config.json": {"thresholds": breadth_cfg},
+        "breadth_config.json": _breadth_config_payload(config, storage),
         "health.json": build_export_health(storage, config),
         "sync_progress.json": {
             "kind": "breadth",

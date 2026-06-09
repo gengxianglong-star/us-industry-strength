@@ -29,6 +29,11 @@ export type IndustryRow = {
     rank_h_delta?: number;
     score_delta?: number;
   } | null;
+  trajectory_5d?: Array<{
+    date: string;
+    rs_3m: number;
+    rs_1m: number;
+  }>;
 };
 
 export type RsMeta = {
@@ -60,11 +65,23 @@ export type SnapshotPayload = {
   watchlist_preview?: WatchlistRow[];
 };
 
+export type WatchlistChartBar = {
+  d: string;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v?: number;
+};
+
 export type WatchlistRow = {
   symbol: string;
   rs_rank: number;
   rs_score: number;
   industries?: string[];
+  rank_w_delta?: number | null;
+  exchange?: string | null;
+  chart_bars?: WatchlistChartBar[];
 };
 
 export type RsPayload = {

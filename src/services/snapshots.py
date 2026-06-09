@@ -91,11 +91,13 @@ def build_snapshot_response(
         for x in top_strong_from_rows(active, top_n=top_n, stock_picks=stock_picks)
     }
     deltas = storage.compare_all_with_previous(snapshot_date)
+    trajectories = storage.get_industry_trajectory_window(snapshot_date, sessions=5)
 
     for row in rows:
         row["is_core"] = row["industry_key"] in core_keys
         row["is_top_strong"] = row["industry_key"] in top_keys
         row["vs_previous"] = deltas.get(row["industry_key"])
+        row["trajectory_5d"] = trajectories.get(row["industry_key"], [])
         pick = stock_picks.get(row["industry_key"])
         if pick:
             row["stock_picks"] = pick["tickers"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
+import threading
 import time
 from typing import Any
 
@@ -11,7 +12,9 @@ from src.finviz_stock_screener import (
     build_screener_filters,
     build_screener_url,
     fetch_industry_tickers,
+    open_playwright_session,
     prepare_finviz_session,
+    use_playwright_scraper,
 )
 from src.logging_config import get_logger
 from src.scoring import ScoredIndustry, top_strong_sort_key
@@ -39,7 +42,7 @@ def _save_pick_failure_with_stale_fallback(
     stale_from: str | None = None
     if _stale_fallback_enabled(config):
         current = storage.get_industry_stock_picks(snapshot_date, industry_key)
-        if current and current.get("tickers"):
+        if current and current.get("tickers") and not str(current.get("error") or "").strip():
             stale_row = current
             stale_from = snapshot_date
         else:
@@ -101,12 +104,20 @@ def fetch_and_store_stock_picks(
         return results
 
     scraper_cfg = config.get("scraper", {})
-    max_workers = int(scraper_cfg.get("stock_pick_workers", 3))
+    playwright_mode = use_playwright_scraper(config)
+    max_workers = 1 if playwright_mode else int(scraper_cfg.get("stock_pick_workers", 3))
     max_workers = max(1, min(6, max_workers))
 
-    shared_session, session_lock = prepare_finviz_session(config)
+    shared_session, session_lock = (None, threading.Lock())
+    if not playwright_mode:
+        shared_session, session_lock = prepare_finviz_session(config)
 
-    def _fetch_one(key: str, cfg: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    def _fetch_one(
+        key: str,
+        cfg: dict[str, Any],
+        *,
+        playwright_session=None,
+    ) -> tuple[str, dict[str, Any]]:
         try:
             payload = fetch_industry_tickers(
                 key,
@@ -114,6 +125,7 @@ def fetch_and_store_stock_picks(
                 session=shared_session,
                 session_lock=session_lock,
                 skip_warmup=True,
+                playwright_session=playwright_session,
             )
             storage.save_industry_stock_picks(
                 snapshot_date,
@@ -135,16 +147,26 @@ def fetch_and_store_stock_picks(
             return key, payload
 
     try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(_fetch_one, key, config) for key in industry_keys]
-            for future in as_completed(futures):
-                key, payload = future.result()
-                results[key] = payload
+        if playwright_mode:
+            with open_playwright_session(config) as playwright_session:
+                for key in industry_keys:
+                    key, payload = _fetch_one(key, config, playwright_session=playwright_session)
+                    results[key] = payload
+                    time.sleep(float(scraper_cfg.get("request_delay_seconds", 1.5)))
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(_fetch_one, key, config) for key in industry_keys]
+                for future in as_completed(futures):
+                    key, payload = future.result()
+                    results[key] = payload
     finally:
         if shared_session is not None:
             shared_session.close()
 
     # 动态限速回补：若出现 Cloudflare/连接类错误，则降并发+增延时重试失败行业。
+    if playwright_mode:
+        return results
+
     retry_keys: list[str] = []
     for key, payload in results.items():
         err = str(payload.get("error") or "").lower()

@@ -189,6 +189,27 @@ def _industry_pick_map(
     return symbol_to_industries
 
 
+def _build_main_watchlist_from_rows(
+    ranked_rows: list[dict[str, Any]],
+    storage: Storage,
+    snapshot_date: str,
+    scored_industries: list[ScoredIndustry],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    from src.watchlist_build import build_rs_technical_watchlist, use_rs_technical_watchlist
+
+    if use_rs_technical_watchlist(config):
+        return build_rs_technical_watchlist(ranked_rows, config)
+
+    rs_cfg = config.get("stock_rs", {})
+    cross_top_percent = float(rs_cfg.get("cross_top_percent", 0.1))
+    cross_top_percent = max(0.01, min(1.0, cross_top_percent))
+    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
+    top_keys = {item.key for item in top_industries}
+    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
+    return _cross_watchlist_candidates(ranked_rows, symbol_to_industries, cross_top_percent)
+
+
 def _cross_watchlist_candidates(
     ranked_rows: list[dict[str, Any]],
     symbol_to_industries: dict[str, list[str]],
@@ -302,11 +323,15 @@ def backfill_new_stock_rs_for_snapshot(
     )
 
     main_rows = storage.get_stock_rs_raw(snapshot_date)
-    top_industries = _top_industries_with_picks(storage, snapshot_date, scored, config)
-    top_keys = {item.key for item in top_industries}
-    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
-    main_watch = _cross_watchlist_candidates(main_rows, symbol_to_industries, cross_top_percent)
-    watch_rows = _merge_watchlists(main_watch, new_stock_result["new_watch_candidates"])
+    main_watch = _build_main_watchlist_from_rows(main_rows, storage, snapshot_date, scored, config)
+    from src.watchlist_build import use_rs_technical_watchlist
+
+    new_watch = (
+        []
+        if use_rs_technical_watchlist(config)
+        else new_stock_result["new_watch_candidates"]
+    )
+    watch_rows = _merge_watchlists(main_watch, new_watch)
     storage.save_stock_watchlist(snapshot_date, watch_rows)
 
     prev_meta = storage.get_stock_rs_meta(snapshot_date) or {}
@@ -393,10 +418,15 @@ def compute_and_store_new_stock_rs(
             leaderboard.append(row)
         all_scored.extend(rows)
 
-    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
-    top_keys = {item.key for item in top_industries}
-    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
-    new_watch = _cross_watchlist_candidates(leaderboard, symbol_to_industries, cross_top_percent)
+    from src.watchlist_build import use_rs_technical_watchlist
+
+    if use_rs_technical_watchlist(config):
+        new_watch: list[dict[str, Any]] = []
+    else:
+        top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
+        top_keys = {item.key for item in top_industries}
+        symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
+        new_watch = _cross_watchlist_candidates(leaderboard, symbol_to_industries, cross_top_percent)
 
     storage.save_stock_rs_new_snapshot(snapshot_date, all_scored)
     return {
@@ -1559,11 +1589,13 @@ def compute_and_store_stock_rs(
     storage.save_stock_rs_snapshot(snapshot_date, rows)
     storage.save_stock_rs_issues(snapshot_date, issues_map)
 
-    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
-    top_keys = {item.key for item in top_industries}
-    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
-
-    main_watch_candidates = _cross_watchlist_candidates(rows, symbol_to_industries, cross_top_percent)
+    main_watch_candidates = _build_main_watchlist_from_rows(
+        rows,
+        storage,
+        snapshot_date,
+        scored_industries,
+        config,
+    )
     new_stock_result = compute_and_store_new_stock_rs(
         storage,
         snapshot_date,
@@ -1573,7 +1605,14 @@ def compute_and_store_stock_rs(
         cross_top_percent,
         scored_industries,
     )
-    watch_rows = _merge_watchlists(main_watch_candidates, new_stock_result["new_watch_candidates"])
+    from src.watchlist_build import use_rs_technical_watchlist
+
+    new_watch = (
+        []
+        if use_rs_technical_watchlist(config)
+        else new_stock_result["new_watch_candidates"]
+    )
+    watch_rows = _merge_watchlists(main_watch_candidates, new_watch)
     storage.save_stock_watchlist(snapshot_date, watch_rows)
     storage.save_stock_rs_meta(
         snapshot_date,
@@ -1631,22 +1670,31 @@ def rebuild_stock_watchlist_for_snapshot(
             "reason": "no_rs_rows",
         }
 
-    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
-    top_keys = {item.key for item in top_industries}
-    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
-
-    main_watch = _cross_watchlist_candidates(rows, symbol_to_industries, cross_top_percent)
-
-    leaderboard = storage.get_stock_rs_new(
+    main_watch = _build_main_watchlist_from_rows(
+        rows,
+        storage,
         snapshot_date,
-        leaderboard_only=True,
-        limit=5000,
+        scored_industries,
+        config,
     )
-    new_watch_rows = [
-        {"symbol": row["symbol"], "rs_score": float(row["rs_score"])}
-        for row in leaderboard
-    ]
-    new_watch = _cross_watchlist_candidates(new_watch_rows, symbol_to_industries, 1.0)
+    from src.watchlist_build import use_rs_technical_watchlist
+
+    if use_rs_technical_watchlist(config):
+        new_watch: list[dict[str, Any]] = []
+    else:
+        top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
+        top_keys = {item.key for item in top_industries}
+        symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
+        leaderboard = storage.get_stock_rs_new(
+            snapshot_date,
+            leaderboard_only=True,
+            limit=5000,
+        )
+        new_watch_rows = [
+            {"symbol": row["symbol"], "rs_score": float(row["rs_score"])}
+            for row in leaderboard
+        ]
+        new_watch = _cross_watchlist_candidates(new_watch_rows, symbol_to_industries, 1.0)
 
     watch_rows = _merge_watchlists(main_watch, new_watch)
     storage.save_stock_watchlist(snapshot_date, watch_rows)
@@ -1660,6 +1708,5 @@ def rebuild_stock_watchlist_for_snapshot(
     return {
         "snapshot_date": snapshot_date,
         "watchlist_count": len(watch_rows),
-        "top_industry_count": len(top_keys),
         "skipped": False,
     }

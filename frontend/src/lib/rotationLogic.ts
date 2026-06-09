@@ -2,6 +2,12 @@ import type { IndustryRow } from "./industry";
 
 export type Quadrant = "leaders" | "ignition" | "weakening" | "lagging";
 
+export type TrajectoryPoint = {
+  date: string;
+  rs_3m: number;
+  rs_1m: number;
+};
+
 export type RotationNode = {
   industry_key: string;
   name: string;
@@ -16,6 +22,7 @@ export type RotationNode = {
   stock_picks: string[];
   trendState: string;
   trendTone: TrendTone;
+  trajectory_5d: TrajectoryPoint[];
 };
 
 export type TrendTone = "expansion" | "pullback" | "bear" | "neutral" | "reversion";
@@ -136,6 +143,7 @@ export function buildRotationNodes(industries: IndustryRow[], breadthRatio10 = 1
       stock_picks: row.stock_picks || [],
       trendState: trend.trendState,
       trendTone: trend.trendTone,
+      trajectory_5d: row.trajectory_5d || [],
     };
   });
 

@@ -27,7 +27,8 @@ class ThresholdsConfig(BaseModel):
 class StockFiltersConfig(BaseModel):
     price_above_sma20: str = "ta_sma20_pa"
     sma20_above_sma50: str = "ta_sma50_sb20"
-    dollar_volume_min: str = "sh_curvol_ousd100000"
+    price_above_sma200: str = "ta_sma200_pa"
+    dollar_volume_min: str = "sh_curvol_ousd100M"
     eps_growth_qoq_min: str = "fa_epsqoq_o10"
     sales_growth_qoq_min: str = "fa_salesqoq_o10"
 
@@ -42,6 +43,9 @@ class StockRsConfig(BaseModel):
     tier_a_score: float = Field(default=0.8, ge=0, le=1)
     tier_b_score: float = Field(default=0.65, ge=0, le=1)
     cross_top_percent: float = Field(default=0.1, ge=0.01, le=1.0)
+    watchlist_mode: str = Field(default="rs_technical")
+    watchlist_cap: int = Field(default=100, ge=1, le=500)
+    min_avg_dollar_volume_30d_usd: int = Field(default=100_000_000, ge=1)
     universe_cap: int = Field(default=0, ge=0, le=12000)
     universe_cache_hours: int = Field(default=24, ge=1, le=168)
     yahoo_batch_size: int = Field(default=20, ge=5, le=50)

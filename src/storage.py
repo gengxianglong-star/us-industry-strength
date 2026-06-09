@@ -592,6 +592,132 @@ class Storage:
             ).fetchall()
         return [row["snapshot_date"] for row in rows]
 
+    def prior_snapshot_date(self, snapshot_date: str, sessions_back: int = 1) -> str | None:
+        if sessions_back < 1:
+            return None
+        dates = self.list_snapshot_dates()
+        if snapshot_date not in dates:
+            return None
+        idx = dates.index(snapshot_date) + sessions_back
+        if idx >= len(dates):
+            return None
+        return dates[idx]
+
+    @staticmethod
+    def _rs_coord_from_ranks(rank_m: int | None, rank_q: int | None) -> tuple[float, float] | None:
+        if not rank_m or not rank_q or rank_m <= 0 or rank_q <= 0:
+            return None
+        rs_1m = float(max(1, min(100, 101 - int(rank_m))))
+        rs_3m = float(max(1, min(100, 101 - int(rank_q))))
+        return rs_3m, rs_1m
+
+    def get_industry_trajectory_window(
+        self,
+        snapshot_date: str,
+        *,
+        sessions: int = 5,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Last N trading sessions of 3M×1M scatter coords per industry (chronological)."""
+        if sessions < 1:
+            return {}
+        dates = self.list_snapshot_dates()
+        if snapshot_date not in dates:
+            return {}
+        idx = dates.index(snapshot_date)
+        window = dates[idx : idx + sessions]
+        if not window:
+            return {}
+        chronological = list(reversed(window))
+        placeholders = ",".join("?" * len(chronological))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT snapshot_date, industry_key, rank_m, rank_q
+                FROM industry_daily
+                WHERE snapshot_date IN ({placeholders})
+                ORDER BY industry_key ASC, snapshot_date ASC
+                """,
+                chronological,
+            ).fetchall()
+        out: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            coords = self._rs_coord_from_ranks(row["rank_m"], row["rank_q"])
+            if coords is None:
+                continue
+            rs_3m, rs_1m = coords
+            key = str(row["industry_key"])
+            out.setdefault(key, []).append(
+                {
+                    "date": str(row["snapshot_date"]),
+                    "rs_3m": rs_3m,
+                    "rs_1m": rs_1m,
+                }
+            )
+        return out
+
+    def get_stock_rank_w_map(
+        self,
+        snapshot_date: str,
+        symbols: list[str],
+        *,
+        table: str = "stock_rs_daily",
+    ) -> dict[str, int]:
+        if not symbols or not snapshot_date:
+            return {}
+        if table not in {"stock_rs_daily", "stock_rs_new_daily"}:
+            raise ValueError(f"unsupported rank_w table: {table}")
+        unique = sorted({s for s in symbols if s})
+        if not unique:
+            return {}
+        placeholders = ",".join("?" * len(unique))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT symbol, rank_w
+                FROM {table}
+                WHERE snapshot_date = ? AND symbol IN ({placeholders})
+                """,
+                [snapshot_date, *unique],
+            ).fetchall()
+        out: dict[str, int] = {}
+        for row in rows:
+            rank_w = row["rank_w"]
+            if rank_w is None:
+                continue
+            out[str(row["symbol"])] = int(rank_w)
+        return out
+
+    def enrich_rank_w_delta(
+        self,
+        snapshot_date: str,
+        rows: list[dict[str, Any]],
+        *,
+        lookback_sessions: int = 5,
+        symbol_key: str = "symbol",
+        table: str = "stock_rs_daily",
+    ) -> list[dict[str, Any]]:
+        """Attach rank_w_delta (prior - current; positive = rank improved)."""
+        prior_date = self.prior_snapshot_date(snapshot_date, lookback_sessions)
+        symbols = [str(row[symbol_key]) for row in rows if row.get(symbol_key)]
+        current_map = self.get_stock_rank_w_map(snapshot_date, symbols, table=table)
+        prior_map = (
+            self.get_stock_rank_w_map(prior_date, symbols, table=table)
+            if prior_date
+            else {}
+        )
+        enriched: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            sym = row.get(symbol_key)
+            cur = current_map.get(sym) if sym else None
+            prev = prior_map.get(sym) if sym else None
+            if cur is not None and prev is not None:
+                item["rank_w_delta"] = int(prev) - int(cur)
+            else:
+                item["rank_w_delta"] = None
+            enriched.append(item)
+        return enriched
+
     def get_snapshot(self, snapshot_date: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -903,7 +1029,7 @@ class Storage:
             data = dict(row)
             data["industries"] = json.loads(data.get("industries") or "[]")
             result.append(data)
-        return result
+        return self.enrich_rank_w_delta(snapshot_date, result)
 
     def count_stock_rs(self, snapshot_date: str) -> int:
         with self._connect() as conn:
@@ -1039,7 +1165,12 @@ class Storage:
         """
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
-        return [dict(row) for row in rows]
+        data = [dict(row) for row in rows]
+        return self.enrich_rank_w_delta(
+            snapshot_date,
+            data,
+            table="stock_rs_new_daily",
+        )
 
     def count_stock_rs_new(self, snapshot_date: str, *, leaderboard_only: bool = False) -> int:
         with self._connect() as conn:

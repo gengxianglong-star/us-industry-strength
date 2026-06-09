@@ -132,7 +132,9 @@ def validate_watchlist_step(
         status = "failed"
     elif rs_status == "running":
         status = "degraded"
-    elif watchlist_count >= 3 and pick_stale < pick_total:
+    elif watchlist_count >= 3 and (
+        pick_total == 0 or picks_status == "skipped" or pick_stale < pick_total
+    ):
         status = "done"
     elif watchlist_count == 0 and picks_status in {"degraded", "done"} and rs_status in {"degraded", "done"}:
         status = "degraded"
