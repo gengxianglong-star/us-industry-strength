@@ -445,28 +445,32 @@ def passes_elite_swing_filters(
     row: dict[str, Any],
     rs_score: float,
     *,
-    min_rs_score: float = 0.9,
-    min_daily_dollar_volume: float = 100_000_000.0,
+    min_rs_score: float = 0.8,
+    min_daily_dollar_volume: float = 15_000_000.0,
 ) -> bool:
     """
     Minervini-style trend stack + liquidity using Finviz SMA distance columns.
 
     SMA fields are % distance of price above/below each moving average.
-  """
+
+    Relaxed Swing Trader thresholds:
+    - RS >= 80 (top 20% in strong industry)
+    - Daily turnover >= $15M (wide enough for mid-cap momentum)
+    - Trend: price > SMA50 > SMA200 (Stage 2 uptrend, allows SMA20 pullbacks)
+    """
     if rs_score < min_rs_score:
         return False
     price = parse_finviz_number(row.get("price"))
     volume = parse_finviz_number(row.get("volume"))
     if price is None or volume is None or price * volume < min_daily_dollar_volume:
         return False
-    sma20 = parse_finviz_percent(row.get("sma20"))
     sma50 = parse_finviz_percent(row.get("sma50"))
     sma200 = parse_finviz_percent(row.get("sma200"))
-    if sma20 is None or sma50 is None or sma200 is None:
+    if sma50 is None or sma200 is None:
         return False
-    if sma200 <= 0 or sma20 <= 0:
-        return False
-    if sma50 <= sma20:
+    # Stage 2 uptrend: price above SMA50 above SMA200
+    # (sma200 % > sma50 % > 0 → price furthest above SMA200 = golden cross zone)
+    if not (sma200 > sma50 > 0):
         return False
     return True
 

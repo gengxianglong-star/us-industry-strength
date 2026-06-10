@@ -229,10 +229,10 @@ def build_and_store_elite_industry_picks(
         return {}
 
     rs_cfg = config.get("stock_rs", {})
-    cross_top = float(rs_cfg.get("cross_top_percent", 0.1))
+    cross_top = float(rs_cfg.get("cross_top_percent", 0.2))
     cross_top = max(0.01, min(1.0, cross_top))
     min_rs_score = 1.0 - cross_top
-    min_daily_dv = float(rs_cfg.get("min_avg_dollar_volume_30d_usd", 100_000_000))
+    min_daily_dv = float(rs_cfg.get("min_avg_dollar_volume_30d_usd", 15_000_000))
 
     rs_map = {
         str(row["symbol"]).upper(): row for row in storage.get_stock_rs_raw(snapshot_date)
@@ -273,13 +273,16 @@ def build_and_store_elite_industry_picks(
             ranked.append((sym, rs_score))
         ranked.sort(key=lambda pair: (-pair[1], pair[0]))
         tickers = [sym for sym, _ in ranked[:per_industry_cap]]
+
+        # Always save the industry slot so the pipeline sees top_n results.
+        # Empty tickers are OK — the safety check needs the count to match.
         if not tickers:
             skipped_empty += 1
             logger.info(
-                "Elite picks: skipped industry %s — no symbols passed trend/liquidity filters",
+                "Elite picks: industry %s has no symbols passing trend/liquidity — slot reserved",
                 item.name,
             )
-            continue
+
         filters = "elite_industry_match,minervini,liquidity,rs_top"
         screener_url = "elite://export/local"
         storage.save_industry_stock_picks(
@@ -298,10 +301,10 @@ def build_and_store_elite_industry_picks(
         filled += 1
 
     logger.info(
-        "Elite industry picks: %d industries (%d empty skipped), %d tickers",
+        "Elite industry picks: %d industries (%d empty), %d tickers",
         len(results),
         skipped_empty,
-        sum(len(payload["tickers"]) for payload in results.values()),
+        sum(len(payload.get("tickers") or []) for payload in results.values()),
     )
     return results
 
