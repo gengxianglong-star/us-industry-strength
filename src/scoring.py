@@ -188,30 +188,23 @@ def filter_top_strong(
     *,
     stock_picks: dict[str, Any] | None = None,
 ) -> list[ScoredIndustry]:
-    """Top N industries by score; prefer screener hits, backfill empty slots from ranks."""
+    """Top N industries by score that have qualifying stock picks; scan lower ranks to fill slots."""
     top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
     active = [s for s in scored if not s.excluded]
     active.sort(key=lambda x: top_strong_sort_key(x.score, x.rank_m, x.rank_q, x.key))
     if stock_picks is None:
         return active[:top_n]
     selected: list[ScoredIndustry] = []
-    fallback: list[ScoredIndustry] = []
     for item in active:
         if len(selected) >= top_n:
             break
         tickers = (stock_picks.get(item.key) or {}).get("tickers") or []
         if tickers:
             selected.append(item)
-        elif len(fallback) < top_n:
-            fallback.append(item)
-    # Backfill remaining slots with top-ranked industries (even if empty picks)
-    # so the pipeline safety check always sees top_n results.
-    hit_count = len(selected)
-    if hit_count < top_n:
-        needed = top_n - hit_count
-        selected.extend(fallback[:needed])
+    if len(selected) < top_n:
         logger.info(
-            "filter_top_strong: %d/%d slots with screener hits, %d backfilled from rank order",
-            hit_count, top_n, needed,
+            "filter_top_strong: only %d/%d industries have qualifying picks after rank scan",
+            len(selected),
+            top_n,
         )
-    return selected[:top_n]
+    return selected

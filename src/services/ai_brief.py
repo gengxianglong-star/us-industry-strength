@@ -47,8 +47,7 @@ async def generate_ai_brief(
     industry_count: int,
     top_industries: list[dict[str, Any]],
     watchlist: list[dict[str, Any]],
-    breadth_status: dict[str, Any] | None = None,
-    cockpit_modules: dict[str, Any] | None = None,
+    breadth_latest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate a daily market briefing using the Gemini API.
 
@@ -62,10 +61,8 @@ async def generate_ai_brief(
         Top N scored industries with their name, score, and rank info.
     watchlist:
         Cross‑watchlist stocks with symbol and RS score.
-    breadth_status:
-        Optional market‑breadth status (cockpit lights).
-    cockpit_modules:
-        Optional detailed cockpit module states.
+    breadth_latest:
+        Optional latest breadth row (c5/c6/c7/c8/c14 fields).
 
     Returns
     -------
@@ -92,14 +89,17 @@ async def generate_ai_brief(
     )
 
     breadth_line = ""
-    if cockpit_modules:
-        q = cockpit_modules.get("quarter_trend", {})
-        m = cockpit_modules.get("monthly_trend", {})
-        t = cockpit_modules.get("extreme_alert", {})
+    if breadth_latest:
+        up_q = breadth_latest.get("c5_num")
+        down_q = breadth_latest.get("c6_num")
+        up_m = breadth_latest.get("c7_num")
+        down_m = breadth_latest.get("c8_num")
+        t2108 = breadth_latest.get("c14_num")
+        quarter = "BULL" if (up_q or 0) > (down_q or 0) else "BEAR"
+        monthly = "BULLISH" if (up_m or 0) > (down_m or 0) else "BEARISH"
         breadth_line = (
-            f"Market Cockpit: Quarter={q.get('state', '?')}, "
-            f"Monthly={m.get('state', '?')}, T2108={t.get('value', '?')} "
-            f"({t.get('state', '?')})"
+            f"Market Breadth: Quarter={quarter} (Up25Q={up_q}, Down25Q={down_q}), "
+            f"Monthly={monthly} (Up25M={up_m}, Down25M={down_m}), T2108={t2108}"
         )
 
     prompt = f"""你是一位专业的美股市场宽度分析师。请根据以下数据生成一份简洁的中文每日市场简报（markdown 格式，不超过 300 字）。

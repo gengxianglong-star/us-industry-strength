@@ -417,8 +417,7 @@ async def ai_brief() -> dict[str, Any]:
     top = top_strong_from_rows(rows, top_n=top_n)
     watchlist = await run_in_threadpool(storage.get_stock_watchlist, latest)
 
-    breadth_status = None
-    cockpit_modules = None
+    breadth_latest = None
     try:
         from src.breadth_data import load_breadth_data
 
@@ -426,8 +425,8 @@ async def ai_brief() -> dict[str, Any]:
         breadth_payload = await run_in_threadpool(
             load_breadth_data, storage, force_refresh=False, limit=1, config=config
         )
-        breadth_status = breadth_payload.get("status")
-        cockpit_modules = breadth_status
+        rows_b = breadth_payload.get("rows") or []
+        breadth_latest = rows_b[0] if rows_b else None
     except Exception:
         logger.debug("breadth data not available for AI brief", exc_info=True)
 
@@ -437,8 +436,7 @@ async def ai_brief() -> dict[str, Any]:
             industry_count=len(rows),
             top_industries=[asdict(s) for s in top],
             watchlist=watchlist,
-            breadth_status=breadth_status,
-            cockpit_modules=cockpit_modules,
+            breadth_latest=breadth_latest,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -790,7 +788,7 @@ def strong_page() -> FileResponse:
 def breadth_page() -> FileResponse:
     if USE_SPA:
         return _spa_index()
-    return FileResponse(WEB_DIR / "breadth.html")
+    return FileResponse(WEB_DIR / "index.html")
 
 
 @app.get("/terminal")

@@ -78,134 +78,6 @@ def validate_breadth_thresholds(cfg: dict[str, float]) -> None:
         raise ValueError("T2108：Red 上限须小于 Green 下限")
 
 
-def resolve_ratio_bg_params(thresholds: dict[str, float]) -> dict[str, dict[str, float | int]]:
-    """解析 5/10 日趋势背景分档参数（供前端与说明文案共用）。"""
-    green_tiers = max(2, min(10, int(float(thresholds.get("ratio_green_tier_count", 5)))))
-    red_tiers = max(2, min(10, int(float(thresholds.get("ratio_red_tier_count", 5)))))
-    green_anchor = float(thresholds["ratio_green_anchor"])
-    green_low = float(thresholds["ratio_green_low_min"])
-    green_high = float(thresholds["ratio_green_high_max"])
-    red_anchor = float(thresholds["ratio_red_anchor"])
-    red_low = float(thresholds["ratio_red_low_min"])
-    red_high = float(thresholds["ratio_red_high_max"])
-    return {
-        "green": {
-            "anchor": green_anchor,
-            "low_min": green_low,
-            "high_max": green_high,
-            "tier_count": green_tiers,
-            "tier_max": green_tiers - 1,
-            "band_below": (green_anchor - green_low) / green_tiers,
-            "band_above": (green_high - green_anchor) / green_tiers,
-        },
-        "red": {
-            "anchor": red_anchor,
-            "low_min": red_low,
-            "high_max": red_high,
-            "tier_count": red_tiers,
-            "tier_max": red_tiers - 1,
-            "band_below": (red_anchor - red_low) / red_tiers,
-            "band_above": (red_high - red_anchor) / red_tiers,
-        },
-    }
-
-
-def build_cockpit_help(thresholds: dict[str, float]) -> list[dict[str, Any]]:
-    """驾驶舱模块触发条件与背景分档说明。"""
-    t10_ob = float(thresholds["trend10_overbought_min"])
-    t10_os = float(thresholds["trend10_oversold_max"])
-    t5_ob = float(thresholds["trend5_overbought_min"])
-    t5_os = float(thresholds["trend5_oversold_max"])
-    t_red = float(thresholds["t2108_red_max"])
-    t_green = float(thresholds["t2108_green_min"])
-    ratio = resolve_ratio_bg_params(thresholds)
-    g = ratio["green"]
-    r = ratio["red"]
-
-    def _fmt(v: float) -> str:
-        return f"{v:g}"
-
-    trend_bg_lines = [
-        f"Green anchor {_fmt(g['anchor'])} (same as quarter/half/month/5-10 green lights)",
-        f"Range [{_fmt(g['low_min'])}, {_fmt(g['high_max'])}], {int(g['tier_count'])} tiers below/above anchor (step ~{_fmt(g['band_below'])} / {_fmt(g['band_above'])})",
-        "Ratio below anchor = lighter; above = deeper; out of range = min/max shade",
-        f"Red anchor {_fmt(r['anchor'])} (same as the four red-light modules)",
-        f"Range [{_fmt(r['low_min'])}, {_fmt(r['high_max'])}], {int(r['tier_count'])} tiers below/above anchor (step ~{_fmt(r['band_below'])} / {_fmt(r['band_above'])})",
-        "Ratio below anchor = deeper; above = lighter",
-    ]
-    trend_state_lines = [
-        "≥ overbought floor → OVERBOUGHT (green)",
-        "≤ oversold cap → OVERSOLD (red)",
-        "Between and ≥ 1 → NORMAL (green, stronger as ratio rises)",
-        "< 1 and not oversold → NORMAL (red, weaker as ratio falls)",
-    ]
-
-    return [
-        {
-            "id": "quarter_trend",
-            "title": "Quarter Trend",
-            "lines": [
-                "Up25%Q > Down25%Q → green BULL",
-                "else → red BEAR",
-                "Background matches full-strength light color",
-            ],
-        },
-        {
-            "id": "half_season_trend",
-            "title": "Half Quarter Trend",
-            "lines": [
-                "Up13%/34D > Down13%/34D → green BULL",
-                "else → red BEAR",
-                "Background matches full-strength light color",
-            ],
-        },
-        {
-            "id": "monthly_trend",
-            "title": "Monthly Trend",
-            "lines": [
-                "Up25%M > Down25%M → green BULLISH",
-                "else → red BEARISH",
-                "Background matches full-strength light color",
-            ],
-        },
-        {
-            "id": "cross_5_10",
-            "title": "5-10 Cross",
-            "lines": [
-                "5D ratio ≥ 10D ratio → green LONG",
-                "else → red SHORT",
-                "Background matches full-strength light color",
-            ],
-        },
-        {
-            "id": "trend_10d",
-            "title": "10D Trend",
-            "lines": [
-                f"10D Overbought ≥ {_fmt(t10_ob)}；Oversold ≤ {_fmt(t10_os)}",
-                *trend_state_lines,
-                *trend_bg_lines,
-            ],
-        },
-        {
-            "id": "trend_5d",
-            "title": "5D Trend",
-            "lines": [
-                f"5D Overbought ≥ {_fmt(t5_ob)}；Oversold ≤ {_fmt(t5_os)}",
-                *trend_state_lines,
-                *trend_bg_lines,
-            ],
-        },
-        {
-            "id": "extreme_alert",
-            "title": "T2108 Alert",
-            "lines": [
-                f"≤ {_fmt(t_red)} → OVERSOLD (red, deeper = lower)",
-                f"≥ {_fmt(t_green)} → OVERBOUGHT (green, deeper = higher)",
-                "Between → NORMAL (neutral)",
-            ],
-        },
-    ]
-
 _CACHE_TTL_SECONDS = 300
 _CACHE_DATA: dict[str, Any] | None = None
 _CACHE_AT: float = 0.0
@@ -809,20 +681,6 @@ def _pct_rank(values: list[float], x: float) -> float:
     return round((pos / n) * 100, 2)
 
 
-def _ratio_trend_state(value: float, overbought_min: float, oversold_max: float) -> tuple[str, str, float]:
-    if value >= overbought_min:
-        intensity = min(1.0, max(0.0, (value - overbought_min) / max(0.8, overbought_min)))
-        return "OVERBOUGHT", "green", intensity
-    if value <= oversold_max:
-        intensity = min(1.0, max(0.0, (oversold_max - value) / max(0.1, oversold_max)))
-        return "OVERSOLD", "red", intensity
-    if value >= 1.0:
-        intensity = min(1.0, max(0.0, (value - 1.0) / max(0.1, overbought_min - 1.0)))
-        return "NORMAL", "green", intensity
-    intensity = min(1.0, max(0.0, (1.0 - value) / max(0.1, 1.0 - oversold_max)))
-    return "NORMAL", "red", intensity
-
-
 def _build_cards(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not rows:
         return []
@@ -880,55 +738,6 @@ def load_breadth_data(
     rows = storage.get_breadth_daily(limit=fetch_limit)
     if not rows:
         raise ValueError("Breadth data is empty — run sync first")
-
-    thresholds = dict(DEFAULT_THRESHOLDS)
-    thresholds.update(storage.get_breadth_threshold_overrides())
-
-    latest = rows[0]
-    up_q = _to_number(latest.get("c5")) or 0.0
-    down_q = _to_number(latest.get("c6")) or 0.0
-    up_h = _to_number(latest.get("c11")) or 0.0
-    down_h = _to_number(latest.get("c12")) or 0.0
-    up_m = _to_number(latest.get("c7")) or 0.0
-    down_m = _to_number(latest.get("c8")) or 0.0
-    ratio10 = _to_number(latest.get("c4")) or 0.0
-    ratio5 = _to_number(latest.get("c3")) or 0.0
-    t2108 = _to_number(latest.get("c14")) or 0.0
-
-    quarter_state = "BULL" if up_q > down_q else "BEAR"
-    quarter_color = "green" if up_q > down_q else "red"
-    half_state = "BULL" if up_h > down_h else "BEAR"
-    half_color = "green" if up_h > down_h else "red"
-    month_state = "BULLISH" if up_m > down_m else "BEARISH"
-    month_color = "green" if up_m > down_m else "red"
-    cross_state = "LONG" if ratio5 >= ratio10 else "SHORT"
-    cross_color = "green" if ratio5 >= ratio10 else "red"
-
-    r10_state, r10_color, r10_intensity = _ratio_trend_state(
-        ratio10,
-        float(thresholds["trend10_overbought_min"]),
-        float(thresholds["trend10_oversold_max"]),
-    )
-    r5_state, r5_color, r5_intensity = _ratio_trend_state(
-        ratio5,
-        float(thresholds["trend5_overbought_min"]),
-        float(thresholds["trend5_oversold_max"]),
-    )
-
-    t_red = float(thresholds["t2108_red_max"])
-    t_green = float(thresholds["t2108_green_min"])
-    if t2108 <= t_red:
-        t_state = "OVERSOLD"
-        t_color = "red"
-        t_intensity = min(1.0, max(0.0, (t_red - t2108) / max(1.0, t_red)))
-    elif t2108 >= t_green:
-        t_state = "OVERBOUGHT"
-        t_color = "green"
-        t_intensity = min(1.0, max(0.0, (t2108 - t_green) / max(1.0, 100 - t_green)))
-    else:
-        t_state = "NORMAL"
-        t_color = "white"
-        t_intensity = 0.0
 
     coverage = storage.get_breadth_coverage()
     sheet_meta = storage.get_breadth_sheet_meta()
@@ -989,60 +798,6 @@ def load_breadth_data(
         "source": f"https://docs.google.com/spreadsheets/d/{SHEET_ID}",
         "coverage": coverage,
         "sheet_meta": sheet_meta,
-        "thresholds": thresholds,
-        "ratio_bg": resolve_ratio_bg_params(thresholds),
-        "cockpit_help": build_cockpit_help(thresholds),
-        "status": {
-            "quarter_trend": {
-                "title": "Quarter",
-                "state": quarter_state,
-                "color": quarter_color,
-                "intensity": 1.0,
-                "value": f"Up25Q {up_q:.0f} / Down25Q {down_q:.0f}",
-            },
-            "half_season_trend": {
-                "title": "Half Quarter",
-                "state": half_state,
-                "color": half_color,
-                "intensity": 1.0,
-                "value": f"Up13/34D {up_h:.0f} / Down13/34D {down_h:.0f}",
-            },
-            "monthly_trend": {
-                "title": "Monthly",
-                "state": month_state,
-                "color": month_color,
-                "intensity": 1.0,
-                "value": f"Up25M {up_m:.0f} / Down25M {down_m:.0f}",
-            },
-            "cross_5_10": {
-                "title": "5-10 Cross",
-                "state": cross_state,
-                "color": cross_color,
-                "intensity": 1.0,
-                "value": f"5D {ratio5:.2f} / 10D {ratio10:.2f}",
-            },
-            "trend_10d": {
-                "title": "10D Trend",
-                "state": r10_state,
-                "color": r10_color,
-                "intensity": round(r10_intensity, 3),
-                "value": round(ratio10, 3),
-            },
-            "trend_5d": {
-                "title": "5D Trend",
-                "state": r5_state,
-                "color": r5_color,
-                "intensity": round(r5_intensity, 3),
-                "value": round(ratio5, 3),
-            },
-            "extreme_alert": {
-                "title": "T2108",
-                "state": t_state,
-                "color": t_color,
-                "intensity": round(t_intensity, 3),
-                "value": round(t2108, 2),
-            },
-        },
         "percentile_cards": _build_cards(normalized_rows),
         "notes": {
             "indicators_explain_url": "https://stockbee.blogspot.com/2022/12/market-monitor-scans.html",

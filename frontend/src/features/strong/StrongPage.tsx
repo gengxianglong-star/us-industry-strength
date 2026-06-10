@@ -31,7 +31,7 @@ export function StrongPage() {
   return (
     <AppShell
       title="Strong Industry Terminal"
-      source="Source: Finviz Top industries · Yahoo RS watchlist · Daily automation"
+      source="Source: Finviz Top industries · RS watchlist · Daily automation"
     >
       <div className="cockpit-preview max-w-[1600px] mx-auto px-4 md:px-6 py-6 space-y-6">
         <div
@@ -90,7 +90,7 @@ export function StrongPage() {
               <Target size={16} className="text-rose-500" /> Final Watchlist Setup
             </h2>
             <p className="text-[10px] font-mono text-slate-500 uppercase mt-1">
-              RS top 10% · price &gt; SMA20/50/200 · 30d avg $100M+ · top 100 · Yahoo industry
+              RS top 10% ∩ Top {topListCount} Finviz industries · Elite trend stack · top 100
             </p>
           </div>
           <WatchlistChartGrid watchlist={watchlist} industryNames={industryNames} />

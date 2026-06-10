@@ -236,7 +236,7 @@ def _industry_pick_map(
     for key, payload in picks.items():
         if key not in top_keys:
             continue
-        for symbol in payload.get("tickers", []):
+        for symbol in payload.get("tickers", []) or []:
             symbol_to_industries.setdefault(symbol.upper(), []).append(key)
     return symbol_to_industries
 

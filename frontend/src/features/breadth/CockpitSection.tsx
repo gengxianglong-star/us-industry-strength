@@ -39,7 +39,9 @@ type HealthReport = {
 type TerminalHealth = "healthy" | "degraded" | "offline";
 
 const UP4_SPARKLINE_THRESHOLD = 500;
-const DN4_SPARKLINE_THRESHOLD = 400;
+const DN4_SPARKLINE_THRESHOLD = 500;
+const SPARKLINE_LOOKBACK_DAYS = 60;
+const RATIO_SPARKLINE_THRESHOLD = 2.0;
 
 const HEALTH_UI: Record<
   TerminalHealth,
@@ -98,6 +100,10 @@ type SparklineProps = {
   neutralColor?: string;
 };
 
+function sparklineRowDate(row: BreadthRow | undefined): string {
+  return row?.raw_date || row?.date || "";
+}
+
 function MicroSparkline({
   data,
   dataKey,
@@ -118,15 +124,12 @@ function MicroSparkline({
             if (props.cx == null || props.cy == null) return null;
             const val = Number(props.payload?.[dataKey] ?? 0);
             if (val >= threshold) {
+              const dateLabel = sparklineRowDate(props.payload);
               return (
-                <circle
-                  cx={props.cx}
-                  cy={props.cy}
-                  r={5}
-                  fill={color}
-                  stroke="#ffffff"
-                  strokeWidth={1.5}
-                />
+                <g>
+                  {dateLabel ? <title>{dateLabel}</title> : null}
+                  <circle cx={props.cx} cy={props.cy} r={4} fill={color} />
+                </g>
               );
             }
             return null;
@@ -447,7 +450,7 @@ export default function CockpitSection() {
       .catch(() => setLoading(false));
   }, []);
 
-  const CHART_LOOKBACK_DAYS = 120;
+  const CHART_LOOKBACK_DAYS = SPARKLINE_LOOKBACK_DAYS;
 
   const chronologicalData = useMemo(() => {
     if (!payload?.rows) return [];
@@ -475,12 +478,6 @@ export default function CockpitSection() {
   }
 
   const latestRow: BreadthRow = (payload?.rows || [])[0] || {};
-  const sparklineLatestDate =
-    chronologicalData[chronologicalData.length - 1]?.raw_date ||
-    chronologicalData[chronologicalData.length - 1]?.date ||
-    latestRow.raw_date ||
-    latestRow.date ||
-    "";
 
   const up4 = +(latestRow.c1_num ?? 0);
   const dn4 = +(latestRow.c2_num ?? 0);
@@ -556,7 +553,12 @@ export default function CockpitSection() {
                   </div>
                 </div>
                 <div className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1">
-                  <MicroSparkline data={chronologicalData} dataKey="c4_num" threshold={2.0} color="#fbbf24" />
+                  <MicroSparkline
+                    data={chronologicalData}
+                    dataKey="c4_num"
+                    threshold={RATIO_SPARKLINE_THRESHOLD}
+                    color="#fbbf24"
+                  />
                 </div>
               </div>
 
@@ -570,7 +572,12 @@ export default function CockpitSection() {
                   </div>
                 </div>
                 <div className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1">
-                  <MicroSparkline data={chronologicalData} dataKey="c3_num" threshold={2.0} color="#fbbf24" />
+                  <MicroSparkline
+                    data={chronologicalData}
+                    dataKey="c3_num"
+                    threshold={RATIO_SPARKLINE_THRESHOLD}
+                    color="#fbbf24"
+                  />
                 </div>
               </div>
 
@@ -585,10 +592,7 @@ export default function CockpitSection() {
                     {up4}
                   </div>
                 </div>
-                <div
-                  className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1"
-                  title={sparklineLatestDate ? `Latest: ${sparklineLatestDate} (rightmost dot)` : undefined}
-                >
+                <div className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1">
                   <MicroSparkline
                     data={chronologicalData}
                     dataKey="c1_num"
@@ -609,10 +613,7 @@ export default function CockpitSection() {
                     {dn4}
                   </div>
                 </div>
-                <div
-                  className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1"
-                  title={sparklineLatestDate ? `Latest: ${sparklineLatestDate} (rightmost dot)` : undefined}
-                >
+                <div className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1">
                   <MicroSparkline
                     data={chronologicalData}
                     dataKey="c2_num"

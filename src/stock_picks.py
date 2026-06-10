@@ -23,6 +23,149 @@ from src.storage import Storage
 logger = get_logger(__name__)
 
 
+def normalize_industry_label(text: str) -> str:
+    import re
+
+    cleaned = text.strip().lower().replace("&", " and ")
+    cleaned = re.sub(r"[^\w\s]", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _build_elite_industry_index(
+    market: dict[str, dict[str, Any]],
+) -> dict[str, list[str]]:
+    by_industry: dict[str, list[str]] = {}
+    for sym, row in market.items():
+        raw = str(row.get("industry") or "").strip()
+        if not raw:
+            continue
+        sym_u = sym.upper()
+        for key in {raw.lower(), normalize_industry_label(raw)}:
+            if not key:
+                continue
+            bucket = by_industry.setdefault(key, [])
+            if sym_u not in bucket:
+                bucket.append(sym_u)
+    return by_industry
+
+
+def _lookup_elite_candidates(
+    item: ScoredIndustry,
+    by_industry: dict[str, list[str]],
+) -> list[str]:
+    lookup_keys = [
+        item.name.strip().lower(),
+        normalize_industry_label(item.name),
+    ]
+    seen: set[str] = set()
+    out: list[str] = []
+    for key in lookup_keys:
+        if not key:
+            continue
+        for sym in by_industry.get(key, []):
+            if sym in seen:
+                continue
+            seen.add(sym)
+            out.append(sym)
+    return out
+
+
+def _fetch_finviz_industry_candidates(
+    industry_key: str,
+    config: dict[str, Any],
+) -> list[str]:
+    try:
+        if use_playwright_scraper(config):
+            with open_playwright_session(config) as playwright_session:
+                payload = fetch_industry_tickers(
+                    industry_key,
+                    config,
+                    playwright_session=playwright_session,
+                )
+        else:
+            payload = fetch_industry_tickers(industry_key, config)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Finviz screener fallback failed for %s: %s", industry_key, exc)
+        return []
+    return [str(ticker).upper() for ticker in (payload.get("tickers") or []) if ticker]
+
+
+def _rank_industry_tickers(
+    candidates: list[str],
+    *,
+    rs_map: dict[str, dict[str, Any]],
+    market: dict[str, dict[str, Any]],
+    min_rs_score: float,
+    min_daily_dv: float,
+    per_industry_cap: int | None = None,
+) -> list[str]:
+    from src.services.elite_data import elite_row_for_symbol, passes_elite_swing_filters
+
+    ranked: list[tuple[str, float]] = []
+    for sym in candidates:
+        rs_row = rs_map.get(sym)
+        if not rs_row:
+            continue
+        elite_row = elite_row_for_symbol(market, sym)
+        if not elite_row:
+            continue
+        rs_score = float(rs_row.get("rs_score", 0) or 0)
+        if not passes_elite_swing_filters(
+            elite_row,
+            rs_score,
+            min_rs_score=min_rs_score,
+            min_daily_dollar_volume=min_daily_dv,
+        ):
+            continue
+        ranked.append((sym, rs_score))
+    ranked.sort(key=lambda pair: (-pair[1], pair[0]))
+    tickers = [sym for sym, _ in ranked]
+    if per_industry_cap is not None and per_industry_cap > 0:
+        tickers = tickers[:per_industry_cap]
+    return tickers
+
+
+def _resolve_qualified_industry_tickers(
+    item: ScoredIndustry,
+    *,
+    by_industry: dict[str, list[str]],
+    rs_map: dict[str, dict[str, Any]],
+    market: dict[str, dict[str, Any]],
+    config: dict[str, Any],
+    min_rs_score: float,
+    min_daily_dv: float,
+) -> tuple[list[str], str, list[str]]:
+    """Return (tickers, candidate_source, candidates) for one industry."""
+    candidate_source = "elite_name"
+    candidates = _lookup_elite_candidates(item, by_industry)
+    if not candidates:
+        candidates = _fetch_finviz_industry_candidates(item.key, config)
+        candidate_source = "finviz_screener"
+
+    tickers = _rank_industry_tickers(
+        candidates,
+        rs_map=rs_map,
+        market=market,
+        min_rs_score=min_rs_score,
+        min_daily_dv=min_daily_dv,
+    )
+
+    if not tickers and candidate_source == "elite_name":
+        finviz_candidates = _fetch_finviz_industry_candidates(item.key, config)
+        if finviz_candidates:
+            candidate_source = "finviz_screener"
+            candidates = finviz_candidates
+            tickers = _rank_industry_tickers(
+                candidates,
+                rs_map=rs_map,
+                market=market,
+                min_rs_score=min_rs_score,
+                min_daily_dv=min_daily_dv,
+            )
+
+    return tickers, candidate_source, candidates
+
+
 def _stale_fallback_enabled(config: dict[str, Any]) -> bool:
     return bool(config.get("scraper", {}).get("stale_fallback_enabled", True))
 
@@ -215,21 +358,16 @@ def build_and_store_elite_industry_picks(
     config: dict[str, Any],
     *,
     elite_market: dict[str, dict[str, Any]] | None = None,
-    per_industry_cap: int = 10,
 ) -> dict[str, dict[str, Any]]:
-    """Elite industry cross: RS + Minervini trend stack + liquidity; skip empty industries."""
-    from src.services.elite_data import (
-        elite_row_for_symbol,
-        fetch_elite_market_data,
-        passes_elite_swing_filters,
-    )
+    """Build Top-N industries that each have RS-qualified picks; scan lower ranks to backfill slots."""
+    from src.services.elite_data import fetch_elite_market_data
 
     market = elite_market or fetch_elite_market_data()
     if not market:
         return {}
 
     rs_cfg = config.get("stock_rs", {})
-    cross_top = float(rs_cfg.get("cross_top_percent", 0.2))
+    cross_top = float(rs_cfg.get("cross_top_percent", 0.1))
     cross_top = max(0.01, min(1.0, cross_top))
     min_rs_score = 1.0 - cross_top
     min_daily_dv = float(rs_cfg.get("min_avg_dollar_volume_30d_usd", 15_000_000))
@@ -237,11 +375,7 @@ def build_and_store_elite_industry_picks(
     rs_map = {
         str(row["symbol"]).upper(): row for row in storage.get_stock_rs_raw(snapshot_date)
     }
-    by_industry: dict[str, list[str]] = {}
-    for sym, row in market.items():
-        industry_name = str(row.get("industry") or "").strip().lower()
-        if industry_name:
-            by_industry.setdefault(industry_name, []).append(sym.upper())
+    by_industry = _build_elite_industry_index(market)
 
     active = [item for item in scored if not item.excluded]
     active.sort(key=lambda item: top_strong_sort_key(item.score, item.rank_m, item.rank_q, item.key))
@@ -253,38 +387,36 @@ def build_and_store_elite_industry_picks(
     for item in active:
         if filled >= top_n:
             break
-        candidates = by_industry.get(item.name.strip().lower(), [])
-        ranked: list[tuple[str, float]] = []
-        for sym in candidates:
-            rs_row = rs_map.get(sym)
-            if not rs_row:
-                continue
-            elite_row = elite_row_for_symbol(market, sym)
-            if not elite_row:
-                continue
-            rs_score = float(rs_row.get("rs_score", 0) or 0)
-            if not passes_elite_swing_filters(
-                elite_row,
-                rs_score,
-                min_rs_score=min_rs_score,
-                min_daily_dollar_volume=min_daily_dv,
-            ):
-                continue
-            ranked.append((sym, rs_score))
-        ranked.sort(key=lambda pair: (-pair[1], pair[0]))
-        tickers = [sym for sym, _ in ranked[:per_industry_cap]]
 
-        # Always save the industry slot so the pipeline sees top_n results.
-        # Empty tickers are OK — the safety check needs the count to match.
+        tickers, candidate_source, _candidates = _resolve_qualified_industry_tickers(
+            item,
+            by_industry=by_industry,
+            rs_map=rs_map,
+            market=market,
+            config=config,
+            min_rs_score=min_rs_score,
+            min_daily_dv=min_daily_dv,
+        )
+
         if not tickers:
             skipped_empty += 1
             logger.info(
-                "Elite picks: industry %s has no symbols passing trend/liquidity — slot reserved",
+                "Elite picks: skipping industry %s (rank scan) — no RS>=%.2f symbols passing filters",
                 item.name,
+                min_rs_score,
             )
+            continue
 
-        filters = "elite_industry_match,minervini,liquidity,rs_top"
-        screener_url = "elite://export/local"
+        filters = (
+            "elite_industry_match,minervini,liquidity,rs_top"
+            if candidate_source == "elite_name"
+            else "finviz_screener,minervini,liquidity,rs_top"
+        )
+        screener_url = (
+            "elite://export/local"
+            if candidate_source == "elite_name"
+            else build_screener_url(item.key, config, 1)
+        )
         storage.save_industry_stock_picks(
             snapshot_date,
             item.key,
@@ -301,7 +433,7 @@ def build_and_store_elite_industry_picks(
         filled += 1
 
     logger.info(
-        "Elite industry picks: %d industries (%d empty), %d tickers",
+        "Elite industry picks: %d industries selected (%d skipped empty), %d tickers",
         len(results),
         skipped_empty,
         sum(len(payload.get("tickers") or []) for payload in results.values()),
@@ -315,45 +447,28 @@ def fetch_top_industry_stock_picks(
     scored: list[ScoredIndustry],
     config: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    """Fetch screener hits until Top N slots are filled, scanning lower ranks as needed."""
+    """Fetch screener hits until Top N industries each have tickers, scanning lower ranks as needed."""
     top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
     active = [s for s in scored if not s.excluded]
     active.sort(key=lambda x: top_strong_sort_key(x.score, x.rank_m, x.rank_q, x.key))
     if not active:
         return {}
 
-    batch_size = max(5, min(12, top_n))
     all_results: dict[str, dict[str, Any]] = {}
     filled_keys: list[str] = []
-    pending: list[str] = []
-
-    def _flush_pending() -> None:
-        nonlocal pending
-        if not pending:
-            return
-        batch_result = fetch_and_store_stock_picks(
-            storage,
-            snapshot_date,
-            pending,
-            config,
-        )
-        all_results.update(batch_result)
-        for key in pending:
-            if len(filled_keys) >= top_n:
-                break
-            tickers = (batch_result.get(key) or {}).get("tickers") or []
-            if tickers:
-                filled_keys.append(key)
-        pending = []
 
     for item in active:
         if len(filled_keys) >= top_n:
             break
-        pending.append(item.key)
-        if len(pending) >= batch_size:
-            _flush_pending()
-
-    if pending and len(filled_keys) < top_n:
-        _flush_pending()
+        batch_result = fetch_and_store_stock_picks(
+            storage,
+            snapshot_date,
+            [item.key],
+            config,
+        )
+        all_results.update(batch_result)
+        tickers = (batch_result.get(item.key) or {}).get("tickers") or []
+        if tickers:
+            filled_keys.append(item.key)
 
     return all_results
