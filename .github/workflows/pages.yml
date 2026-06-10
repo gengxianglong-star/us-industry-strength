@@ -57,6 +57,14 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests -p 'test_*.py' -q
 
+      - name: Verify catalyst API keys
+        if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
+        env:
+          FINVIZ_AUTH_KEY: ${{ secrets.FINVIZ_AUTH_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python scripts/check_catalyst_env.py
+        continue-on-error: true
+
       - name: Restore SQLite cache
         uses: actions/cache/restore@v4
         id: sqlite-cache

@@ -153,18 +153,51 @@ def extract_catalyst(symbol: str) -> dict[str, Any]:
         return {}
 
 
+def probe_catalyst_pipeline(test_symbol: str = "AAPL") -> dict[str, Any]:
+    """Non-secret health check for Finviz Elite news + optional Gemini (used by CI/local)."""
+    finviz_set = _FINVIZ_KEY is not None
+    gemini_set = _GEMINI_KEY is not None
+    result: dict[str, Any] = {
+        "finviz_auth_key_set": finviz_set,
+        "gemini_api_key_set": gemini_set,
+        "pipeline_available": is_available(),
+        "test_symbol": test_symbol.upper(),
+        "headline_count": 0,
+        "sample_headline": None,
+        "gemini_probe_ok": False,
+    }
+    if not finviz_set:
+        result["error"] = "FINVIZ_AUTH_KEY missing"
+        return result
+
+    headlines = _fetch_news_via_elite(test_symbol, max_items=2)
+    result["headline_count"] = len(headlines)
+    if headlines:
+        result["sample_headline"] = headlines[0][:120]
+
+    if not gemini_set:
+        result["error"] = "GEMINI_API_KEY missing"
+        return result
+    if not headlines:
+        result["error"] = "Finviz Elite returned no headlines — check auth key or symbol"
+        return result
+
+    sample = extract_catalyst(test_symbol)
+    result["gemini_probe_ok"] = bool(sample.get("tag"))
+    if sample.get("tag"):
+        result["sample_tag"] = sample["tag"]
+    return result
+
+
 def enrich_watchlist_with_catalysts(
     watchlist: list[dict[str, Any]],
     *,
-    min_rs_score: float = 0.80,
     max_symbols: int = 30,
 ) -> dict[str, dict[str, Any]]:
-    """Extract catalysts for top RS stocks in the watchlist.
+    """Extract catalysts for symbols in the final watchlist (in list order).
 
-    Only processes stocks with RS >= *min_rs_score*, up to *max_symbols*,
-    to keep API usage low and speed fast.
-
-    Returns a mapping of ``symbol -> catalyst_dict`` (tag + headlines).
+    Call this only after the watchlist is saved. Processes up to *max_symbols*
+    entries — typically the top of the list by ``rs_rank``.
     """
     if not is_available():
         missing = []
@@ -176,18 +209,18 @@ def enrich_watchlist_with_catalysts(
         return {}
 
     candidates = [
-        row["symbol"]
+        str(row["symbol"]).strip().upper()
         for row in watchlist
-        if float(row.get("rs_score", 0)) >= min_rs_score
+        if row.get("symbol")
     ][:max_symbols]
 
     if not candidates:
-        logger.info("No watchlist stocks with RS >= %.0f — skipping catalyst enrichment", min_rs_score * 100)
+        logger.info("Catalyst enrichment skipped — watchlist has no symbols")
         return {}
 
     logger.info(
-        "🔍 Extracting catalysts for %d symbols (RS >= %.0f%%) via Finviz Elite + Gemini...",
-        len(candidates), min_rs_score * 100,
+        "🔍 Extracting catalysts for %d final watchlist symbols via Finviz Elite + Gemini...",
+        len(candidates),
     )
     results: dict[str, dict[str, Any]] = {}
     for i, sym in enumerate(candidates):

@@ -14,6 +14,7 @@ from src.stock_picks import build_and_store_elite_industry_picks, fetch_top_indu
 from src.stock_rs import (
     backfill_new_stock_rs_for_snapshot,
     compute_and_store_stock_rs,
+    enrich_catalysts_for_snapshot,
     load_us_universe_with_cache,
     rebuild_stock_watchlist_for_snapshot,
 )
@@ -215,6 +216,15 @@ def run_daily_pipeline(
                     f"Computed={rs_result.get('computed_count', 0)} "
                     f"Watchlist={rs_result.get('watchlist_count', 0)}",
                 )
+                if int(rs_result.get("watchlist_count", 0) or 0) > 0:
+                    cat = enrich_catalysts_for_snapshot(storage, snapshot_date, config)
+                    result["catalyst"] = cat
+                    _log(
+                        opts,
+                        "观察名单催化剂："
+                        f"{cat.get('tagged_count', 0)}/{cat.get('candidate_count', 0)} "
+                        f"（最终名单 {cat.get('watchlist_count', 0)} 只）",
+                    )
 
         breadth_result: dict[str, Any] = {}
         if not opts.skip_breadth:

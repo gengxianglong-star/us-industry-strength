@@ -133,9 +133,7 @@ function buildAlphaPlot(nodes: RotationNode[]): PlotTransform {
   const xVals = nodes.map((n) => n.rs_3m);
   const yVals = nodes.map((n) => n.rs_1m);
   const dataXMin = Math.min(...xVals);
-  const dataXMax = Math.max(...xVals);
   const dataYMin = Math.min(...yVals);
-  const dataYMax = Math.max(...yVals);
 
   // Widen the axis floor so high-RS leaders in the top-right occupy more plot area.
   const AXIS_FLOOR = 42;

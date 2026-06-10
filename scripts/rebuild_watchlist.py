@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 
 from src.config_loader import db_path, load_config
 from src.services.snapshots import scored_industries_from_rows
-from src.stock_rs import rebuild_stock_watchlist_for_snapshot
+from src.stock_rs import enrich_catalysts_for_snapshot, rebuild_stock_watchlist_for_snapshot
 from src.storage import Storage
 
 
@@ -39,10 +39,19 @@ def main() -> int:
     count = int(info.get("watchlist_count", 0) or storage.count_stock_watchlist(snapshot_date))
     print(f"Done: watchlist_count={count}")
 
+    print("Running catalyst enrichment on final watchlist…")
+    cat = enrich_catalysts_for_snapshot(storage, snapshot_date, config)
+    print(
+        f"Catalysts: {cat.get('tagged_count', 0)}/{cat.get('candidate_count', 0)} tagged "
+        f"(skipped={cat.get('skipped')})"
+    )
+
     preview = storage.get_stock_watchlist(snapshot_date, limit=10)
     for row in preview:
         industry = (row.get("industries") or [""])[0]
-        print(f"  #{row['rs_rank']} {row['symbol']} RS={float(row['rs_score']):.3f} {industry}")
+        tag = (row.get("catalyst") or {}).get("tag")
+        tag_suffix = f"  [{tag}]" if tag else ""
+        print(f"  #{row['rs_rank']} {row['symbol']} RS={float(row['rs_score']):.3f} {industry}{tag_suffix}")
 
     if args.export and count > 0:
         import subprocess

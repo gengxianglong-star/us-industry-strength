@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 import requests
 
-from src.config_loader import ROOT, TIMEFRAMES
+from src.config_loader import ROOT, TIMEFRAMES, load_config
 from src.logging_config import get_logger
 from src.math_utils import percentile_rank, rank_dict_by_key, weighted_momentum_composite
 from src.scoring import ScoredIndustry, filter_top_strong
@@ -21,20 +21,81 @@ from src.storage import Storage
 
 logger = get_logger(__name__)
 
+def _save_watchlist(
+    storage: Storage,
+    snapshot_date: str,
+    watch_rows: list[dict[str, Any]],
+) -> None:
+    storage.save_stock_watchlist(snapshot_date, watch_rows)
+
+
+def enrich_catalysts_for_snapshot(
+    storage: Storage,
+    snapshot_date: str,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Pull Finviz news + Gemini tags for the saved final watchlist (post-build only)."""
+    cfg = (config or load_config()).get("catalyst") or {}
+    max_symbols = int(cfg.get("max_symbols", 30))
+    watchlist_count = storage.count_stock_watchlist(snapshot_date)
+    if watchlist_count <= 0:
+        logger.info("Catalyst enrichment skipped — no watchlist for %s", snapshot_date)
+        return {
+            "snapshot_date": snapshot_date,
+            "watchlist_count": 0,
+            "candidate_count": 0,
+            "tagged_count": 0,
+            "skipped": True,
+            "reason": "empty_watchlist",
+        }
+
+    rows = storage.get_stock_watchlist(snapshot_date, limit=max(max_symbols, 120))
+    slim_rows = [
+        {"symbol": row["symbol"], "rs_score": row.get("rs_score")}
+        for row in rows
+        if row.get("symbol")
+    ]
+    candidates = slim_rows[:max_symbols]
+
+    try:
+        from src.services.catalyst_llm import enrich_watchlist_with_catalysts
+
+        catalysts = enrich_watchlist_with_catalysts(candidates)
+        if catalysts:
+            storage.save_stock_catalysts(snapshot_date, catalysts)
+        tagged_count = len(catalysts)
+        logger.info(
+            "Catalyst enrichment done for %s: %d/%d watchlist symbols tagged",
+            snapshot_date,
+            tagged_count,
+            len(candidates),
+        )
+        return {
+            "snapshot_date": snapshot_date,
+            "watchlist_count": watchlist_count,
+            "candidate_count": len(candidates),
+            "tagged_count": tagged_count,
+            "skipped": False,
+        }
+    except Exception:
+        logger.warning("Catalyst enrichment failed for %s", snapshot_date, exc_info=True)
+        return {
+            "snapshot_date": snapshot_date,
+            "watchlist_count": watchlist_count,
+            "candidate_count": len(candidates),
+            "tagged_count": 0,
+            "skipped": True,
+            "reason": "error",
+        }
+
+
 def _save_watchlist_and_enrich_catalysts(
     storage: Storage,
     snapshot_date: str,
     watch_rows: list[dict[str, Any]],
 ) -> None:
-    """Save watchlist and optionally enrich top RS stocks with AI catalyst tags."""
-    storage.save_stock_watchlist(snapshot_date, watch_rows)
-    try:
-        from src.services.catalyst_llm import enrich_watchlist_with_catalysts
-        catalysts = enrich_watchlist_with_catalysts(watch_rows)
-        if catalysts:
-            storage.save_stock_catalysts(snapshot_date, catalysts)
-    except Exception:
-        logger.warning("Catalyst enrichment failed", exc_info=True)
+    """Save watchlist only (catalysts run once after the final list is ready)."""
+    _save_watchlist(storage, snapshot_date, watch_rows)
 
 
 PERF_INDEX_OFFSETS = {
