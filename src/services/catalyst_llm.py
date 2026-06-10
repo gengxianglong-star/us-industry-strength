@@ -1,17 +1,18 @@
-"""AI-powered catalyst extraction for watchlist stocks via Google Gemini API.
+"""AI-powered catalyst extraction for watchlist stocks via Finviz Elite + Gemini.
 
-Uses the same ``GEMINI_API_KEY`` from ``.env`` as ``ai_brief.py``.
-Only fetches catalysts for stocks with RS >= 95 to stay fast and focused.
+Uses ``FINVIZ_AUTH_KEY`` to fetch news from the Finviz Elite quote page
+(direct, ad-free, no IP blocking), then extracts a Qullamaggie-style
+bullish catalyst tag via Gemini 2.0 Flash.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from typing import Any
 
-import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from google.genai import Client as GenAiClient
 from google.genai import types as genai_types
@@ -22,52 +23,91 @@ logger = get_logger(__name__)
 
 load_dotenv()
 
-_API_KEY: str | None = os.environ.get("GEMINI_API_KEY") or None
+_GEMINI_KEY: str | None = os.environ.get("GEMINI_API_KEY") or None
+_FINVIZ_KEY: str | None = (
+    os.environ.get("FINVIZ_AUTH_KEY") or os.environ.get("FINVIZ_ELITE_AUTH") or None
+)
 
 _client: GenAiClient | None = None
+
+_ELITE_QUOTE_URL = "https://elite.finviz.com/quote.ashx"
+_ELITE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 
 def _get_client() -> GenAiClient | None:
     global _client
-    if _client is None and _API_KEY:
-        _client = GenAiClient(api_key=_API_KEY)
+    if _client is None and _GEMINI_KEY:
+        _client = GenAiClient(api_key=_GEMINI_KEY)
     return _client
 
 
 def is_available() -> bool:
-    """Return ``True`` if a Gemini API key has been configured."""
-    return _API_KEY is not None
+    """Return ``True`` if both Gemini API key and Finviz Elite key are set."""
+    return _GEMINI_KEY is not None and _FINVIZ_KEY is not None
 
 
-def _fetch_news_headlines(symbol: str, max_items: int = 3) -> list[str]:
-    """Fetch recent news headlines for a symbol via yfinance."""
-    try:
-        ticker = yf.Ticker(symbol)
-        news_items = ticker.news[:max_items]
-        if not news_items:
-            return []
-        headlines: list[str] = []
-        for item in news_items:
-            title = str(item.get("title") or "").strip()
-            if title:
-                headlines.append(title)
-        return headlines
-    except Exception:
-        logger.debug("yfinance news fetch failed for %s", symbol, exc_info=True)
+def _fetch_news_via_elite(symbol: str, max_items: int = 4) -> list[str]:
+    """Fetch recent news headlines from the Finviz Elite quote page.
+
+    Uses the authenticated Elite URL (``?auth=...``) to bypass ad pages
+    and avoid IP blocking.  Parses the ``#news-table`` table rows.
+    """
+    if not _FINVIZ_KEY:
+        logger.debug("FINVIZ_AUTH_KEY not set — skipping Elite news fetch for %s", symbol)
         return []
+
+    url = f"{_ELITE_QUOTE_URL}?t={symbol}&auth={_FINVIZ_KEY}"
+    try:
+        resp = requests.get(url, headers=_ELITE_HEADERS, timeout=15)
+        if resp.status_code != 200:
+            logger.warning(
+                "Finviz Elite returned %d for %s news fetch",
+                resp.status_code, symbol,
+            )
+            return []
+    except requests.RequestException as exc:
+        logger.warning("Finviz Elite news fetch failed for %s: %s", symbol, exc)
+        return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    news_table = soup.find(id="news-table")
+    if not news_table:
+        logger.info("📭 %s — no news-table found on Elite quote page", symbol)
+        return []
+
+    headlines: list[str] = []
+    for row in news_table.find_all("tr")[:max_items]:
+        a_tag = row.find("a")
+        if a_tag:
+            text = a_tag.text.strip()
+            if text:
+                headlines.append(text)
+
+    if headlines:
+        logger.debug("  %s — %d headlines from Elite", symbol, len(headlines))
+    return headlines
 
 
 def extract_catalyst(symbol: str) -> dict[str, Any]:
-    """Fetch recent news and use Gemini to extract a Qullamaggie-style catalyst tag.
+    """Fetch recent news via Finviz Elite and use Gemini to extract a
+    Qullamaggie-style catalyst tag.
 
     Returns a dict with ``"tag"`` and ``"headlines"``, or an empty dict if
-    no catalyst was found / the API key is missing.
+    no catalyst was found, keys are missing, or the call fails.
     """
     client = _get_client()
     if client is None:
+        logger.debug("Gemini client not available — skipping %s", symbol)
         return {}
 
-    headlines = _fetch_news_headlines(symbol)
+    headlines = _fetch_news_via_elite(symbol)
     if not headlines:
         return {}
 
@@ -99,8 +139,10 @@ def extract_catalyst(symbol: str) -> dict[str, Any]:
         tag = (response.text or "").strip().upper()
 
         if tag == "NONE" or len(tag) > 25 or not tag:
+            logger.info("🤖 %s — AI tagged as noise (NONE)", symbol)
             return {}
 
+        logger.info("✨ %s — catalyst: 【%s】", symbol, tag)
         return {
             "tag": tag,
             "headlines": headlines[:2],
@@ -125,7 +167,12 @@ def enrich_watchlist_with_catalysts(
     Returns a mapping of ``symbol -> catalyst_dict`` (tag + headlines).
     """
     if not is_available():
-        logger.info("Catalyst extraction skipped: GEMINI_API_KEY not configured")
+        missing = []
+        if not _GEMINI_KEY:
+            missing.append("GEMINI_API_KEY")
+        if not _FINVIZ_KEY:
+            missing.append("FINVIZ_AUTH_KEY")
+        logger.info("Catalyst enrichment skipped — missing: %s", ", ".join(missing))
         return {}
 
     candidates = [
@@ -135,18 +182,23 @@ def enrich_watchlist_with_catalysts(
     ][:max_symbols]
 
     if not candidates:
+        logger.info("No watchlist stocks with RS >= %.0f — skipping catalyst enrichment", min_rs_score * 100)
         return {}
 
-    logger.info("Extracting catalysts for %d symbols (RS >= %.0f%%)...", len(candidates), min_rs_score * 100)
+    logger.info(
+        "🔍 Extracting catalysts for %d symbols (RS >= %.0f%%) via Finviz Elite + Gemini...",
+        len(candidates), min_rs_score * 100,
+    )
     results: dict[str, dict[str, Any]] = {}
     for i, sym in enumerate(candidates):
         catalyst = extract_catalyst(sym)
         if catalyst:
             results[sym] = catalyst
-            logger.debug("  %s → %s", sym, catalyst["tag"])
-        # Rate-limit: small delay between API calls
         if i < len(candidates) - 1:
-            time.sleep(0.6)
+            time.sleep(0.6)  # rate-limit between symbols
 
-    logger.info("Catalyst extraction complete: %d/%d symbols tagged", len(results), len(candidates))
+    logger.info(
+        "Catalyst extraction complete: %d/%d symbols tagged",
+        len(results), len(candidates),
+    )
     return results
