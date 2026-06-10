@@ -983,6 +983,16 @@ function safeGetCanvas(id: string): HTMLCanvasElement | null {
   return document.getElementById(id) as HTMLCanvasElement | null;
 }
 
+function latestPointRadius(ctx, defaultRadius = 0) {
+  const last = ctx.dataset.data.length - 1;
+  return ctx.dataIndex === last ? 6 : defaultRadius;
+}
+
+function latestPointBorderColor(ctx) {
+  const last = ctx.dataset.data.length - 1;
+  return ctx.dataIndex === last ? "#FFFFFF" : "transparent";
+}
+
 function lineDataset(partial) {
   return {
     tension: 0.2,
@@ -992,6 +1002,16 @@ function lineDataset(partial) {
     pointHitRadius: 10,
     fill: false,
     ...partial,
+  };
+}
+
+function upDown4Dataset(partial) {
+  return {
+    ...lineDataset(partial),
+    pointRadius: (ctx) => latestPointRadius(ctx, 2),
+    pointBorderWidth: (ctx) => (ctx.dataIndex === ctx.dataset.data.length - 1 ? 2 : 0),
+    pointBorderColor: (ctx) => latestPointBorderColor(ctx),
+    pointHoverRadius: (ctx) => latestPointRadius(ctx, 4),
   };
 }
 
@@ -1057,8 +1077,8 @@ function renderCharts(payload) {
     data: {
       labels,
       datasets: [
-        lineDataset({ label: "Up 4%+", data: rows.map((r) => toNum(r.c1_num)), borderColor: theme.ok }),
-        lineDataset({ label: "Down 4%+", data: rows.map((r) => toNum(r.c2_num)), borderColor: theme.bad }),
+        upDown4Dataset({ label: "Up 4%+", data: rows.map((r) => toNum(r.c1_num)), borderColor: theme.ok }),
+        upDown4Dataset({ label: "Down 4%+", data: rows.map((r) => toNum(r.c2_num)), borderColor: theme.bad }),
       ],
     },
     options: chartOptions(theme, { scales: chartScaleOptions(theme) }),

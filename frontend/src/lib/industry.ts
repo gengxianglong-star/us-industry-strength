@@ -79,6 +79,8 @@ export type WatchlistRow = {
   rs_rank: number;
   rs_score: number;
   industries?: string[];
+  industry_name?: string;
+  name?: string;
   rank_w_delta?: number | null;
   exchange?: string | null;
   chart_bars?: WatchlistChartBar[];
@@ -199,6 +201,10 @@ export function rankHeat(rank: number) {
 
 export function finvizDailyChartUrl(symbol: string) {
   return `https://charts2.finviz.com/chart.ashx?t=${encodeURIComponent(symbol)}&ty=c&ta=1&p=d&s=l&theme=dark`;
+}
+
+export function finvizQuoteUrl(symbol: string) {
+  return `https://finviz.com/quote.ashx?t=${encodeURIComponent(symbol)}`;
 }
 
 export function rsUniverseCount(

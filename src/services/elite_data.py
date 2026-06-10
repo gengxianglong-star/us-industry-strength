@@ -39,6 +39,13 @@ _PERF_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "volatility_m": ("Volatility (Month)", "Volatility M", "Volatility Month"),
 }
 
+_TECH_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "sma20": ("SMA20", "20-Day Simple Moving Average", "20-SMA"),
+    "sma50": ("SMA50", "50-Day Simple Moving Average", "50-SMA"),
+    "sma200": ("SMA200", "200-Day Simple Moving Average", "200-SMA"),
+    "volume": ("Volume",),
+}
+
 
 def elite_auth_key() -> str | None:
     key = (os.getenv("FINVIZ_AUTH_KEY") or os.getenv("FINVIZ_ELITE_AUTH") or "").strip()
@@ -170,8 +177,18 @@ def _validate_export_body(text: str, *, final_url: str, label: str) -> None:
         )
 
 
+def _export_label(url: str) -> str:
+    if "v=111" in url:
+        return "overview"
+    if "v=141" in url:
+        return "performance"
+    if "v=171" in url:
+        return "technical"
+    return "export"
+
+
 def _fetch_export_text(url: str, *, timeout: int = 60, max_retries: int = 3) -> str:
-    label = "overview" if "v=111" in url else "performance"
+    label = _export_label(url)
     # Elite export auth= token is sufficient; Netscape cookie file must not be raw-set as header.
     use_cookies = not _url_has_auth_param(url)
     last_error: Exception | None = None
@@ -238,8 +255,14 @@ def fetch_elite_market_data(
         logger.info("FINVIZ_AUTH_KEY not set; skipping Elite engine")
         return None
 
+    fetch_technical = (os.getenv("FINVIZ_ELITE_FETCH_TECHNICAL") or "true").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
     logger.info(
-        "Elite engine: fetching overview + performance (host=%s, filter=%s)",
+        "Elite engine: fetching overview + performance%s (host=%s, filter=%s)",
+        " + technical" if fetch_technical else "",
         ELITE_HOST,
         elite_market_filter(),
     )
@@ -247,21 +270,32 @@ def fetch_elite_market_data(
     url_pair = _export_urls_from_env(key)
     if url_pair:
         url_overview, url_perf = url_pair
+        url_technical = build_elite_export_url(
+            view="171",
+            auth_key=key,
+            filters=elite_market_filter(),
+        )
     else:
         filt = elite_market_filter()
         url_overview = build_elite_export_url(view="111", auth_key=key, filters=filt)
         url_perf = build_elite_export_url(view="141", auth_key=key, filters=filt)
+        url_technical = build_elite_export_url(view="171", auth_key=key, filters=filt)
 
     try:
         text_ov = _fetch_export_text(url_overview, timeout=timeout)
         time.sleep(1.0)  # Elite recommends <= 1 req / 60s; brief pause between views
         text_pf = _fetch_export_text(url_perf, timeout=timeout)
+        text_tech = ""
+        if fetch_technical:
+            time.sleep(1.0)
+            text_tech = _fetch_export_text(url_technical, timeout=timeout)
     except RuntimeError as exc:
         logger.warning("%s; falling back to free path", exc)
         return None
 
     overview_rows = _parse_csv(text_ov)
     perf_rows = _parse_csv(text_pf)
+    tech_rows = _parse_csv(text_tech) if text_tech else []
     if not overview_rows:
         logger.warning("Elite overview CSV empty; falling back")
         return None
@@ -277,6 +311,7 @@ def fetch_elite_market_data(
             "sector": row.get("Sector", "") or "",
             "market_cap": row.get("Market Cap", "") or "",
             "price": row.get("Price", "") or "",
+            "volume": _pick(row, _TECH_FIELD_ALIASES["volume"]),
         }
 
     for row in perf_rows:
@@ -296,11 +331,27 @@ def fetch_elite_market_data(
             }
         )
 
+    for row in tech_rows:
+        ticker = str(row.get("Ticker") or row.get("ticker") or "").upper().strip()
+        if not ticker or ticker not in market_data:
+            continue
+        market_data[ticker].update(
+            {
+                "sma20": _pick(row, _TECH_FIELD_ALIASES["sma20"]),
+                "sma50": _pick(row, _TECH_FIELD_ALIASES["sma50"]),
+                "sma200": _pick(row, _TECH_FIELD_ALIASES["sma200"]),
+            }
+        )
+        if not market_data[ticker].get("volume"):
+            market_data[ticker]["volume"] = _pick(row, _TECH_FIELD_ALIASES["volume"])
+
     with_perf = sum(1 for row in market_data.values() if row.get("perf_month"))
+    with_tech = sum(1 for row in market_data.values() if row.get("sma20"))
     logger.info(
-        "Elite engine loaded %d symbols (%d with performance fields)",
+        "Elite engine loaded %d symbols (%d with performance, %d with SMA fields)",
         len(market_data),
         with_perf,
+        with_tech,
     )
     return market_data
 
@@ -310,6 +361,24 @@ def _looks_like_html_error(text: str) -> bool:
     if head.startswith("ticker,") or head.startswith("no.,ticker"):
         return False
     return head.startswith("<!doctype html") or head.startswith("<html")
+
+
+def parse_finviz_number(value: Any) -> float | None:
+    """Parse Finviz numeric cells (prices, volumes) with commas."""
+    text = str(value or "").strip().replace(",", "")
+    if not text or text in ("-", "—", "N/A"):
+        return None
+    multipliers = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
+    suffix = text[-1].upper()
+    if suffix in multipliers:
+        try:
+            return float(text[:-1]) * multipliers[suffix]
+        except ValueError:
+            return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def parse_finviz_percent(value: Any) -> float | None:
@@ -370,6 +439,36 @@ def elite_row_for_symbol(
         if row:
             return row
     return None
+
+
+def passes_elite_swing_filters(
+    row: dict[str, Any],
+    rs_score: float,
+    *,
+    min_rs_score: float = 0.9,
+    min_daily_dollar_volume: float = 100_000_000.0,
+) -> bool:
+    """
+    Minervini-style trend stack + liquidity using Finviz SMA distance columns.
+
+    SMA fields are % distance of price above/below each moving average.
+  """
+    if rs_score < min_rs_score:
+        return False
+    price = parse_finviz_number(row.get("price"))
+    volume = parse_finviz_number(row.get("volume"))
+    if price is None or volume is None or price * volume < min_daily_dollar_volume:
+        return False
+    sma20 = parse_finviz_percent(row.get("sma20"))
+    sma50 = parse_finviz_percent(row.get("sma50"))
+    sma200 = parse_finviz_percent(row.get("sma200"))
+    if sma20 is None or sma50 is None or sma200 is None:
+        return False
+    if sma200 <= 0 or sma20 <= 0:
+        return False
+    if sma50 <= sma20:
+        return False
+    return True
 
 
 def build_perf_map_from_elite(

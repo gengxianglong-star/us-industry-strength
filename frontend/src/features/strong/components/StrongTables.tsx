@@ -2,6 +2,8 @@ import { tradingViewUrl, WatchlistFinvizChart } from "./WatchlistLightweightChar
 import {
   computeLongTrend,
   computeShortTrend,
+  finvizDailyChartUrl,
+  finvizQuoteUrl,
   getTopStrongIndustries,
   normalizeTrendLabel,
   pct,
@@ -10,7 +12,44 @@ import {
   type IndustryRow,
   type RsPayload,
   type SnapshotPayload,
+  type WatchlistRow,
 } from "../../../lib/industry";
+
+function watchlistIndustryLabel(
+  row: WatchlistRow,
+  industryNames?: Map<string, string>,
+) {
+  const direct = (row.industry_name || row.name || "").trim();
+  if (direct) return direct;
+  return (row.industries || [])
+    .map((key) => industryNames?.get(key) || key)
+    .filter(Boolean)
+    .join(" · ");
+}
+
+export function WatchlistFinvizSymbolLink({ symbol }: { symbol: string }) {
+  return (
+    <a
+      href={finvizQuoteUrl(symbol)}
+      target="_blank"
+      rel="noreferrer"
+      className="group relative font-mono font-black text-cyan-400 text-sm hover:text-cyan-300 hover:underline"
+      title="Open Finviz quote"
+    >
+      {symbol}
+      <div className="absolute left-0 top-full mt-2 hidden group-hover:block z-50 pointer-events-none">
+        <div className="rounded-lg border border-slate-700 bg-[#0b0f19] p-1 shadow-2xl">
+          <img
+            src={finvizDailyChartUrl(symbol)}
+            alt={`${symbol} daily chart`}
+            referrerPolicy="no-referrer"
+            className="w-[400px] max-w-none rounded"
+          />
+        </div>
+      </div>
+    </a>
+  );
+}
 
 function trendPillClass(text: string) {
   const t = normalizeTrendLabel(text);
@@ -180,12 +219,6 @@ export function WatchlistChartGrid({
   watchlist: RsPayload["watchlist"];
   industryNames?: Map<string, string>;
 }) {
-  const labelIndustries = (keys?: string[]) =>
-    (keys || [])
-      .map((k) => industryNames?.get(k) || k)
-      .filter(Boolean)
-      .join(" · ");
-
   if (!watchlist.length) {
     return (
       <p className="text-xs text-slate-500 font-mono py-4 text-center">
@@ -196,12 +229,33 @@ export function WatchlistChartGrid({
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[78vh] overflow-y-auto pr-1">
       {watchlist.map((row) => {
-        const industry = labelIndustries(row.industries);
+        const industry = watchlistIndustryLabel(row, industryNames);
         return (
           <article
             key={row.symbol}
-            className="bg-black border border-slate-800 rounded-lg overflow-hidden hover:border-cyan-500/40 hover:shadow-[0_0_12px_rgba(34,211,238,0.08)] transition-all group"
+            className="bg-black border border-slate-800 rounded-lg overflow-hidden hover:border-cyan-500/40 hover:shadow-[0_0_12px_rgba(34,211,238,0.08)] transition-all"
           >
+            <div className="px-2.5 py-1.5 border-b border-slate-800/80 bg-slate-950/80">
+              <div className="flex justify-between items-center gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <WatchlistFinvizSymbolLink symbol={row.symbol} />
+                  {industry ? (
+                    <span className="text-[10px] font-mono text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded truncate max-w-[140px]">
+                      {industry}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2 text-[10px] font-mono shrink-0">
+                  <span
+                    className={`font-bold ${rankDeltaClass(row.rank_w_delta)}`}
+                    title="1W rank Δ"
+                  >
+                    {fmtRankDelta(row.rank_w_delta)}
+                  </span>
+                  <span className="text-slate-500">RS {Number(row.rs_score).toFixed(2)}</span>
+                </div>
+              </div>
+            </div>
             <a
               href={tradingViewUrl(row.symbol, row.exchange)}
               target="_blank"
@@ -209,28 +263,9 @@ export function WatchlistChartGrid({
               className="block"
               title="Open in TradingView"
             >
-              <div className="px-2.5 py-1.5 border-b border-slate-800/80 bg-slate-950/80">
-                <div className="flex justify-between items-baseline gap-2">
-                  <span className="font-mono font-black text-cyan-400 text-sm group-hover:text-cyan-300">
-                    {row.symbol}
-                  </span>
-                  <div className="flex items-center gap-2 text-[10px] font-mono shrink-0">
-                    <span
-                      className={`font-bold ${rankDeltaClass(row.rank_w_delta)}`}
-                      title="1W rank Δ"
-                    >
-                      {fmtRankDelta(row.rank_w_delta)}
-                    </span>
-                    <span className="text-slate-500">RS {Number(row.rs_score).toFixed(2)}</span>
-                  </div>
-                </div>
-                {industry ? (
-                  <p className="mt-0.5 text-[10px] font-mono text-slate-500 truncate">{industry}</p>
-                ) : null}
-              </div>
               <WatchlistFinvizChart symbol={row.symbol} />
               <div className="px-2 py-1 border-t border-slate-900 text-[9px] font-mono text-slate-600">
-                Finviz · daily · SMA
+                Finviz · daily · SMA · hover symbol for preview
               </div>
             </a>
           </article>

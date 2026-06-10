@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from src.config_loader import TIMEFRAMES
-from src.math_utils import percentile_rank
+from src.math_utils import percentile_rank, rank_dict_by_key, weighted_momentum_composite
 from src.finviz_scraper import IndustryRow
 
 PERF_ATTR = {
@@ -96,20 +96,35 @@ def score_industries(rows: list[IndustryRow], config: dict[str, Any]) -> list[Sc
             finviz_url=row.finviz_url,
         )
 
-        item.score = sum(
-            weights[tf] * percentile_rank(ranks[tf][row.key], total) for tf in TIMEFRAMES
+        item.score = weighted_momentum_composite(
+            {
+                "perf_w": item.perf_w,
+                "perf_m": item.perf_m,
+                "perf_q": item.perf_q,
+                "perf_h": item.perf_h,
+                "perf_y": item.perf_y,
+            },
+            weights,
         )
 
-        rank_values = [item.rank_w, item.rank_m, item.rank_q, item.rank_h, item.rank_y]
-        spread = max(rank_values) - min(rank_values)
+        scored.append(item)
 
-        if item.score >= tier_a:
+    score_ranks = rank_dict_by_key(
+        [{"industry_key": item.key, "score": item.score} for item in scored],
+        "score",
+        id_key="industry_key",
+    )
+    for item in scored:
+        strength = percentile_rank(score_ranks[item.key], total)
+        if strength >= tier_a:
             item.tier = "A"
-        elif item.score >= tier_b:
+        elif strength >= tier_b:
             item.tier = "B"
         else:
             item.tier = "C"
 
+        rank_values = [item.rank_w, item.rank_m, item.rank_q, item.rank_h, item.rank_y]
+        spread = max(rank_values) - min(rank_values)
         core_ok = (
             item.rank_m <= core_rank_max
             and item.rank_q <= core_rank_max
@@ -150,8 +165,6 @@ def score_industries(rows: list[IndustryRow], config: dict[str, Any]) -> list[Sc
 
         if item.rank_m > 80 and item.rank_h > 60:
             item.tags.append("Weak")
-
-        scored.append(item)
 
     scored.sort(key=lambda x: top_strong_sort_key(x.score, x.rank_m, x.rank_q, x.key))
     return scored

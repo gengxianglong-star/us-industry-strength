@@ -114,9 +114,23 @@ function MicroSparkline({
           dataKey={dataKey as string}
           stroke={neutralColor}
           strokeWidth={1.5}
-          dot={(props: { cx?: number; cy?: number; payload?: BreadthRow }) => {
+          dot={(props: { cx?: number; cy?: number; payload?: BreadthRow; index?: number }) => {
+            if (props.cx == null || props.cy == null) return null;
+            const isLatest = props.index === data.length - 1;
             const val = Number(props.payload?.[dataKey] ?? 0);
-            if (val >= threshold && props.cx != null && props.cy != null) {
+            if (isLatest) {
+              return (
+                <circle
+                  cx={props.cx}
+                  cy={props.cy}
+                  r={5}
+                  fill={color}
+                  stroke="#ffffff"
+                  strokeWidth={1.5}
+                />
+              );
+            }
+            if (val >= threshold) {
               return <circle cx={props.cx} cy={props.cy} r={3} fill={color} stroke={color} />;
             }
             return null;
@@ -465,6 +479,12 @@ export default function CockpitSection() {
   }
 
   const latestRow: BreadthRow = (payload?.rows || [])[0] || {};
+  const sparklineLatestDate =
+    chronologicalData[chronologicalData.length - 1]?.raw_date ||
+    chronologicalData[chronologicalData.length - 1]?.date ||
+    latestRow.raw_date ||
+    latestRow.date ||
+    "";
 
   const up4 = +(latestRow.c1_num ?? 0);
   const dn4 = +(latestRow.c2_num ?? 0);
@@ -569,7 +589,10 @@ export default function CockpitSection() {
                     {up4}
                   </div>
                 </div>
-                <div className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1">
+                <div
+                  className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1"
+                  title={sparklineLatestDate ? `Latest: ${sparklineLatestDate} (rightmost dot)` : undefined}
+                >
                   <MicroSparkline
                     data={chronologicalData}
                     dataKey="c1_num"
@@ -590,7 +613,10 @@ export default function CockpitSection() {
                     {dn4}
                   </div>
                 </div>
-                <div className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1">
+                <div
+                  className="flex-1 bg-slate-900/30 rounded border border-slate-800/40 p-1"
+                  title={sparklineLatestDate ? `Latest: ${sparklineLatestDate} (rightmost dot)` : undefined}
+                >
                   <MicroSparkline
                     data={chronologicalData}
                     dataKey="c2_num"

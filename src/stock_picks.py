@@ -215,14 +215,24 @@ def build_and_store_elite_industry_picks(
     config: dict[str, Any],
     *,
     elite_market: dict[str, dict[str, Any]] | None = None,
-    per_industry_cap: int = 20,
+    per_industry_cap: int = 10,
 ) -> dict[str, dict[str, Any]]:
-    """Pair Top industries with Elite symbols by industry name + RS rank (no screener crawl)."""
-    from src.services.elite_data import fetch_elite_market_data
+    """Elite industry cross: RS + Minervini trend stack + liquidity; skip empty industries."""
+    from src.services.elite_data import (
+        elite_row_for_symbol,
+        fetch_elite_market_data,
+        passes_elite_swing_filters,
+    )
 
     market = elite_market or fetch_elite_market_data()
     if not market:
         return {}
+
+    rs_cfg = config.get("stock_rs", {})
+    cross_top = float(rs_cfg.get("cross_top_percent", 0.1))
+    cross_top = max(0.01, min(1.0, cross_top))
+    min_rs_score = 1.0 - cross_top
+    min_daily_dv = float(rs_cfg.get("min_avg_dollar_volume_30d_usd", 100_000_000))
 
     rs_map = {
         str(row["symbol"]).upper(): row for row in storage.get_stock_rs_raw(snapshot_date)
@@ -238,23 +248,39 @@ def build_and_store_elite_industry_picks(
     top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
     results: dict[str, dict[str, Any]] = {}
     filled = 0
+    skipped_empty = 0
 
     for item in active:
         if filled >= top_n:
             break
         candidates = by_industry.get(item.name.strip().lower(), [])
-        ranked = [
-            (sym, rs_map[sym])
-            for sym in candidates
-            if sym in rs_map
-        ]
-        ranked.sort(
-            key=lambda pair: (-float(pair[1].get("rs_score", 0) or 0), pair[0]),
-        )
+        ranked: list[tuple[str, float]] = []
+        for sym in candidates:
+            rs_row = rs_map.get(sym)
+            if not rs_row:
+                continue
+            elite_row = elite_row_for_symbol(market, sym)
+            if not elite_row:
+                continue
+            rs_score = float(rs_row.get("rs_score", 0) or 0)
+            if not passes_elite_swing_filters(
+                elite_row,
+                rs_score,
+                min_rs_score=min_rs_score,
+                min_daily_dollar_volume=min_daily_dv,
+            ):
+                continue
+            ranked.append((sym, rs_score))
+        ranked.sort(key=lambda pair: (-pair[1], pair[0]))
         tickers = [sym for sym, _ in ranked[:per_industry_cap]]
         if not tickers:
+            skipped_empty += 1
+            logger.info(
+                "Elite picks: skipped industry %s — no symbols passed trend/liquidity filters",
+                item.name,
+            )
             continue
-        filters = "elite_industry_match"
+        filters = "elite_industry_match,minervini,liquidity,rs_top"
         screener_url = "elite://export/local"
         storage.save_industry_stock_picks(
             snapshot_date,
@@ -272,8 +298,9 @@ def build_and_store_elite_industry_picks(
         filled += 1
 
     logger.info(
-        "Elite industry picks: %d industries, %d tickers",
+        "Elite industry picks: %d industries (%d empty skipped), %d tickers",
         len(results),
+        skipped_empty,
         sum(len(payload["tickers"]) for payload in results.values()),
     )
     return results

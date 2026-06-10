@@ -68,11 +68,28 @@ def test_build_and_store_elite_industry_picks(tmp_path) -> None:
         )
     ]
     market = {
-        "NVDA": {"industry": "Semiconductors"},
-        "AMD": {"industry": "Semiconductors"},
+        "NVDA": {
+            "industry": "Semiconductors",
+            "price": "100",
+            "volume": "2,000,000",
+            "sma20": "2%",
+            "sma50": "5%",
+            "sma200": "10%",
+        },
+        "AMD": {
+            "industry": "Semiconductors",
+            "price": "50",
+            "volume": "1000",
+            "sma20": "2%",
+            "sma50": "5%",
+            "sma200": "10%",
+        },
         "AAPL": {"industry": "Consumer Electronics"},
     }
-    config = {"thresholds": {"top_list_count": 10}}
+    config = {
+        "thresholds": {"top_list_count": 10},
+        "stock_rs": {"cross_top_percent": 0.1, "min_avg_dollar_volume_30d_usd": 100_000_000},
+    }
 
     picks = build_and_store_elite_industry_picks(
         storage,
@@ -83,7 +100,7 @@ def test_build_and_store_elite_industry_picks(tmp_path) -> None:
     )
 
     assert "semiconductors" in picks
-    assert picks["semiconductors"]["tickers"] == ["NVDA", "AMD"]
+    assert picks["semiconductors"]["tickers"] == ["NVDA"]
     saved = storage.get_industry_stock_picks(snapshot_date, "semiconductors")
     assert saved is not None
-    assert saved["tickers"] == ["NVDA", "AMD"]
+    assert saved["tickers"] == ["NVDA"]

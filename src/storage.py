@@ -1028,6 +1028,10 @@ class Storage:
         for row in rows:
             data = dict(row)
             data["industries"] = json.loads(data.get("industries") or "[]")
+            industry_name = str(data.get("name") or "").strip()
+            if not industry_name and data["industries"]:
+                industry_name = str(data["industries"][0])
+            data["industry_name"] = industry_name
             result.append(data)
         return self.enrich_rank_w_delta(snapshot_date, result)
 

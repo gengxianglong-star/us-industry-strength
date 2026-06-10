@@ -58,12 +58,13 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_*.py' -q
 
       - name: Restore SQLite cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v4
+        id: sqlite-cache
         with:
           path: data/industry_strength.db
-          key: dashboard-db-v1-${{ hashFiles('config.yaml') }}
+          key: dashboard-db-v2-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
-            dashboard-db-v1-
+            dashboard-db-v2-${{ runner.os }}-
 
       - name: Load local data bundle (optional)
         if: github.event_name == 'workflow_dispatch' && inputs.skip_precompute == true
@@ -89,6 +90,13 @@ jobs:
         env:
           FINVIZ_AUTH_KEY: ${{ secrets.FINVIZ_AUTH_KEY }}
         run: python scripts/precompute_daily.py --sync-rs --force --force-full-rs --skip-screener
+
+      - name: Save SQLite cache
+        if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
+        uses: actions/cache/save@v4
+        with:
+          path: data/industry_strength.db
+          key: dashboard-db-v2-${{ runner.os }}-${{ github.run_id }}
 
       - name: Export static dashboard JSON
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true

@@ -10,7 +10,9 @@ from src.services.elite_data import (
     elite_row_for_symbol,
     elite_row_to_perf,
     fetch_elite_market_data,
+    parse_finviz_number,
     parse_finviz_percent,
+    passes_elite_swing_filters,
 )
 
 
@@ -27,9 +29,11 @@ def test_fetch_elite_market_data_merges_csv() -> None:
         "NVDA,2%,5%,10%,20%,50%,1.5,3%,8%\n"
     )
 
+    technical = "Ticker,SMA20,SMA50,SMA200,Volume\nNVDA,2%,5%,10%,1500000\n"
+
     with patch(
         "src.services.elite_data._fetch_export_text",
-        side_effect=[overview, perf],
+        side_effect=[overview, perf, technical],
     ):
         data = fetch_elite_market_data(auth_key="test-key")
 
@@ -37,6 +41,8 @@ def test_fetch_elite_market_data_merges_csv() -> None:
     assert data["NVDA"]["industry"] == "Semiconductors"
     assert data["NVDA"]["perf_month"] == "5%"
     assert data["NVDA"]["rel_volume"] == "1.5"
+    assert data["NVDA"]["sma20"] == "2%"
+    assert data["NVDA"]["volume"] == "1500000"
 
 
 def test_fetch_elite_market_data_falls_back_on_fetch_error() -> None:
@@ -46,7 +52,7 @@ def test_fetch_elite_market_data_falls_back_on_fetch_error() -> None:
 
 def test_fetch_elite_market_data_rejects_html_login_page() -> None:
     html = "<!doctype html><html><body>login required</body></html>"
-    with patch("src.services.elite_data._fetch_export_text", side_effect=[html, html]):
+    with patch("src.services.elite_data._fetch_export_text", side_effect=[html, html, html]):
         assert fetch_elite_market_data(auth_key="test-key") is None
 
 
@@ -87,6 +93,25 @@ def test_elite_row_to_perf_requires_all_horizons() -> None:
 def test_elite_row_for_symbol_ticker_aliases() -> None:
     market = {"BRK.B": {"perf_week": "1%"}}
     assert elite_row_for_symbol(market, "BRK-B") == market["BRK.B"]
+
+
+def test_passes_elite_swing_filters() -> None:
+    row = {
+        "price": "100",
+        "volume": "2,000,000",
+        "sma20": "2%",
+        "sma50": "5%",
+        "sma200": "10%",
+    }
+    assert passes_elite_swing_filters(row, 0.95)
+    assert not passes_elite_swing_filters(row, 0.5)
+    assert not passes_elite_swing_filters({**row, "sma200": "-1%"}, 0.95)
+    assert not passes_elite_swing_filters({**row, "sma50": "1%", "sma20": "3%"}, 0.95)
+
+
+def test_parse_finviz_number() -> None:
+    assert parse_finviz_number("1,500,000") == 1_500_000.0
+    assert parse_finviz_number("3.2M") == 3_200_000.0
 
 
 def test_build_perf_map_from_elite() -> None:

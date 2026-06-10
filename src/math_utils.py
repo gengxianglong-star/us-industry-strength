@@ -4,6 +4,28 @@ from __future__ import annotations
 
 from typing import Any
 
+DEFAULT_MOMENTUM_PERF_KEYS: dict[str, str] = {
+    "week": "perf_w",
+    "month": "perf_m",
+    "quarter": "perf_q",
+    "half": "perf_h",
+    "year": "perf_y",
+}
+
+
+def weighted_momentum_composite(
+    row: dict[str, Any],
+    weights: dict[str, float],
+    *,
+    perf_keys: dict[str, str] | None = None,
+) -> float:
+    """IBD-style composite: 40% Q + 30% M + 20% H + 5% W + 5% Y on raw % returns."""
+    perf_keys = perf_keys or DEFAULT_MOMENTUM_PERF_KEYS
+    total = 0.0
+    for tf, perf_key in perf_keys.items():
+        total += float(weights.get(tf, 0.0) or 0.0) * float(row.get(perf_key, 0) or 0.0)
+    return total
+
 
 def percentile_rank(rank: int, total: int) -> float:
     """Convert a 1-based rank to a 0-1 percentile score.

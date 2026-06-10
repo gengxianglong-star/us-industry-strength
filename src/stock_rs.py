@@ -15,7 +15,7 @@ import requests
 
 from src.config_loader import ROOT, TIMEFRAMES
 from src.logging_config import get_logger
-from src.math_utils import percentile_rank, rank_dict_by_key
+from src.math_utils import percentile_rank, rank_dict_by_key, weighted_momentum_composite
 from src.scoring import ScoredIndustry, filter_top_strong
 from src.storage import Storage
 
@@ -118,6 +118,42 @@ def _calc_performance_for_cohort(bars: list[dict[str, Any]], cohort: str) -> dic
             return None
         result[_perf_key_for_timeframe(tf)] = (last / prev - 1.0) * 100.0
     return result
+
+
+def _apply_market_rs_scores(
+    rows: list[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    tier_a: float,
+    tier_b: float,
+) -> None:
+    """Composite momentum (40/30/20/5/5 on raw %) then cross-sectional percentile RS."""
+    weights = config.get("_normalized_weights") or {
+        "week": 0.05,
+        "month": 0.3,
+        "quarter": 0.4,
+        "half": 0.2,
+        "year": 0.05,
+    }
+    ranks = {tf: rank_dict_by_key(rows, PERF_KEY_MAP[tf]) for tf in TIMEFRAMES}
+    for row in rows:
+        row["composite_score"] = weighted_momentum_composite(row, weights)
+    composite_ranks = rank_dict_by_key(rows, "composite_score")
+    total = len(rows)
+    for row in rows:
+        symbol = row["symbol"]
+        row["rank_w"] = ranks["week"][symbol]
+        row["rank_m"] = ranks["month"][symbol]
+        row["rank_q"] = ranks["quarter"][symbol]
+        row["rank_h"] = ranks["half"][symbol]
+        row["rank_y"] = ranks["year"][symbol]
+        row["rs_score"] = percentile_rank(composite_ranks[symbol], total)
+        if row["rs_score"] >= tier_a:
+            row["tier"] = "A"
+        elif row["rs_score"] >= tier_b:
+            row["tier"] = "B"
+        else:
+            row["tier"] = "C"
 
 
 def _normalized_weights_for_timeframes(
@@ -1500,6 +1536,7 @@ def compute_and_store_stock_rs(
         universe = _universe_rows_from_elite(elite_market)
         symbols = [row["symbol"] for row in universe]
         symbol_set = set(symbols)
+        storage.upsert_stock_universe(universe, source="elite")
     else:
         universe = load_us_universe_with_cache(storage, config)
         symbols = [row["symbol"] for row in universe]
@@ -1705,31 +1742,7 @@ def compute_and_store_stock_rs(
             **adaptive_stats,
         }
 
-    ranks = {tf: rank_dict_by_key(rows, PERF_KEY_MAP[tf]) for tf in TIMEFRAMES}
-    total = len(rows)
-    weights = config.get("_normalized_weights") or {
-        "week": 0.05,
-        "month": 0.3,
-        "quarter": 0.4,
-        "half": 0.2,
-        "year": 0.05,
-    }
-
-    for row in rows:
-        row["rank_w"] = ranks["week"][row["symbol"]]
-        row["rank_m"] = ranks["month"][row["symbol"]]
-        row["rank_q"] = ranks["quarter"][row["symbol"]]
-        row["rank_h"] = ranks["half"][row["symbol"]]
-        row["rank_y"] = ranks["year"][row["symbol"]]
-        row["rs_score"] = sum(
-            weights[tf] * percentile_rank(ranks[tf][row["symbol"]], total) for tf in TIMEFRAMES
-        )
-        if row["rs_score"] >= tier_a:
-            row["tier"] = "A"
-        elif row["rs_score"] >= tier_b:
-            row["tier"] = "B"
-        else:
-            row["tier"] = "C"
+    _apply_market_rs_scores(rows, config, tier_a=tier_a, tier_b=tier_b)
 
     rows.sort(key=lambda x: (-x["rs_score"], x["rank_m"], x["symbol"]))
     storage.save_stock_rs_snapshot(snapshot_date, rows)
