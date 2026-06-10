@@ -1777,7 +1777,7 @@ def compute_and_store_stock_rs(
         snapshot_date,
         _rs_meta_payload(
             universe_count=len(universe),
-            computed_count=total,
+            computed_count=len(rows),
             no_bars_count=no_bars_count,
             insufficient_history_count=insufficient_history_count,
             perf_invalid_count=perf_invalid_count,
@@ -1797,7 +1797,7 @@ def compute_and_store_stock_rs(
         "snapshot_date": snapshot_date,
         "universe_count": len(universe),
         "attempted_count": len(target_symbols),
-        "computed_count": total,
+        "computed_count": len(rows),
         "rs_source": rs_source,
         "watchlist_count": len(watch_rows),
         "no_bars_count": no_bars_count,
