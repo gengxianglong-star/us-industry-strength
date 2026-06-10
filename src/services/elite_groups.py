@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+import time
 from typing import Any
 
 from src.finviz_scraper import INDUSTRY_KEY_RE, IndustryRow
