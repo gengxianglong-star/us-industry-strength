@@ -109,14 +109,25 @@ export function deriveMarketRegime(latest: BreadthRow): MarketRegime {
 
 const MATRIX_HOT_THRESHOLD = 500;
 
+function blendChannel(channel: number, whiteMix: number): number {
+  return Math.round(channel * (1 - whiteMix) + 255 * whiteMix);
+}
+
+function blendRgbToWhite(rgb: string, baseOpacity: number, whiteMix: number): string {
+  const parts = rgb.split(",").map((s) => parseFloat(s.trim()));
+  const [r = 128, g = 128, b = 128] = parts;
+  const mix = Math.max(0, Math.min(1, whiteMix));
+  return `rgba(${blendChannel(r, mix)}, ${blendChannel(g, mix)}, ${blendChannel(b, mix)}, ${Math.min(1, baseOpacity + mix * 0.15)})`;
+}
+
 /** Percentile + hot-tier scaling for 4% up/down cluster heatmaps (values often 0–1500+). */
 export function matrixCellStyle(
   value: number,
   series: number[],
   rgb: string,
-): { backgroundColor: string; hot: boolean } {
+): { backgroundColor: string; hot: boolean; whiteMix: number } {
   if (!Number.isFinite(value) || value <= 0) {
-    return { backgroundColor: `rgba(${rgb}, 0.08)`, hot: false };
+    return { backgroundColor: `rgba(${rgb}, 0.08)`, hot: false, whiteMix: 0 };
   }
 
   const positives = series.filter((v) => v > 0).sort((a, b) => a - b);
@@ -131,12 +142,17 @@ export function matrixCellStyle(
       hotPeer.length > 0
         ? hotPeer.filter((v) => v <= value).length / hotPeer.length
         : 1;
-    const opacity = 0.88 + hotPct * 0.12;
-    return { backgroundColor: `rgba(${rgb}, ${opacity})`, hot: true };
+    const whiteMix = 0.2 + hotPct * 0.65;
+    const opacity = 0.82 + hotPct * 0.18;
+    return {
+      backgroundColor: blendRgbToWhite(rgb, opacity, whiteMix),
+      hot: true,
+      whiteMix,
+    };
   }
 
   const opacity = 0.1 + Math.pow(pct, 0.75) * 0.55;
-  return { backgroundColor: `rgba(${rgb}, ${opacity})`, hot: false };
+  return { backgroundColor: `rgba(${rgb}, ${opacity})`, hot: false, whiteMix: 0 };
 }
 
 export type ConfluenceResult = {

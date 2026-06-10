@@ -132,12 +132,20 @@ function buildAlphaPlot(nodes: RotationNode[]): PlotTransform {
 
   const xVals = nodes.map((n) => n.rs_3m);
   const yVals = nodes.map((n) => n.rs_1m);
-  const xMin = Math.min(...xVals);
-  const xMax = Math.max(...xVals);
-  const yMin = Math.min(...yVals);
-  const yMax = Math.max(...yVals);
-  const xSpan = Math.max(xMax - xMin, 6);
-  const ySpan = Math.max(yMax - yMin, 6);
+  const dataXMin = Math.min(...xVals);
+  const dataXMax = Math.max(...xVals);
+  const dataYMin = Math.min(...yVals);
+  const dataYMax = Math.max(...yVals);
+
+  // Widen the axis floor so high-RS leaders in the top-right occupy more plot area.
+  const AXIS_FLOOR = 42;
+  const AXIS_CEIL = 100;
+  const xMin = Math.min(dataXMin - 6, AXIS_FLOOR);
+  const xMax = AXIS_CEIL;
+  const yMin = Math.min(dataYMin - 6, AXIS_FLOOR);
+  const yMax = AXIS_CEIL;
+  const xSpan = Math.max(xMax - xMin, 28);
+  const ySpan = Math.max(yMax - yMin, 28);
 
   const toPlotX = (v: number) =>
     PLOT_MARGIN + ((v - xMin) / xSpan) * (100 - 2 * PLOT_MARGIN);
@@ -150,7 +158,7 @@ function buildAlphaPlot(nodes: RotationNode[]): PlotTransform {
   });
 
   const plotNodes: AlphaPlotNode[] = nodes.map((n) => {
-    const { jx, jy } = stableJitter(n.industry_key, 2.2);
+    const { jx, jy } = stableJitter(n.industry_key, 3.8);
     const base = mapRsPoint(n.rs_3m, n.rs_1m);
     return {
       ...n,
@@ -160,8 +168,13 @@ function buildAlphaPlot(nodes: RotationNode[]): PlotTransform {
   });
 
   const tickVals = (min: number, max: number) => {
-    const mid = (min + max) / 2;
-    return [min, mid, max].map((v) => Math.round(v));
+    const step = max - min >= 40 ? 10 : 5;
+    const start = Math.ceil(min / step) * step;
+    const vals: number[] = [];
+    for (let v = start; v <= max; v += step) vals.push(v);
+    if (vals.length === 0 || vals[0] > min) vals.unshift(Math.round(min));
+    if (vals[vals.length - 1] < max) vals.push(Math.round(max));
+    return vals;
   };
 
   return {

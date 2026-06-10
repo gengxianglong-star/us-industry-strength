@@ -59,10 +59,12 @@ function MatrixGrid({
               key={`${row.raw_date || row.date || idx}-${field}`}
               className={`aspect-square rounded-sm transition-transform hover:scale-125 hover:z-10 cursor-crosshair ${
                 isLatest ? "ring-1 ring-cyan-500/60" : ""
-              } ${cell.hot ? "ring-1 ring-white/50" : ""}`}
+              } ${cell.hot ? "ring-1 ring-white/70" : ""}`}
               style={{
                 backgroundColor: cell.backgroundColor,
-                boxShadow: cell.hot ? `0 0 10px rgba(${glowRgb}, 0.85)` : undefined,
+                boxShadow: cell.hot
+                  ? `0 0 ${8 + cell.whiteMix * 10}px rgba(255, 255, 255, ${0.35 + cell.whiteMix * 0.45}), 0 0 6px rgba(${glowRgb}, 0.6)`
+                  : undefined,
               }}
               title={`${row.raw_date || row.date || "—"}: ${val}`}
             />

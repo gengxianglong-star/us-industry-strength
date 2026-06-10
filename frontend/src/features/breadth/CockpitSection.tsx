@@ -39,7 +39,7 @@ type HealthReport = {
 type TerminalHealth = "healthy" | "degraded" | "offline";
 
 const UP4_SPARKLINE_THRESHOLD = 500;
-const DN4_SPARKLINE_THRESHOLD = 500;
+const DN4_SPARKLINE_THRESHOLD = 400;
 const SPARKLINE_LOOKBACK_DAYS = 60;
 const RATIO_SPARKLINE_THRESHOLD = 2.0;
 
