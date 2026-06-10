@@ -395,13 +395,13 @@ def reload_config() -> dict[str, str]:
 
 @app.post("/api/ai/brief")
 async def ai_brief() -> dict[str, Any]:
-    """Generate a daily market briefing via Gemini AI."""
+    """Generate a daily market briefing via DeepSeek AI."""
     from src.services.ai_brief import generate_ai_brief, is_available
 
     if not is_available():
         raise HTTPException(
             status_code=501,
-            detail="Gemini API 未配置。请在 .env 文件中设置 GEMINI_API_KEY。",
+            detail="DeepSeek API 未配置。请在 .env 文件中设置 DEEPSEEK_API_KEY。",
         )
 
     # 将所有同步的数据库查询放入线程池（辅路），防止阻塞 FastAPI 的核心事件循环

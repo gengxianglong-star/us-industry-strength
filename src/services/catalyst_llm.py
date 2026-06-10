@@ -1,8 +1,8 @@
-"""AI-powered catalyst extraction for watchlist stocks via Finviz Elite + Gemini.
+"""AI-powered catalyst extraction for watchlist stocks via Finviz Elite + DeepSeek.
 
 Uses ``FINVIZ_AUTH_KEY`` to fetch news from the Finviz Elite quote page
 (direct, ad-free, no IP blocking), then extracts a Qullamaggie-style
-bullish catalyst tag via Gemini 2.0 Flash.
+bullish catalyst tag via DeepSeek (``deepseek-v4-flash``).
 """
 
 from __future__ import annotations
@@ -14,21 +14,17 @@ from typing import Any
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from google.genai import Client as GenAiClient
-from google.genai import types as genai_types
 
 from src.logging_config import get_logger
+from src.services import deepseek_llm
 
 logger = get_logger(__name__)
 
 load_dotenv()
 
-_GEMINI_KEY: str | None = os.environ.get("GEMINI_API_KEY") or None
 _FINVIZ_KEY: str | None = (
     os.environ.get("FINVIZ_AUTH_KEY") or os.environ.get("FINVIZ_ELITE_AUTH") or None
 )
-
-_client: GenAiClient | None = None
 
 _ELITE_QUOTE_URL = "https://elite.finviz.com/quote.ashx"
 _ELITE_HEADERS = {
@@ -40,25 +36,16 @@ _ELITE_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-
-def _get_client() -> GenAiClient | None:
-    global _client
-    if _client is None and _GEMINI_KEY:
-        _client = GenAiClient(api_key=_GEMINI_KEY)
-    return _client
+_CATALYST_SLEEP_SEC = 1.0
 
 
 def is_available() -> bool:
-    """Return ``True`` if both Gemini API key and Finviz Elite key are set."""
-    return _GEMINI_KEY is not None and _FINVIZ_KEY is not None
+    """Return ``True`` if both DeepSeek API key and Finviz Elite key are set."""
+    return deepseek_llm.is_available() and _FINVIZ_KEY is not None
 
 
 def _fetch_news_via_elite(symbol: str, max_items: int = 4) -> list[str]:
-    """Fetch recent news headlines from the Finviz Elite quote page.
-
-    Uses the authenticated Elite URL (``?auth=...``) to bypass ad pages
-    and avoid IP blocking.  Parses the ``#news-table`` table rows.
-    """
+    """Fetch recent news headlines from the Finviz Elite quote page."""
     if not _FINVIZ_KEY:
         logger.debug("FINVIZ_AUTH_KEY not set — skipping Elite news fetch for %s", symbol)
         return []
@@ -96,15 +83,9 @@ def _fetch_news_via_elite(symbol: str, max_items: int = 4) -> list[str]:
 
 
 def extract_catalyst(symbol: str) -> dict[str, Any]:
-    """Fetch recent news via Finviz Elite and use Gemini to extract a
-    Qullamaggie-style catalyst tag.
-
-    Returns a dict with ``"tag"`` and ``"headlines"``, or an empty dict if
-    no catalyst was found, keys are missing, or the call fails.
-    """
-    client = _get_client()
-    if client is None:
-        logger.debug("Gemini client not available — skipping %s", symbol)
+    """Fetch recent news via Finviz Elite and use DeepSeek to extract a catalyst tag."""
+    if not deepseek_llm.is_available():
+        logger.debug("DeepSeek not available — skipping %s", symbol)
         return {}
 
     headlines = _fetch_news_via_elite(symbol)
@@ -125,46 +106,42 @@ def extract_catalyst(symbol: str) -> dict[str, Any]:
     )
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=[
-                genai_types.Content(
-                    role="user", parts=[genai_types.Part(text=prompt)]
-                )
-            ],
-            config=genai_types.GenerateContentConfig(
-                temperature=0.3, max_output_tokens=32
-            ),
+        tag, model = deepseek_llm.chat(
+            prompt,
+            max_tokens=32,
+            temperature=0.3,
+            thinking="disabled",
         )
-        tag = (response.text or "").strip().upper()
+        tag = tag.strip().upper()
 
         if tag == "NONE" or len(tag) > 25 or not tag:
             logger.info("🤖 %s — AI tagged as noise (NONE)", symbol)
             return {}
 
-        logger.info("✨ %s — catalyst: 【%s】", symbol, tag)
+        logger.info("✨ %s — catalyst: 【%s】 (%s)", symbol, tag, model)
         return {
             "tag": tag,
             "headlines": headlines[:2],
         }
 
     except Exception:
-        logger.warning("Gemini catalyst extraction failed for %s", symbol, exc_info=True)
+        logger.warning("DeepSeek catalyst extraction failed for %s", symbol, exc_info=True)
         return {}
 
 
 def probe_catalyst_pipeline(test_symbol: str = "AAPL") -> dict[str, Any]:
-    """Non-secret health check for Finviz Elite news + optional Gemini (used by CI/local)."""
+    """Non-secret health check for Finviz Elite news + DeepSeek (used by CI/local)."""
     finviz_set = _FINVIZ_KEY is not None
-    gemini_set = _GEMINI_KEY is not None
+    deepseek_set = deepseek_llm.is_available()
     result: dict[str, Any] = {
         "finviz_auth_key_set": finviz_set,
-        "gemini_api_key_set": gemini_set,
+        "deepseek_api_key_set": deepseek_set,
         "pipeline_available": is_available(),
         "test_symbol": test_symbol.upper(),
         "headline_count": 0,
         "sample_headline": None,
-        "gemini_probe_ok": False,
+        "deepseek_probe_ok": False,
+        "primary_model": deepseek_llm.PRIMARY_MODEL,
     }
     if not finviz_set:
         result["error"] = "FINVIZ_AUTH_KEY missing"
@@ -175,15 +152,15 @@ def probe_catalyst_pipeline(test_symbol: str = "AAPL") -> dict[str, Any]:
     if headlines:
         result["sample_headline"] = headlines[0][:120]
 
-    if not gemini_set:
-        result["error"] = "GEMINI_API_KEY missing"
+    if not deepseek_set:
+        result["error"] = "DEEPSEEK_API_KEY missing"
         return result
     if not headlines:
         result["error"] = "Finviz Elite returned no headlines — check auth key or symbol"
         return result
 
     sample = extract_catalyst(test_symbol)
-    result["gemini_probe_ok"] = bool(sample.get("tag"))
+    result["deepseek_probe_ok"] = bool(sample.get("tag"))
     if sample.get("tag"):
         result["sample_tag"] = sample["tag"]
     return result
@@ -194,15 +171,11 @@ def enrich_watchlist_with_catalysts(
     *,
     max_symbols: int = 30,
 ) -> dict[str, dict[str, Any]]:
-    """Extract catalysts for symbols in the final watchlist (in list order).
-
-    Call this only after the watchlist is saved. Processes up to *max_symbols*
-    entries — typically the top of the list by ``rs_rank``.
-    """
+    """Extract catalysts for symbols in the final watchlist (in list order)."""
     if not is_available():
         missing = []
-        if not _GEMINI_KEY:
-            missing.append("GEMINI_API_KEY")
+        if not deepseek_llm.is_available():
+            missing.append("DEEPSEEK_API_KEY")
         if not _FINVIZ_KEY:
             missing.append("FINVIZ_AUTH_KEY")
         logger.info("Catalyst enrichment skipped — missing: %s", ", ".join(missing))
@@ -219,7 +192,7 @@ def enrich_watchlist_with_catalysts(
         return {}
 
     logger.info(
-        "🔍 Extracting catalysts for %d final watchlist symbols via Finviz Elite + Gemini...",
+        "🔍 Extracting catalysts for %d final watchlist symbols via Finviz Elite + DeepSeek...",
         len(candidates),
     )
     results: dict[str, dict[str, Any]] = {}
@@ -228,7 +201,7 @@ def enrich_watchlist_with_catalysts(
         if catalyst:
             results[sym] = catalyst
         if i < len(candidates) - 1:
-            time.sleep(4.0)  # Gemini free tier: 15 req/min → max one every 4s
+            time.sleep(_CATALYST_SLEEP_SEC)
 
     logger.info(
         "Catalyst extraction complete: %d/%d symbols tagged",

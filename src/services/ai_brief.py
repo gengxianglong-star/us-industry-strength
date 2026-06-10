@@ -1,44 +1,24 @@
-"""AI-powered market brief via Google Gemini API.
+"""AI-powered market brief via DeepSeek API.
 
 Usage
 -----
-1. Set ``GEMINI_API_KEY`` in ``.env`` (or export it as an environment variable).
-2. Call ``generate_brief(...)`` with market data to get a natural‑language briefing.
-
-The Gemini client is initialised once and reused across requests.
+1. Set ``DEEPSEEK_API_KEY`` in ``.env`` (or export it as an environment variable).
+2. Call ``generate_ai_brief(...)`` with market data to get a natural-language briefing.
 """
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
-from dotenv import load_dotenv
-from google.genai import Client as GenAiClient
-from google.genai import types as genai_types
-
 from src.logging_config import get_logger
+from src.services import deepseek_llm
 
 logger = get_logger(__name__)
 
-# ── load .env so we can read GEMINI_API_KEY ──────────────────────────
-load_dotenv()
-
-_API_KEY: str | None = os.environ.get("GEMINI_API_KEY") or None
-
-_client: GenAiClient | None = None
-
-
-def _get_client() -> GenAiClient | None:
-    global _client
-    if _client is None and _API_KEY:
-        _client = GenAiClient(api_key=_API_KEY)
-    return _client
-
 
 def is_available() -> bool:
-    """Return ``True`` if a Gemini API key has been configured."""
-    return _API_KEY is not None
+    """Return ``True`` if a DeepSeek API key has been configured."""
+    return deepseek_llm.is_available()
 
 
 async def generate_ai_brief(
@@ -49,34 +29,13 @@ async def generate_ai_brief(
     watchlist: list[dict[str, Any]],
     breadth_latest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Generate a daily market briefing using the Gemini API.
-
-    Parameters
-    ----------
-    snapshot_date:
-        The trading date the data corresponds to.
-    industry_count:
-        Total number of industries scored.
-    top_industries:
-        Top N scored industries with their name, score, and rank info.
-    watchlist:
-        Cross‑watchlist stocks with symbol and RS score.
-    breadth_latest:
-        Optional latest breadth row (c5/c6/c7/c8/c14 fields).
-
-    Returns
-    -------
-    A dict with keys ``"brief"`` (the markdown text), and ``"model"``.
-    Raises ``RuntimeError`` if the API key is missing or the call fails.
-    """
-    client = _get_client()
-    if client is None:
+    """Generate a daily market briefing using DeepSeek."""
+    if not is_available():
         raise RuntimeError(
-            "Gemini API 未配置。请在 .env 文件中设置 GEMINI_API_KEY，"
-            "或通过环境变量 export GEMINI_API_KEY=你的密钥。"
+            "DeepSeek API 未配置。请在 .env 文件中设置 DEEPSEEK_API_KEY，"
+            "或通过环境变量 export DEEPSEEK_API_KEY=你的密钥。"
         )
 
-    # ── build the prompt ──────────────────────────────────────────────
     top_industry_lines = "\n".join(
         f"- {ind.get('key', '?')}  score={ind.get('score', 0):.3f}  "
         f"rank_m={ind.get('rank_m', '?')}  rank_q={ind.get('rank_q', '?')}"
@@ -122,22 +81,18 @@ async def generate_ai_brief(
 """
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=[genai_types.Content(role="user", parts=[genai_types.Part(text=prompt)])],
-            config=genai_types.GenerateContentConfig(
-                temperature=0.7,
-                max_output_tokens=1024,
-            ),
+        brief_text, model = deepseek_llm.chat(
+            prompt,
+            max_tokens=1024,
+            temperature=0.7,
+            thinking="disabled",
         )
     except Exception as exc:
-        logger.exception("Gemini API call failed")
-        raise RuntimeError(f"Gemini API 调用失败: {exc}") from exc
-
-    brief_text = response.text.strip() if response.text else "（Gemini 未返回内容）"
+        logger.exception("DeepSeek API call failed")
+        raise RuntimeError(f"DeepSeek API 调用失败: {exc}") from exc
 
     return {
-        "brief": brief_text,
-        "model": "gemini-2.0-flash",
+        "brief": brief_text.strip() if brief_text else "（DeepSeek 未返回内容）",
+        "model": model,
         "snapshot_date": snapshot_date,
     }
