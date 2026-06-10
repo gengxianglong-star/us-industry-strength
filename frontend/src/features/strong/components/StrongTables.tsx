@@ -1,8 +1,7 @@
-import { tradingViewUrl, WatchlistFinvizChart } from "./WatchlistLightweightChart";
+import { WatchlistFinvizChart } from "./WatchlistLightweightChart";
 import {
   computeLongTrend,
   computeShortTrend,
-  finvizDailyChartUrl,
   finvizQuoteUrl,
   getTopStrongIndustries,
   normalizeTrendLabel,
@@ -33,20 +32,10 @@ export function WatchlistFinvizSymbolLink({ symbol }: { symbol: string }) {
       href={finvizQuoteUrl(symbol)}
       target="_blank"
       rel="noreferrer"
-      className="group relative font-mono font-black text-cyan-400 text-sm hover:text-cyan-300 hover:underline"
-      title="Open Finviz quote"
+      className="font-mono font-black text-cyan-400 text-sm hover:text-cyan-300 hover:underline"
+      title="Open Finviz quote & chart"
     >
       {symbol}
-      <div className="absolute left-0 top-full mt-2 hidden group-hover:block z-50 pointer-events-none">
-        <div className="rounded-lg border border-slate-700 bg-[#0b0f19] p-1 shadow-2xl">
-          <img
-            src={finvizDailyChartUrl(symbol)}
-            alt={`${symbol} daily chart`}
-            referrerPolicy="no-referrer"
-            className="w-[400px] max-w-none rounded"
-          />
-        </div>
-      </div>
     </a>
   );
 }
@@ -257,15 +246,15 @@ export function WatchlistChartGrid({
               </div>
             </div>
             <a
-              href={tradingViewUrl(row.symbol, row.exchange)}
+              href={finvizQuoteUrl(row.symbol)}
               target="_blank"
               rel="noreferrer"
               className="block"
-              title="Open in TradingView"
+              title="Open Finviz quote & chart"
             >
               <WatchlistFinvizChart symbol={row.symbol} />
               <div className="px-2 py-1 border-t border-slate-900 text-[9px] font-mono text-slate-600">
-                Finviz · daily · SMA · hover symbol for preview
+                Finviz · click for full chart
               </div>
             </a>
           </article>

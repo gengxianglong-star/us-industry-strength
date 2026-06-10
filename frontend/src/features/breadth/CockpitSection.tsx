@@ -114,11 +114,10 @@ function MicroSparkline({
           dataKey={dataKey as string}
           stroke={neutralColor}
           strokeWidth={1.5}
-          dot={(props: { cx?: number; cy?: number; payload?: BreadthRow; index?: number }) => {
+          dot={(props: { cx?: number; cy?: number; payload?: BreadthRow }) => {
             if (props.cx == null || props.cy == null) return null;
-            const isLatest = props.index === data.length - 1;
             const val = Number(props.payload?.[dataKey] ?? 0);
-            if (isLatest) {
+            if (val >= threshold) {
               return (
                 <circle
                   cx={props.cx}
@@ -129,9 +128,6 @@ function MicroSparkline({
                   strokeWidth={1.5}
                 />
               );
-            }
-            if (val >= threshold) {
-              return <circle cx={props.cx} cy={props.cy} r={3} fill={color} stroke={color} />;
             }
             return null;
           }}

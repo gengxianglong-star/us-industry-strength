@@ -983,15 +983,14 @@ function safeGetCanvas(id: string): HTMLCanvasElement | null {
   return document.getElementById(id) as HTMLCanvasElement | null;
 }
 
-function latestPointRadius(ctx, defaultRadius = 0) {
-  const last = ctx.dataset.data.length - 1;
-  return ctx.dataIndex === last ? 6 : defaultRadius;
-}
-
-function latestPointBorderColor(ctx) {
-  const last = ctx.dataset.data.length - 1;
-  return ctx.dataIndex === last ? "#FFFFFF" : "transparent";
-}
+const UP4_SIGNAL_MIN = 500;
+const DN4_SIGNAL_MIN = 400;
+const RATIO_5D_OVERBOUGHT = 2.0;
+const RATIO_5D_OVERSOLD = 0.8;
+const RATIO_10D_OVERBOUGHT = 2.0;
+const RATIO_10D_OVERSOLD = 0.9;
+const T2108_OVERSOLD = 20;
+const T2108_OVERBOUGHT = 80;
 
 function lineDataset(partial) {
   return {
@@ -1005,14 +1004,57 @@ function lineDataset(partial) {
   };
 }
 
-function upDown4Dataset(partial) {
+function signalPointDataset(partial, { isSignal, pointColor }) {
   return {
     ...lineDataset(partial),
-    pointRadius: (ctx) => latestPointRadius(ctx, 2),
-    pointBorderWidth: (ctx) => (ctx.dataIndex === ctx.dataset.data.length - 1 ? 2 : 0),
-    pointBorderColor: (ctx) => latestPointBorderColor(ctx),
-    pointHoverRadius: (ctx) => latestPointRadius(ctx, 4),
+    pointRadius: (ctx) => (isSignal(ctx) ? 5 : 0),
+    pointBackgroundColor: (ctx) => (isSignal(ctx) ? pointColor(ctx) : "transparent"),
+    pointBorderColor: (ctx) => (isSignal(ctx) ? "#ffffff" : "transparent"),
+    pointBorderWidth: (ctx) => (isSignal(ctx) ? 1.5 : 0),
+    pointHoverRadius: (ctx) => (isSignal(ctx) ? 7 : 0),
   };
+}
+
+function upDown4Dataset(partial, { minCount, signalColor }) {
+  return signalPointDataset(partial, {
+    isSignal: (ctx) => {
+      const val = toNum(ctx.raw);
+      return val != null && val >= minCount;
+    },
+    pointColor: () => signalColor,
+  });
+}
+
+function ratioSignalDataset(partial, { overbought, oversold, overboughtColor, oversoldColor }) {
+  return signalPointDataset(partial, {
+    isSignal: (ctx) => {
+      const val = toNum(ctx.raw);
+      return val != null && (val >= overbought || val <= oversold);
+    },
+    pointColor: (ctx) => {
+      const val = toNum(ctx.raw);
+      if (val == null) return "transparent";
+      if (val >= overbought) return overboughtColor;
+      if (val <= oversold) return oversoldColor;
+      return "transparent";
+    },
+  });
+}
+
+function t2108SignalDataset(partial, theme) {
+  return signalPointDataset(partial, {
+    isSignal: (ctx) => {
+      const val = toNum(ctx.raw);
+      return val != null && (val <= T2108_OVERSOLD || val >= T2108_OVERBOUGHT);
+    },
+    pointColor: (ctx) => {
+      const val = toNum(ctx.raw);
+      if (val == null) return "transparent";
+      if (val <= T2108_OVERSOLD) return theme.ok;
+      if (val >= T2108_OVERBOUGHT) return theme.bad;
+      return "transparent";
+    },
+  });
 }
 
 function chartScaleOptions(theme, extra = {}) {
@@ -1057,9 +1099,28 @@ function renderCharts(payload) {
     data: {
       labels,
       datasets: [
-        lineDataset({ label: "5 Day Ratio", data: rows.map((r) => toNum(r.c3_num)), borderColor: theme.ok }),
-        lineDataset({ label: "10 Day Ratio", data: rows.map((r) => toNum(r.c4_num)), borderColor: theme.warn }),
-        lineDataset({ label: "T2108", data: rows.map((r) => toNum(r.c14_num)), borderColor: theme.accent, yAxisID: "y1" }),
+        ratioSignalDataset(
+          { label: "5 Day Ratio", data: rows.map((r) => toNum(r.c3_num)), borderColor: theme.ok },
+          {
+            overbought: RATIO_5D_OVERBOUGHT,
+            oversold: RATIO_5D_OVERSOLD,
+            overboughtColor: theme.warn,
+            oversoldColor: theme.ok,
+          },
+        ),
+        ratioSignalDataset(
+          { label: "10 Day Ratio", data: rows.map((r) => toNum(r.c4_num)), borderColor: theme.warn },
+          {
+            overbought: RATIO_10D_OVERBOUGHT,
+            oversold: RATIO_10D_OVERSOLD,
+            overboughtColor: theme.warn,
+            oversoldColor: theme.ok,
+          },
+        ),
+        t2108SignalDataset(
+          { label: "T2108", data: rows.map((r) => toNum(r.c14_num)), borderColor: theme.accent, yAxisID: "y1" },
+          theme,
+        ),
       ],
     },
     options: chartOptions(theme, {
@@ -1077,8 +1138,14 @@ function renderCharts(payload) {
     data: {
       labels,
       datasets: [
-        upDown4Dataset({ label: "Up 4%+", data: rows.map((r) => toNum(r.c1_num)), borderColor: theme.ok }),
-        upDown4Dataset({ label: "Down 4%+", data: rows.map((r) => toNum(r.c2_num)), borderColor: theme.bad }),
+        upDown4Dataset(
+          { label: "Up 4%+", data: rows.map((r) => toNum(r.c1_num)), borderColor: theme.ok },
+          { minCount: UP4_SIGNAL_MIN, signalColor: theme.ok },
+        ),
+        upDown4Dataset(
+          { label: "Down 4%+", data: rows.map((r) => toNum(r.c2_num)), borderColor: theme.bad },
+          { minCount: DN4_SIGNAL_MIN, signalColor: theme.bad },
+        ),
       ],
     },
     options: chartOptions(theme, { scales: chartScaleOptions(theme) }),

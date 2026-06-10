@@ -7,6 +7,7 @@ from typing import Any
 
 from src.breadth_data import sync_breadth_history
 from src.finviz_scraper import fetch_industries
+from src.services.elite_groups import fetch_elite_industry_rows
 from src.logging_config import get_logger
 from src.scoring import filter_top_strong, score_industries
 from src.stock_picks import build_and_store_elite_industry_picks, fetch_top_industry_stock_picks
@@ -70,8 +71,13 @@ def run_daily_pipeline(
     )
 
     try:
-        _log(opts, "正在抓取 Finviz 行业数据…")
-        rows = fetch_industries(config, storage=storage)
+        _log(opts, "正在抓取行业数据…")
+        rows = fetch_elite_industry_rows()
+        if rows:
+            _log(opts, f"Elite Groups 已加载 {len(rows)} 个行业")
+        else:
+            _log(opts, "Elite 不可用，回退 Finviz 网页抓取…")
+            rows = fetch_industries(config, storage=storage)
         scored = score_industries(rows, config)
         top = filter_top_strong(scored, config)
         storage.save_snapshot(snapshot_date, scored)
