@@ -9,8 +9,13 @@ from src.breadth_data import sync_breadth_history
 from src.finviz_scraper import fetch_industries
 from src.logging_config import get_logger
 from src.scoring import filter_top_strong, score_industries
-from src.stock_picks import fetch_top_industry_stock_picks
-from src.stock_rs import backfill_new_stock_rs_for_snapshot, compute_and_store_stock_rs, load_us_universe_with_cache
+from src.stock_picks import build_and_store_elite_industry_picks, fetch_top_industry_stock_picks
+from src.stock_rs import (
+    backfill_new_stock_rs_for_snapshot,
+    compute_and_store_stock_rs,
+    load_us_universe_with_cache,
+    rebuild_stock_watchlist_for_snapshot,
+)
 from src.storage import Storage
 from src.services.rs_jobs import RsJobService
 
@@ -161,6 +166,42 @@ def run_daily_pipeline(
                                 rs_result = {**rs_result, "new_stock_error": str(exc)}
             result["rs"] = rs_result
             if not rs_result.get("async_started"):
+                if opts.skip_stocks:
+                    _log(opts, "正在用 Elite 数据配对 Top 行业个股…")
+                    elite_picks = build_and_store_elite_industry_picks(
+                        storage,
+                        snapshot_date,
+                        scored,
+                        config,
+                    )
+                    if elite_picks:
+                        picks = elite_picks
+                        top = filter_top_strong(scored, config, stock_picks=picks)
+                        result["top_count"] = len(top)
+                        result["stock_pick_count"] = sum(
+                            len(payload.get("tickers") or []) for payload in picks.values()
+                        )
+                        result["stock_pick_errors"] = max(0, len(top) - len(picks))
+                        result["picks_summary"] = {
+                            "total": len(picks),
+                            "stale": 0,
+                            "with_tickers": sum(1 for payload in picks.values() if payload.get("tickers")),
+                        }
+                        rebuild = rebuild_stock_watchlist_for_snapshot(
+                            storage,
+                            snapshot_date,
+                            scored,
+                            config,
+                        )
+                        rs_result["watchlist_count"] = rebuild.get(
+                            "watchlist_count",
+                            rs_result.get("watchlist_count", 0),
+                        )
+                        result["rs"] = rs_result
+                        _log(
+                            opts,
+                            f"Elite 行业配对完成：Top {len(top)}，Watchlist={rs_result.get('watchlist_count', 0)}",
+                        )
                 _log(
                     opts,
                     "RS 完成："

@@ -437,9 +437,11 @@ export default function CockpitSection() {
       .catch(() => setLoading(false));
   }, []);
 
+  const CHART_LOOKBACK_DAYS = 120;
+
   const chronologicalData = useMemo(() => {
     if (!payload?.rows) return [];
-    return [...payload.rows].reverse();
+    return [...payload.rows].slice(0, CHART_LOOKBACK_DAYS).reverse();
   }, [payload]);
 
   const q25LineData = useMemo(

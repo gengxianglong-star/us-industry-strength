@@ -208,6 +208,77 @@ def fetch_and_store_stock_picks(
     return results
 
 
+def build_and_store_elite_industry_picks(
+    storage: Storage,
+    snapshot_date: str,
+    scored: list[ScoredIndustry],
+    config: dict[str, Any],
+    *,
+    elite_market: dict[str, dict[str, Any]] | None = None,
+    per_industry_cap: int = 20,
+) -> dict[str, dict[str, Any]]:
+    """Pair Top industries with Elite symbols by industry name + RS rank (no screener crawl)."""
+    from src.services.elite_data import fetch_elite_market_data
+
+    market = elite_market or fetch_elite_market_data()
+    if not market:
+        return {}
+
+    rs_map = {
+        str(row["symbol"]).upper(): row for row in storage.get_stock_rs_raw(snapshot_date)
+    }
+    by_industry: dict[str, list[str]] = {}
+    for sym, row in market.items():
+        industry_name = str(row.get("industry") or "").strip().lower()
+        if industry_name:
+            by_industry.setdefault(industry_name, []).append(sym.upper())
+
+    active = [item for item in scored if not item.excluded]
+    active.sort(key=lambda item: top_strong_sort_key(item.score, item.rank_m, item.rank_q, item.key))
+    top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
+    results: dict[str, dict[str, Any]] = {}
+    filled = 0
+
+    for item in active:
+        if filled >= top_n:
+            break
+        candidates = by_industry.get(item.name.strip().lower(), [])
+        ranked = [
+            (sym, rs_map[sym])
+            for sym in candidates
+            if sym in rs_map
+        ]
+        ranked.sort(
+            key=lambda pair: (-float(pair[1].get("rs_score", 0) or 0), pair[0]),
+        )
+        tickers = [sym for sym, _ in ranked[:per_industry_cap]]
+        if not tickers:
+            continue
+        filters = "elite_industry_match"
+        screener_url = "elite://export/local"
+        storage.save_industry_stock_picks(
+            snapshot_date,
+            item.key,
+            tickers,
+            screener_url,
+            filters,
+        )
+        results[item.key] = {
+            "tickers": tickers,
+            "screener_url": screener_url,
+            "filters": filters,
+            "elite_source": True,
+        }
+        filled += 1
+
+    logger.info(
+        "Elite industry picks: %d industries, %d tickers",
+        len(results),
+        sum(len(payload["tickers"]) for payload in results.values()),
+    )
+    return results
+
+
 def fetch_top_industry_stock_picks(
     storage: Storage,
     snapshot_date: str,

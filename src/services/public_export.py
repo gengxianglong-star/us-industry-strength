@@ -145,7 +145,7 @@ def build_public_dashboard_payloads(
     *,
     rs_limit: int = 500,
     watchlist_limit: int = 120,
-    breadth_limit: int = 12000,
+    breadth_limit: int = 756,
 ) -> dict[str, Any]:
     exported_at = datetime.now(timezone.utc).isoformat()
     latest = storage.get_latest_date()
