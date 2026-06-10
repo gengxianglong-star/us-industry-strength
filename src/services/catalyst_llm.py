@@ -195,7 +195,7 @@ def enrich_watchlist_with_catalysts(
         if catalyst:
             results[sym] = catalyst
         if i < len(candidates) - 1:
-            time.sleep(0.6)  # rate-limit between symbols
+            time.sleep(4.0)  # Gemini free tier: 15 req/min → max one every 4s
 
     logger.info(
         "Catalyst extraction complete: %d/%d symbols tagged",
