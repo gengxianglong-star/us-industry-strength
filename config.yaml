@@ -19,6 +19,7 @@ stock_filters:
   price_above_sma200: ta_sma200_pa
   dollar_volume_min: sh_curvol_ousd100M
 stock_rs:
+  rs_data_provider: auto  # auto | elite | yahoo — auto tries Finviz Elite then Yahoo fallback
   request_timeout_seconds: 20
   max_workers: 24
   min_price_rows: 260
@@ -57,6 +58,7 @@ scraper:
   use_playwright: true
   playwright_channel: msedge
   playwright_headless: true
+  playwright_profile: data/playwright_edge_profile
 breadth_confluence:
   min_score: 2
 breadth:

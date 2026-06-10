@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 import requests
 
+from src.config_loader import ROOT
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -93,7 +94,8 @@ def _is_cloudflare_page(html: str) -> bool:
 
 
 def _default_playwright_profile() -> str:
-    return str(Path.home() / "Library/Application Support/Microsoft Edge")
+    """Dedicated automation profile — never the live Edge user-data-dir (locks if Edge is open)."""
+    return str(ROOT / "data" / "playwright_edge_profile")
 
 
 def _scraper_settings(config: dict[str, Any]) -> tuple[str, float, str, bool]:
@@ -126,11 +128,45 @@ class PlaywrightFetchSession:
 
 
 @contextmanager
+def _playwright_cookies_from_jar(jar: http.cookiejar.MozillaCookieJar) -> list[dict[str, Any]]:
+    cookies: list[dict[str, Any]] = []
+    for cookie in jar:
+        domain = str(cookie.domain or "").strip()
+        if not domain or "finviz" not in domain.lower():
+            continue
+        cookies.append(
+            {
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": domain,
+                "path": cookie.path or "/",
+                "secure": bool(cookie.secure),
+            }
+        )
+    return cookies
+
+
+def _seed_playwright_cookies(context: Any, cookie_file: str) -> None:
+    jar = _load_cookie_jar(cookie_file)
+    if not jar:
+        return
+    cookies = _playwright_cookies_from_jar(jar)
+    if not cookies:
+        return
+    try:
+        context.add_cookies(cookies)
+        logger.info("Playwright: seeded %d Finviz cookies from %s", len(cookies), cookie_file)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Playwright cookie seed failed: %s", exc)
+
+
+@contextmanager
 def open_playwright_session(config: dict[str, Any]) -> Iterator[PlaywrightFetchSession]:
     scraper = config.get("scraper", {})
-    profile = str(scraper.get("playwright_profile") or _default_playwright_profile()).strip()
+    profile = Path(str(scraper.get("playwright_profile") or _default_playwright_profile()).strip())
     channel = str(scraper.get("playwright_channel") or "msedge").strip()
     headless = bool(scraper.get("playwright_headless", False))
+    _, _, cookie_file, _ = _scraper_settings(config)
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
@@ -138,18 +174,32 @@ def open_playwright_session(config: dict[str, Any]) -> Iterator[PlaywrightFetchS
             "Playwright 未安装。请运行: pip install playwright && python -m playwright install msedge"
         ) from exc
 
-    with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            profile,
-            channel=channel,
-            headless=headless,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        try:
-            page = context.pages[0] if context.pages else context.new_page()
-            yield PlaywrightFetchSession(page)
-        finally:
-            context.close()
+    profile.mkdir(parents=True, exist_ok=True)
+    try:
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                str(profile),
+                channel=channel,
+                headless=headless,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            try:
+                _seed_playwright_cookies(context, cookie_file)
+                page = context.pages[0] if context.pages else context.new_page()
+                yield PlaywrightFetchSession(page)
+            finally:
+                context.close()
+    except Exception as exc:
+        profile_hint = profile
+        if "Microsoft Edge" in str(profile) and "Application Support" in str(profile):
+            profile_hint = Path(_default_playwright_profile())
+        raise RuntimeError(
+            "Playwright 无法启动 Edge 浏览器。"
+            f" 若 Edge 正在运行且 profile 指向系统目录会冲突。"
+            f" 当前 profile={profile}。"
+            f" 建议关闭 Edge 或把 scraper.playwright_profile 改为 {profile_hint}。"
+            f" 原始错误: {exc}"
+        ) from exc
 
 
 def _load_cookie_jar(cookie_file: str) -> http.cookiejar.MozillaCookieJar | None:

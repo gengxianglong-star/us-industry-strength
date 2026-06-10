@@ -146,25 +146,42 @@ def fetch_and_store_stock_picks(
             )
             return key, payload
 
+    def _run_http_workers() -> None:
+        nonlocal shared_session, session_lock
+        if shared_session is None:
+            shared_session, session_lock = prepare_finviz_session(config)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_fetch_one, key, config) for key in industry_keys]
+            for future in as_completed(futures):
+                key, payload = future.result()
+                results[key] = payload
+
+    used_playwright = False
     try:
         if playwright_mode:
-            with open_playwright_session(config) as playwright_session:
-                for key in industry_keys:
-                    key, payload = _fetch_one(key, config, playwright_session=playwright_session)
-                    results[key] = payload
-                    time.sleep(float(scraper_cfg.get("request_delay_seconds", 1.5)))
+            try:
+                with open_playwright_session(config) as playwright_session:
+                    for key in industry_keys:
+                        key, payload = _fetch_one(
+                            key, config, playwright_session=playwright_session
+                        )
+                        results[key] = payload
+                        time.sleep(float(scraper_cfg.get("request_delay_seconds", 1.5)))
+                used_playwright = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Playwright unavailable (%s); falling back to curl/cookie HTTP",
+                    exc,
+                )
+                _run_http_workers()
         else:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(_fetch_one, key, config) for key in industry_keys]
-                for future in as_completed(futures):
-                    key, payload = future.result()
-                    results[key] = payload
+            _run_http_workers()
     finally:
         if shared_session is not None:
             shared_session.close()
 
     # 动态限速回补：若出现 Cloudflare/连接类错误，则降并发+增延时重试失败行业。
-    if playwright_mode:
+    if used_playwright:
         return results
 
     retry_keys: list[str] = []

@@ -20,6 +20,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="运行每日预计算任务")
     parser.add_argument("--date", help="快照日期 YYYY-MM-DD，默认今天")
     parser.add_argument("--skip-rs", action="store_true")
+    parser.add_argument(
+        "--skip-screener",
+        "--skip-stocks",
+        action="store_true",
+        dest="skip_stocks",
+        help="跳过 Top 行业 Finviz 筛股（只跑行业+RS 等后续步骤）",
+    )
     parser.add_argument("--skip-breadth", action="store_true")
     parser.add_argument("--full-breadth", action="store_true")
     parser.add_argument(
@@ -52,6 +59,8 @@ def main() -> int:
         opts = daily_options_from_config(config)
         if args.skip_rs:
             opts.skip_rs = True
+        if args.skip_stocks:
+            opts.skip_stocks = True
         if args.skip_breadth:
             opts.skip_breadth = True
         if args.full_breadth:

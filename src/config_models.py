@@ -34,6 +34,7 @@ class StockFiltersConfig(BaseModel):
 
 
 class StockRsConfig(BaseModel):
+    rs_data_provider: str = Field(default="auto")
     request_timeout_seconds: int = Field(default=20, ge=5, le=120)
     max_workers: int = Field(default=24, ge=4, le=64)
     min_price_rows: int = Field(default=260, ge=120, le=1000)
@@ -58,6 +59,7 @@ class StockRsConfig(BaseModel):
 class StockRsConfigUpdate(BaseModel):
     """Partial stock_rs update from the web form (unset fields are not overwritten)."""
 
+    rs_data_provider: str | None = None
     request_timeout_seconds: int | None = Field(default=None, ge=5, le=120)
     max_workers: int | None = Field(default=None, ge=4, le=64)
     min_price_rows: int | None = Field(default=None, ge=120, le=1000)

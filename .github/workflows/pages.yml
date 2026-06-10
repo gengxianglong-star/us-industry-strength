@@ -84,9 +84,11 @@ jobs:
         run: python scripts/ensure_breadth_history.py
         continue-on-error: true
 
-      - name: Run daily precompute (full RS universe)
+      - name: Run daily precompute (Elite fast track)
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
-        run: python scripts/precompute_daily.py --sync-rs --force --force-full-rs
+        env:
+          FINVIZ_AUTH_KEY: ${{ secrets.FINVIZ_AUTH_KEY }}
+        run: python scripts/precompute_daily.py --sync-rs --force --force-full-rs --skip-screener
 
       - name: Export static dashboard JSON
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true

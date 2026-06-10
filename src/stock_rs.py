@@ -608,6 +608,131 @@ def _symbol_payload_from_bars(
     }
 
 
+def _elite_rs_provider_enabled(rs_cfg: dict[str, Any], *, prefer_stooq: bool) -> bool:
+    provider = str(rs_cfg.get("rs_data_provider", "auto")).strip().lower()
+    return not prefer_stooq and provider != "yahoo"
+
+
+def _fetch_elite_market_if_enabled(
+    rs_cfg: dict[str, Any],
+    *,
+    prefer_stooq: bool,
+) -> dict[str, dict[str, Any]] | None:
+    if not _elite_rs_provider_enabled(rs_cfg, prefer_stooq=prefer_stooq):
+        return None
+    from src.services.elite_data import fetch_elite_market_data
+
+    return fetch_elite_market_data()
+
+
+def _universe_rows_from_elite(market_data: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for sym in sorted(market_data.keys()):
+        row = market_data[sym]
+        label = str(row.get("industry") or row.get("sector") or sym).strip() or sym
+        rows.append({"symbol": sym, "name": label, "exchange": "ELITE"})
+    return rows
+
+
+def _incremental_rs_targets(
+    storage: Storage,
+    snapshot_date: str,
+    symbols: list[str],
+    symbol_set: set[str],
+    *,
+    incremental_mode: bool,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, str], list[str]]:
+    existing_rows = storage.get_stock_rs_raw(snapshot_date) if incremental_mode else []
+    existing_perf_map: dict[str, dict[str, Any]] = {
+        row["symbol"]: {
+            "symbol": row["symbol"],
+            "perf_w": float(row["perf_w"]),
+            "perf_m": float(row["perf_m"]),
+            "perf_q": float(row["perf_q"]),
+            "perf_h": float(row["perf_h"]),
+            "perf_y": float(row["perf_y"]),
+        }
+        for row in existing_rows
+        if row["symbol"] in symbol_set
+    }
+    existing_issues = (
+        {k: v for k, v in storage.get_stock_rs_issues(snapshot_date).items() if k in symbol_set}
+        if incremental_mode
+        else {}
+    )
+    if incremental_mode and (existing_perf_map or existing_issues):
+        issue_symbols = {s for s in existing_issues.keys() if s in symbol_set}
+        missing_symbols = {s for s in symbols if s not in existing_perf_map}
+        target_symbols = sorted(issue_symbols | missing_symbols)
+    else:
+        target_symbols = list(symbols)
+    return existing_rows, existing_perf_map, existing_issues, target_symbols
+
+
+def _elite_rs_prefetch(
+    target_symbols: list[str],
+    perf_map: dict[str, dict[str, Any]],
+    issues_map: dict[str, str],
+    rs_cfg: dict[str, Any],
+    *,
+    prefer_stooq: bool,
+    elite_market: dict[str, dict[str, Any]] | None = None,
+    skip_yahoo_fallback: bool = False,
+) -> tuple[list[str], str, dict[str, Any]]:
+    """Try Finviz Elite exports before Yahoo/Stooq; returns symbols still needing fetch."""
+    stats: dict[str, Any] = {
+        "elite_applied": 0,
+        "elite_missing": 0,
+        "elite_skipped_yahoo": 0,
+    }
+    if not _elite_rs_provider_enabled(rs_cfg, prefer_stooq=prefer_stooq):
+        return target_symbols, "yahoo", stats
+
+    from src.services.elite_data import build_perf_map_from_elite, fetch_elite_market_data
+
+    market = elite_market if elite_market is not None else fetch_elite_market_data()
+    if not market:
+        return target_symbols, "yahoo", stats
+
+    elite_perf, missing = build_perf_map_from_elite(market, target_symbols)
+    for sym, row in elite_perf.items():
+        perf_map[sym] = row
+        issues_map.pop(sym, None)
+    stats["elite_applied"] = len(elite_perf)
+    stats["elite_missing"] = len(missing)
+
+    if skip_yahoo_fallback and missing:
+        for sym in missing:
+            issues_map[sym] = "elite_no_perf"
+        stats["elite_skipped_yahoo"] = len(missing)
+        rs_source = "elite" if elite_perf else "yahoo"
+        logger.info(
+            "⚡ Elite RS fast track: %d ranked; skipped %d illiquid/no-perf symbols "
+            "(no Yahoo fallback)",
+            stats["elite_applied"],
+            stats["elite_skipped_yahoo"],
+        )
+        return [], rs_source, stats
+
+    if not missing:
+        rs_source = "elite"
+        logger.info(
+            "⚡ Elite RS fast track: %d symbols, skipping Yahoo/Stooq fetch",
+            stats["elite_applied"],
+        )
+    elif elite_perf:
+        rs_source = "hybrid"
+        logger.info(
+            "Elite RS prefetch: %d from Elite, %d for Yahoo fallback (source=hybrid)",
+            stats["elite_applied"],
+            stats["elite_missing"],
+        )
+    else:
+        rs_source = "yahoo"
+        logger.info("Elite unavailable; using Yahoo/Stooq for %d symbols", len(target_symbols))
+    return missing, rs_source, stats
+
+
 def _rs_meta_payload(
     *,
     universe_count: int,
@@ -619,6 +744,8 @@ def _rs_meta_payload(
     new_stock_result: dict[str, Any] | None = None,
     worker_errors: list[str] | None = None,
     adaptive_stats: dict[str, Any] | None = None,
+    rs_source: str = "yahoo",
+    elite_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     new_stock_result = new_stock_result or {}
     adaptive_stats = adaptive_stats or {}
@@ -646,6 +773,10 @@ def _rs_meta_payload(
         "adaptive_recovered_total": int(adaptive_stats.get("adaptive_recovered_total", 0) or 0),
         "adaptive_converged": bool(adaptive_stats.get("adaptive_converged")),
         "adaptive_stop_reason": str(adaptive_stats.get("adaptive_stop_reason") or ""),
+        "rs_source": rs_source,
+        "elite_applied": int((elite_stats or {}).get("elite_applied", 0) or 0),
+        "elite_missing": int((elite_stats or {}).get("elite_missing", 0) or 0),
+        "elite_skipped_yahoo": int((elite_stats or {}).get("elite_skipped_yahoo", 0) or 0),
     }
 
 
@@ -1353,43 +1484,46 @@ def compute_and_store_stock_rs(
     yahoo_batch_workers = int(rs_cfg.get("yahoo_batch_workers", 6))
     yahoo_batch_workers = max(1, min(12, yahoo_batch_workers))
 
-    universe = load_us_universe_with_cache(storage, config)
-    symbols = [row["symbol"] for row in universe]
-    symbol_set = set(symbols)
-
-    existing_rows = storage.get_stock_rs_raw(snapshot_date) if incremental_mode else []
-    existing_perf_map: dict[str, dict[str, Any]] = {
-        row["symbol"]: {
-            "symbol": row["symbol"],
-            "perf_w": float(row["perf_w"]),
-            "perf_m": float(row["perf_m"]),
-            "perf_q": float(row["perf_q"]),
-            "perf_h": float(row["perf_h"]),
-            "perf_y": float(row["perf_y"]),
-        }
-        for row in existing_rows
-        if row["symbol"] in symbol_set
-    }
-    existing_issues = (
-        {k: v for k, v in storage.get_stock_rs_issues(snapshot_date).items() if k in symbol_set}
-        if incremental_mode
-        else {}
-    )
-
-    if incremental_mode and (existing_perf_map or existing_issues):
-        issue_symbols = {s for s in existing_issues.keys() if s in symbol_set}
-        missing_symbols = {s for s in symbols if s not in existing_perf_map}
-        target_symbols = sorted(issue_symbols | missing_symbols)
-    else:
-        target_symbols = symbols
-
-    perf_map = dict(existing_perf_map)
-    issues_map = dict(existing_issues)
-    insufficient_bars: dict[str, list[dict[str, Any]]] = {}
-
     worker_errors: list[str] = []
     adaptive_stats: dict[str, Any] = {}
+    rs_source = "yahoo"
+    elite_stats: dict[str, Any] = {}
+    insufficient_bars: dict[str, list[dict[str, Any]]] = {}
     sanity_settings = _pipeline_sanity_settings(config)
+
+    elite_market = _fetch_elite_market_if_enabled(rs_cfg, prefer_stooq=prefer_stooq)
+    if elite_market:
+        logger.info(
+            "⚡ Elite universe: %d symbols — skipping Nasdaq FTP",
+            len(elite_market),
+        )
+        universe = _universe_rows_from_elite(elite_market)
+        symbols = [row["symbol"] for row in universe]
+        symbol_set = set(symbols)
+    else:
+        universe = load_us_universe_with_cache(storage, config)
+        symbols = [row["symbol"] for row in universe]
+        symbol_set = set(symbols)
+
+    existing_rows, existing_perf_map, existing_issues, target_symbols = _incremental_rs_targets(
+        storage,
+        snapshot_date,
+        symbols,
+        symbol_set,
+        incremental_mode=incremental_mode,
+    )
+    perf_map = dict(existing_perf_map)
+    issues_map = dict(existing_issues)
+
+    target_symbols, rs_source, elite_stats = _elite_rs_prefetch(
+        target_symbols,
+        perf_map,
+        issues_map,
+        rs_cfg,
+        prefer_stooq=prefer_stooq,
+        elite_market=elite_market,
+        skip_yahoo_fallback=bool(elite_market),
+    )
 
     user_agent = "Mozilla/5.0"
     total_symbols = len(target_symbols)
@@ -1478,7 +1612,11 @@ def compute_and_store_stock_rs(
                     sanity_settings=sanity_settings,
                 )
     elif progress_callback:
-        progress_callback(0, 0)
+        elite_done = int(elite_stats.get("elite_applied", 0) or 0)
+        if rs_source == "elite" and elite_done > 0:
+            progress_callback(elite_done, elite_done)
+        else:
+            progress_callback(0, 0)
 
     rows = list(perf_map.values())
     coverage_ratio = (len(rows) / len(universe)) if universe else 0.0
@@ -1546,6 +1684,8 @@ def compute_and_store_stock_rs(
                 },
                 worker_errors=worker_errors,
                 adaptive_stats=adaptive_stats,
+                rs_source=rs_source,
+                elite_stats=elite_stats,
             ),
         )
         return {
@@ -1553,6 +1693,7 @@ def compute_and_store_stock_rs(
             "universe_count": len(universe),
             "attempted_count": len(target_symbols),
             "computed_count": 0,
+            "rs_source": rs_source,
             "watchlist_count": len(watch_rows),
             "no_bars_count": no_bars_count,
             "insufficient_history_count": insufficient_history_count,
@@ -1634,6 +1775,8 @@ def compute_and_store_stock_rs(
             },
             worker_errors=worker_errors,
             adaptive_stats=adaptive_stats,
+            rs_source=rs_source,
+            elite_stats=elite_stats,
         ),
     )
 
@@ -1642,6 +1785,7 @@ def compute_and_store_stock_rs(
         "universe_count": len(universe),
         "attempted_count": len(target_symbols),
         "computed_count": total,
+        "rs_source": rs_source,
         "watchlist_count": len(watch_rows),
         "no_bars_count": no_bars_count,
         "insufficient_history_count": insufficient_history_count,
