@@ -89,6 +89,7 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
         env:
           FINVIZ_AUTH_KEY: ${{ secrets.FINVIZ_AUTH_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python scripts/precompute_daily.py --sync-rs --force --force-full-rs --skip-screener
 
       - name: Save SQLite cache

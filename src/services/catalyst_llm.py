@@ -114,7 +114,7 @@ def extract_catalyst(symbol: str) -> dict[str, Any]:
 def enrich_watchlist_with_catalysts(
     watchlist: list[dict[str, Any]],
     *,
-    min_rs_score: float = 0.95,
+    min_rs_score: float = 0.80,
     max_symbols: int = 30,
 ) -> dict[str, dict[str, Any]]:
     """Extract catalysts for top RS stocks in the watchlist.

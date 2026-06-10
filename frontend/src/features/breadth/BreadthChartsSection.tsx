@@ -110,6 +110,10 @@ export default function BreadthChartsSection() {
     boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.5)',
   };
 
+  function dateTooltipTitle(label: unknown) {
+    return `📅 ${String(label ?? '')}`;
+  }
+
   if (loading) {
     return (
       <div className="bg-[#0b0f19] rounded-xl border border-slate-800 p-8 flex items-center justify-center h-[500px] mt-6">
@@ -155,7 +159,7 @@ export default function BreadthChartsSection() {
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
             <XAxis dataKey="date" stroke="#475569" tick={{ fontSize: 10, fill: '#475569' }} minTickGap={30} />
             <YAxis stroke="#475569" tick={{ fontSize: 10, fill: '#475569' }} />
-            <Tooltip contentStyle={customTooltipStyle} />
+            <Tooltip contentStyle={customTooltipStyle} labelFormatter={dateTooltipTitle} cursor={{ stroke: '#475569', strokeWidth: 1, strokeDasharray: '3 3' }} />
             <Legend wrapperStyle={{ fontSize: '11px', fontFamily: 'monospace' }} />
             <ReferenceLine
               y={1000}
@@ -166,8 +170,8 @@ export default function BreadthChartsSection() {
             />
             <ReferenceLine y={500} stroke="#fbbf24" strokeDasharray="3 3" opacity={0.5} />
             <ReferenceLine y={300} stroke="#475569" strokeDasharray="3 3" opacity={0.5} />
-            <Line type="monotone" dataKey="up4" name="Up 4%" stroke="#10b981" strokeWidth={1.5} dot={false} activeDot={{ r: 4 }} />
-            <Line type="monotone" dataKey="dn4" name="Down 4%" stroke="#e11d48" strokeWidth={1.5} dot={false} activeDot={{ r: 4 }} />
+            <Line type="monotone" dataKey="up4" name="Up 4%" stroke="#10b981" strokeWidth={1.5} dot={false} activeDot={{ r: 5 }} />
+            <Line type="monotone" dataKey="dn4" name="Down 4%" stroke="#e11d48" strokeWidth={1.5} dot={false} activeDot={{ r: 5 }} />
           </LineChart>
         </ChartCard>
 
@@ -180,7 +184,7 @@ export default function BreadthChartsSection() {
             <XAxis dataKey="date" stroke="#475569" tick={{ fontSize: 10, fill: '#475569' }} minTickGap={30} />
             <YAxis yAxisId="left" stroke="#475569" tick={{ fontSize: 10, fill: '#475569' }} domain={[0, 'auto']} />
             <YAxis yAxisId="right" orientation="right" stroke="#475569" tick={{ fontSize: 10, fill: '#475569' }} domain={[0, 100]} />
-            <Tooltip contentStyle={customTooltipStyle} />
+            <Tooltip contentStyle={customTooltipStyle} labelFormatter={dateTooltipTitle} cursor={{ stroke: '#475569', strokeWidth: 1, strokeDasharray: '3 3' }} />
             <Legend wrapperStyle={{ fontSize: '11px', fontFamily: 'monospace' }} />
             <ReferenceLine
               y={2.0}
@@ -210,6 +214,7 @@ export default function BreadthChartsSection() {
               strokeDasharray="3 3"
               dot={false}
               opacity={0.6}
+              activeDot={{ r: 5 }}
             />
             <Line
               yAxisId="left"
@@ -219,6 +224,7 @@ export default function BreadthChartsSection() {
               stroke="#8b5cf6"
               strokeWidth={2.5}
               dot={false}
+              activeDot={{ r: 5 }}
             />
             <Line
               yAxisId="right"
@@ -229,6 +235,7 @@ export default function BreadthChartsSection() {
               strokeWidth={1}
               dot={false}
               opacity={0.8}
+              activeDot={{ r: 5 }}
             />
           </ComposedChart>
         </ChartCard>
@@ -241,7 +248,7 @@ export default function BreadthChartsSection() {
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
             <XAxis dataKey="date" stroke="#475569" tick={{ fontSize: 10, fill: '#475569' }} minTickGap={30} />
             <YAxis stroke="#475569" tick={{ fontSize: 10, fill: '#475569' }} />
-            <Tooltip contentStyle={customTooltipStyle} />
+            <Tooltip contentStyle={customTooltipStyle} labelFormatter={dateTooltipTitle} cursor={{ stroke: '#475569', strokeWidth: 1, strokeDasharray: '3 3' }} />
             <Legend wrapperStyle={{ fontSize: '11px', fontFamily: 'monospace' }} />
             <ReferenceLine
               y={200}
@@ -250,8 +257,8 @@ export default function BreadthChartsSection() {
               opacity={0.7}
               label={{ value: 'EXTREME REVERSAL (<200)', position: 'insideTopLeft', fill: '#fbbf24', fontSize: 10 }}
             />
-            <Line type="monotone" dataKey="up25q" name="Up 25% Quarter" stroke="#10b981" strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="dn25q" name="Down 25% Quarter" stroke="#e11d48" strokeWidth={2} dot={false} strokeDasharray="4 4" />
+            <Line type="monotone" dataKey="up25q" name="Up 25% Quarter" stroke="#10b981" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
+            <Line type="monotone" dataKey="dn25q" name="Down 25% Quarter" stroke="#e11d48" strokeWidth={2} dot={false} strokeDasharray="4 4" activeDot={{ r: 5 }} />
           </LineChart>
         </ChartCard>
 
@@ -270,10 +277,10 @@ export default function BreadthChartsSection() {
               tick={{ fontSize: 10, fill: '#0ea5e9' }}
               domain={['dataMin - 100', 'dataMax + 100']}
             />
-            <Tooltip contentStyle={customTooltipStyle} />
+            <Tooltip contentStyle={customTooltipStyle} labelFormatter={dateTooltipTitle} cursor={{ stroke: '#475569', strokeWidth: 1, strokeDasharray: '3 3' }} />
             <Legend wrapperStyle={{ fontSize: '11px', fontFamily: 'monospace' }} />
-            <Line yAxisId="right" type="monotone" dataKey="spx" name="S&P 500" stroke="#0ea5e9" strokeWidth={2} dot={false} opacity={0.5} connectNulls />
-            <Line yAxisId="left" type="stepAfter" dataKey="up13" name="Up 13% (34D)" stroke="#10b981" strokeWidth={1.5} dot={false} />
+            <Line yAxisId="right" type="monotone" dataKey="spx" name="S&P 500" stroke="#0ea5e9" strokeWidth={2} dot={false} opacity={0.5} connectNulls activeDot={{ r: 5 }} />
+            <Line yAxisId="left" type="stepAfter" dataKey="up13" name="Up 13% (34D)" stroke="#10b981" strokeWidth={1.5} dot={false} activeDot={{ r: 5 }} />
             <Line
               yAxisId="left"
               type="stepAfter"
@@ -283,6 +290,7 @@ export default function BreadthChartsSection() {
               strokeWidth={1.5}
               dot={false}
               strokeDasharray="4 4"
+              activeDot={{ r: 5 }}
             />
           </ComposedChart>
         </ChartCard>
@@ -295,10 +303,10 @@ export default function BreadthChartsSection() {
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
             <XAxis dataKey="date" stroke="#475569" tick={{ fontSize: 10, fill: '#475569' }} minTickGap={30} />
             <YAxis stroke="#475569" tick={{ fontSize: 10, fill: '#475569' }} />
-            <Tooltip contentStyle={customTooltipStyle} />
+            <Tooltip contentStyle={customTooltipStyle} labelFormatter={dateTooltipTitle} cursor={{ stroke: '#475569', strokeWidth: 1, strokeDasharray: '3 3' }} />
             <Legend wrapperStyle={{ fontSize: '11px', fontFamily: 'monospace' }} />
-            <Line type="monotone" dataKey="up25m" name="Up 25% Month" stroke="#10b981" strokeWidth={1.5} dot={false} />
-            <Line type="monotone" dataKey="dn25m" name="Down 25% Month" stroke="#e11d48" strokeWidth={1.5} dot={false} />
+            <Line type="monotone" dataKey="up25m" name="Up 25% Month" stroke="#10b981" strokeWidth={1.5} dot={false} activeDot={{ r: 5 }} />
+            <Line type="monotone" dataKey="dn25m" name="Down 25% Month" stroke="#e11d48" strokeWidth={1.5} dot={false} activeDot={{ r: 5 }} />
           </LineChart>
         </ChartCard>
 
@@ -310,11 +318,11 @@ export default function BreadthChartsSection() {
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
             <XAxis dataKey="date" stroke="#475569" tick={{ fontSize: 10, fill: '#475569' }} minTickGap={30} />
             <YAxis stroke="#475569" tick={{ fontSize: 10, fill: '#475569' }} />
-            <Tooltip contentStyle={customTooltipStyle} />
+            <Tooltip contentStyle={customTooltipStyle} labelFormatter={dateTooltipTitle} cursor={{ stroke: '#475569', strokeWidth: 1, strokeDasharray: '3 3' }} />
             <Legend wrapperStyle={{ fontSize: '11px', fontFamily: 'monospace' }} />
             <ReferenceLine y={20} stroke="#fbbf24" strokeDasharray="3 3" opacity={0.6} label={{ value: 'EXTREME (20)', position: 'insideTopLeft', fill: '#fbbf24', fontSize: 10 }} />
-            <Line type="monotone" dataKey="up50m" name="Up 50% Month" stroke="#10b981" strokeWidth={1.5} dot={false} />
-            <Line type="monotone" dataKey="dn50m" name="Down 50% Month" stroke="#e11d48" strokeWidth={1.5} dot={false} />
+            <Line type="monotone" dataKey="up50m" name="Up 50% Month" stroke="#10b981" strokeWidth={1.5} dot={false} activeDot={{ r: 5 }} />
+            <Line type="monotone" dataKey="dn50m" name="Down 50% Month" stroke="#e11d48" strokeWidth={1.5} dot={false} activeDot={{ r: 5 }} />
           </LineChart>
         </ChartCard>
       </div>
