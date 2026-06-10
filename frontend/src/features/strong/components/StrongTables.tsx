@@ -227,7 +227,36 @@ export function WatchlistChartGrid({
             <div className="px-2.5 py-1.5 border-b border-slate-800/80 bg-slate-950/80">
               <div className="flex justify-between items-center gap-2">
                 <div className="flex items-center gap-2 min-w-0">
-                  <WatchlistFinvizSymbolLink symbol={row.symbol} />
+                  {/* Catalyst hover card trigger */}
+                  <div className="relative group cursor-pointer">
+                    <WatchlistFinvizSymbolLink symbol={row.symbol} />
+                    {row.catalyst?.tag && (
+                      <div className="absolute left-0 top-full mt-2 hidden group-hover:block z-50 w-72 bg-gray-900 border border-gray-700 rounded-lg shadow-2xl overflow-hidden animate-fade-in">
+                        {/* Top highlight bar */}
+                        <div className="bg-gradient-to-r from-emerald-900/50 to-gray-900 px-3 py-2 border-b border-gray-800 flex items-center gap-2">
+                          <span className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                          <span className="text-xs font-black text-emerald-400 tracking-wider">
+                            {row.catalyst.tag}
+                          </span>
+                        </div>
+                        {/* News headlines */}
+                        {row.catalyst.headlines && row.catalyst.headlines.length > 0 && (
+                          <div className="px-3 py-2 bg-gray-800/50">
+                            <ul className="space-y-1.5">
+                              {row.catalyst.headlines.map((headline: string, idx: number) => (
+                                <li
+                                  key={idx}
+                                  className="text-[11px] text-gray-400 leading-snug line-clamp-2 before:content-['•'] before:mr-1.5 before:text-gray-600"
+                                >
+                                  {headline}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                   {industry ? (
                     <span className="text-[10px] font-mono text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded truncate max-w-[140px]">
                       {industry}

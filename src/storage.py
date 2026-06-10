@@ -138,6 +138,15 @@ CREATE TABLE IF NOT EXISTS stock_watchlist (
 CREATE INDEX IF NOT EXISTS idx_stock_watchlist_date_rank
     ON stock_watchlist(snapshot_date, rs_rank ASC);
 
+CREATE TABLE IF NOT EXISTS stock_catalyst (
+    snapshot_date TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    headlines_json TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (snapshot_date, symbol),
+    FOREIGN KEY (snapshot_date) REFERENCES snapshots(snapshot_date)
+);
+
 CREATE TABLE IF NOT EXISTS stock_rs_meta (
     snapshot_date TEXT PRIMARY KEY,
     universe_count INTEGER NOT NULL,
@@ -988,6 +997,35 @@ class Storage:
                     ],
                 )
 
+    def save_stock_catalysts(
+        self,
+        snapshot_date: str,
+        catalysts: dict[str, dict[str, Any]],
+    ) -> None:
+        """Save AI-extracted catalyst tags for a snapshot's watchlist symbols."""
+        if not catalysts:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM stock_catalyst WHERE snapshot_date = ?",
+                (snapshot_date,),
+            )
+            conn.executemany(
+                """
+                INSERT INTO stock_catalyst(snapshot_date, symbol, tag, headlines_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (
+                        snapshot_date,
+                        symbol,
+                        data["tag"],
+                        json.dumps(data.get("headlines", []), ensure_ascii=False),
+                    )
+                    for symbol, data in catalysts.items()
+                ],
+            )
+
     def get_stock_rs(
         self,
         snapshot_date: str,
@@ -1015,9 +1053,13 @@ class Storage:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT w.*, u.name, u.exchange
+                SELECT w.*, u.name, u.exchange,
+                       c.tag AS catalyst_tag,
+                       c.headlines_json AS catalyst_headlines_json
                 FROM stock_watchlist w
                 LEFT JOIN stock_universe u ON u.symbol = w.symbol
+                LEFT JOIN stock_catalyst c ON c.snapshot_date = w.snapshot_date
+                    AND c.symbol = w.symbol
                 WHERE w.snapshot_date = ?
                 ORDER BY w.rs_rank ASC
                 LIMIT ?
@@ -1032,6 +1074,16 @@ class Storage:
             if not industry_name and data["industries"]:
                 industry_name = str(data["industries"][0])
             data["industry_name"] = industry_name
+            # Build catalyst dict for frontend consumption
+            tag = data.pop("catalyst_tag", None)
+            headlines_raw = data.pop("catalyst_headlines_json", None)
+            if tag:
+                data["catalyst"] = {
+                    "tag": tag,
+                    "headlines": json.loads(headlines_raw or "[]"),
+                }
+            else:
+                data["catalyst"] = None
             result.append(data)
         return self.enrich_rank_w_delta(snapshot_date, result)
 

@@ -21,6 +21,22 @@ from src.storage import Storage
 
 logger = get_logger(__name__)
 
+def _save_watchlist_and_enrich_catalysts(
+    storage: Storage,
+    snapshot_date: str,
+    watch_rows: list[dict[str, Any]],
+) -> None:
+    """Save watchlist and optionally enrich top RS stocks with AI catalyst tags."""
+    storage.save_stock_watchlist(snapshot_date, watch_rows)
+    try:
+        from src.services.catalyst_llm import enrich_watchlist_with_catalysts
+        catalysts = enrich_watchlist_with_catalysts(watch_rows)
+        if catalysts:
+            storage.save_stock_catalysts(snapshot_date, catalysts)
+    except Exception:
+        logger.warning("Catalyst enrichment failed", exc_info=True)
+
+
 PERF_INDEX_OFFSETS = {
     "week": 5,
     "month": 21,
@@ -368,7 +384,7 @@ def backfill_new_stock_rs_for_snapshot(
         else new_stock_result["new_watch_candidates"]
     )
     watch_rows = _merge_watchlists(main_watch, new_watch)
-    storage.save_stock_watchlist(snapshot_date, watch_rows)
+    _save_watchlist_and_enrich_catalysts(storage, snapshot_date, watch_rows)
 
     prev_meta = storage.get_stock_rs_meta(snapshot_date) or {}
     storage.save_stock_rs_meta(
@@ -1705,7 +1721,7 @@ def compute_and_store_stock_rs(
             scored_industries,
         )
         watch_rows = _merge_watchlists([], new_stock_result["new_watch_candidates"])
-        storage.save_stock_watchlist(snapshot_date, watch_rows)
+        _save_watchlist_and_enrich_catalysts(storage, snapshot_date, watch_rows)
         storage.save_stock_rs_meta(
             snapshot_date,
             _rs_meta_payload(
@@ -1772,7 +1788,7 @@ def compute_and_store_stock_rs(
         else new_stock_result["new_watch_candidates"]
     )
     watch_rows = _merge_watchlists(main_watch_candidates, new_watch)
-    storage.save_stock_watchlist(snapshot_date, watch_rows)
+    _save_watchlist_and_enrich_catalysts(storage, snapshot_date, watch_rows)
     storage.save_stock_rs_meta(
         snapshot_date,
         _rs_meta_payload(
@@ -1859,7 +1875,7 @@ def rebuild_stock_watchlist_for_snapshot(
         new_watch = _cross_watchlist_candidates(new_watch_rows, symbol_to_industries, 1.0)
 
     watch_rows = _merge_watchlists(main_watch, new_watch)
-    storage.save_stock_watchlist(snapshot_date, watch_rows)
+    _save_watchlist_and_enrich_catalysts(storage, snapshot_date, watch_rows)
 
     meta = storage.get_stock_rs_meta(snapshot_date)
     if meta:

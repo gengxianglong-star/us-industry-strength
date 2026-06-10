@@ -74,6 +74,11 @@ export type WatchlistChartBar = {
   v?: number;
 };
 
+export type CatalystData = {
+  tag: string;
+  headlines: string[];
+};
+
 export type WatchlistRow = {
   symbol: string;
   rs_rank: number;
@@ -84,6 +89,7 @@ export type WatchlistRow = {
   rank_w_delta?: number | null;
   exchange?: string | null;
   chart_bars?: WatchlistChartBar[];
+  catalyst?: CatalystData | null;
 };
 
 export type RsPayload = {
