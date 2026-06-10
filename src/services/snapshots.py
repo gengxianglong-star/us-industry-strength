@@ -59,6 +59,7 @@ def top_strong_from_rows(
     if stock_picks is None:
         return to_snapshot_industries(active[:top_n])
     selected: list[dict[str, Any]] = []
+    fallback: list[dict[str, Any]] = []
     for row in active:
         if len(selected) >= top_n:
             break
@@ -66,7 +67,12 @@ def top_strong_from_rows(
         tickers = pick.get("tickers") or []
         if tickers:
             selected.append(row)
-    return to_snapshot_industries(selected)
+        elif len(fallback) < top_n:
+            fallback.append(row)
+    # Backfill remaining slots so the frontend always sees top_n industries
+    if len(selected) < top_n:
+        selected.extend(fallback[: top_n - len(selected)])
+    return to_snapshot_industries(selected[:top_n])
 
 
 def core_strong_from_rows(rows: list[dict[str, Any]], *, top_n: int) -> list[SnapshotIndustry]:

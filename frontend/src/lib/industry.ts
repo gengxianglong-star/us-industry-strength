@@ -173,7 +173,7 @@ export function computeLongTrend(row: IndustryRow) {
 
 export function getTopStrongIndustries(data: SnapshotPayload) {
   return data.industries
-    .filter((i) => i.is_top_strong && (i.stock_picks?.length ?? 0) > 0)
+    .filter((i) => i.is_top_strong)
     .sort((a, b) => b.score - a.score)
     .slice(0, data.top_strong_count ?? 10);
 }
