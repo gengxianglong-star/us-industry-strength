@@ -95,14 +95,14 @@ def extract_catalyst(symbol: str) -> dict[str, Any]:
     prompt = (
         "You are a professional Swing Trader following Qullamaggie's Episodic Pivot strategy.\n"
         f"Review the following recent news headlines for stock ${symbol}.\n"
-        "Extract the core bullish catalyst in MAX 4 WORDS "
-        '(e.g., "EARNINGS BEAT", "FDA APPROVAL", "GUIDANCE RAISED", "NEW CONTRACT").\n'
+        "Extract the core bullish catalyst in Chinese, max 30 characters. "
+        '(e.g., "业绩超预期", "FDA批准新药", "上调全年指引", "签下大合同").\n'
         "If the news is purely negative, noise, or has no clear catalyst, "
         'return exactly the word: "NONE".\n'
         "\n"
         "Headlines:\n"
         + "\n".join(f"- {h}" for h in headlines)
-        + "\n\nReturn ONLY the max 4-word tag. No explanation."
+        + "\n\nReturn ONLY the short Chinese tag. No explanation. No English."
     )
 
     try:
@@ -112,9 +112,9 @@ def extract_catalyst(symbol: str) -> dict[str, Any]:
             temperature=0.3,
             thinking="disabled",
         )
-        tag = tag.strip().upper()
+        tag = tag.strip()
 
-        if tag == "NONE" or len(tag) > 25 or not tag:
+        if tag == "NONE" or len(tag) > 50 or not tag:
             logger.info("🤖 %s — AI tagged as noise (NONE)", symbol)
             return {}
 

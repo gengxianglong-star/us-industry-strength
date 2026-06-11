@@ -226,22 +226,23 @@ export function WatchlistChartGrid({
           >
             <div className="px-2.5 py-1.5 border-b border-slate-800/80 bg-slate-950/80">
               <div className="flex justify-between items-center gap-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  {/* Watchlist symbol + inline catalyst badge (never clipped by overflow) */}
-                  <WatchlistFinvizSymbolLink symbol={row.symbol} />
+                <div className="flex flex-col min-w-0">
+                  <div className="flex items-center gap-2">
+                    <WatchlistFinvizSymbolLink symbol={row.symbol} />
+                    {industry ? (
+                      <span className="text-[10px] font-mono text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded truncate max-w-[140px]">
+                        {industry}
+                      </span>
+                    ) : null}
+                  </div>
                   {row.catalyst?.tag && (
                     <span
-                      className="cursor-help text-[10px] font-bold bg-emerald-900/40 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800/50 hover:bg-emerald-800/60 transition-colors"
+                      className="cursor-help mt-0.5 self-start text-[10px] font-bold bg-emerald-900/40 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800/50 hover:bg-emerald-800/60 transition-colors"
                       title={row.catalyst.headlines?.join(' • ') ?? row.catalyst.tag}
                     >
                       ⚡ {row.catalyst.tag}
                     </span>
                   )}
-                  {industry ? (
-                    <span className="text-[10px] font-mono text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded truncate max-w-[140px]">
-                      {industry}
-                    </span>
-                  ) : null}
                 </div>
                 <div className="flex items-center gap-2 text-[10px] font-mono shrink-0">
                   <span
