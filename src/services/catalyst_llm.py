@@ -108,7 +108,7 @@ def extract_catalyst(symbol: str) -> dict[str, Any]:
     try:
         tag, model = deepseek_llm.chat(
             prompt,
-            max_tokens=32,
+            max_tokens=100,
             temperature=0.3,
             thinking="disabled",
         )
