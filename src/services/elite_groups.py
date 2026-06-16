@@ -12,12 +12,14 @@ from src.finviz_scraper import INDUSTRY_KEY_RE, IndustryRow
 from src.logging_config import get_logger
 from src.services.elite_data import (
     ELITE_HOST,
+    _elite_export_error_detail,
     _fetch_with_curl,
     _fetch_with_requests,
     _looks_like_html_error,
     _pick,
     _url_has_auth_param,
     elite_auth_key,
+    elite_export_is_rate_limited,
     parse_finviz_number,
     parse_finviz_percent,
 )
@@ -60,6 +62,10 @@ def _parse_groups_csv(text: str) -> list[dict[str, str]]:
 
 
 def _validate_groups_body(text: str, *, final_url: str) -> None:
+    if elite_export_is_rate_limited(body=text):
+        raise RuntimeError(_elite_export_error_detail(429, text))
+    if "invalid export api token" in (text or "").lower():
+        raise RuntimeError(_elite_export_error_detail(401, text))
     lowered_url = final_url.lower()
     if lowered_url.rstrip("/").endswith("/elite"):
         raise RuntimeError(
@@ -77,7 +83,7 @@ def _validate_groups_body(text: str, *, final_url: str) -> None:
         )
 
 
-def _fetch_groups_export(auth_key: str, *, timeout: int = 60, max_retries: int = 3) -> str:
+def _fetch_groups_export(auth_key: str, *, timeout: int = 60, max_retries: int = 2) -> str:
     url = f"{ELITE_GROUPS_EXPORT}&auth={auth_key}"
     use_cookies = not _url_has_auth_param(url)
     last_error: Exception | None = None
@@ -89,6 +95,10 @@ def _fetch_groups_export(auth_key: str, *, timeout: int = 60, max_retries: int =
             return text
         except (OSError, RuntimeError) as exc:
             last_error = exc
+            if elite_export_is_rate_limited(message=str(exc)) and attempt < max_retries - 1:
+                logger.info("Elite groups rate limited — waiting 65s before retry")
+                time.sleep(65)
+                continue
             logger.debug("Elite groups curl attempt %d failed: %s", attempt + 1, exc)
         try:
             text, final_url = _fetch_with_requests(url, timeout=timeout, use_cookies=use_cookies)
@@ -97,8 +107,12 @@ def _fetch_groups_export(auth_key: str, *, timeout: int = 60, max_retries: int =
             return text
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+            if elite_export_is_rate_limited(message=str(exc)) and attempt < max_retries - 1:
+                logger.info("Elite groups rate limited — waiting 65s before retry")
+                time.sleep(65)
+                continue
             logger.debug("Elite groups requests attempt %d failed: %s", attempt + 1, exc)
-        if attempt < max_retries - 1:
+        if attempt < max_retries - 1 and not elite_export_is_rate_limited(message=str(last_error or "")):
             time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"Elite groups export failed: {last_error}")
 

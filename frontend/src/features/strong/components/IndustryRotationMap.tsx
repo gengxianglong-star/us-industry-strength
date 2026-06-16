@@ -9,7 +9,6 @@ import {
   ReferenceArea,
   ResponsiveContainer,
   Tooltip,
-  Customized,
 } from "recharts";
 import { Crosshair } from "lucide-react";
 import type { IndustryRow } from "../../../lib/industry";
@@ -185,63 +184,6 @@ function buildAlphaPlot(nodes: RotationNode[]): PlotTransform {
   };
 }
 
-type AxisMap = Record<string, { scale?: (v: number) => number }>;
-
-function TrajectoryTail({
-  hoveredKey,
-  plotNodes,
-  mapRsPoint,
-  xAxisMap,
-  yAxisMap,
-  offset,
-}: {
-  hoveredKey: string | null;
-  plotNodes: AlphaPlotNode[];
-  mapRsPoint: PlotTransform["mapRsPoint"];
-  xAxisMap?: AxisMap;
-  yAxisMap?: AxisMap;
-  offset?: { left?: number; top?: number };
-}) {
-  if (!hoveredKey || !xAxisMap || !yAxisMap || !offset) return null;
-  const node = plotNodes.find((n) => n.industry_key === hoveredKey);
-  if (!node?.trajectory_5d || node.trajectory_5d.length < 2) return null;
-
-  const xAxis = Object.values(xAxisMap)[0];
-  const yAxis = Object.values(yAxisMap)[0];
-  if (!xAxis?.scale || !yAxis?.scale) return null;
-
-  const left = offset.left ?? 0;
-  const top = offset.top ?? 0;
-  const xScale = xAxis.scale!;
-  const yScale = yAxis.scale!;
-  const pixelPoints = node.trajectory_5d.map((p) => {
-    const plot = mapRsPoint(p.rs_3m, p.rs_1m);
-    return {
-      date: p.date,
-      px: xScale(plot.plot_x) + left,
-      py: yScale(plot.plot_y) + top,
-    };
-  });
-
-  return (
-    <g pointerEvents="none">
-      <polyline
-        points={pixelPoints.map((p) => `${p.px},${p.py}`).join(" ")}
-        fill="none"
-        stroke="#94a3b8"
-        strokeWidth={1.5}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        opacity={0.5}
-        strokeDasharray="5 4"
-      />
-      {pixelPoints.slice(0, -1).map((p) => (
-        <circle key={p.date} cx={p.px} cy={p.py} r={2.5} fill="#64748b" opacity={0.45} />
-      ))}
-    </g>
-  );
-}
-
 export function IndustryRotationMap({
   industries,
   breadthRatio10 = 1,
@@ -262,6 +204,16 @@ export function IndustryRotationMap({
     () => buildAlphaPlot(alphaNodes),
     [alphaNodes],
   );
+
+  const trailData = useMemo(() => {
+    if (!hoveredKey) return [];
+    const node = plotNodes.find((n) => n.industry_key === hoveredKey);
+    if (!node?.trajectory_5d || node.trajectory_5d.length < 2) return [];
+    return node.trajectory_5d.map((p) => {
+      const plot = mapRsPoint(p.rs_3m, p.rs_1m);
+      return { plot_x: plot.plot_x, plot_y: plot.plot_y, date: p.date };
+    });
+  }, [hoveredKey, plotNodes, mapRsPoint]);
 
   return (
     <div
@@ -331,25 +283,22 @@ export function IndustryRotationMap({
                 cursor={{ strokeDasharray: "3 3", stroke: "#475569", strokeWidth: 1 }}
                 isAnimationActive={false}
               />
-              <Customized
-                component={(rawProps: unknown) => {
-                  const props = rawProps as {
-                    xAxisMap?: AxisMap;
-                    yAxisMap?: AxisMap;
-                    offset?: { left?: number; top?: number };
-                  };
-                  return (
-                    <TrajectoryTail
-                      hoveredKey={hoveredKey}
-                      plotNodes={plotNodes}
-                      mapRsPoint={mapRsPoint}
-                      xAxisMap={props.xAxisMap}
-                      yAxisMap={props.yAxisMap}
-                      offset={props.offset}
-                    />
-                  );
-                }}
-              />
+              {trailData.length >= 2 ? (
+                <Scatter
+                  data={trailData}
+                  isAnimationActive={false}
+                  line={{
+                    stroke: "#94a3b8",
+                    strokeWidth: 1.5,
+                    strokeDasharray: "5 4",
+                  }}
+                  shape={(props: { cx?: number; cy?: number; index?: number }) => {
+                    const { cx = 0, cy = 0, index = 0 } = props;
+                    if (index === trailData.length - 1) return null;
+                    return <circle cx={cx} cy={cy} r={2.5} fill="#64748b" opacity={0.5} />;
+                  }}
+                />
+              ) : null}
               <Scatter
                 data={plotNodes}
                 isAnimationActive={false}

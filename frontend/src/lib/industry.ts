@@ -206,7 +206,20 @@ export function rankHeat(rank: number) {
 }
 
 export function finvizDailyChartUrl(symbol: string) {
-  return `https://charts2.finviz.com/chart.ashx?t=${encodeURIComponent(symbol)}&ty=c&ta=1&p=d&s=l&theme=dark`;
+  const q = new URLSearchParams({
+    w: "520",
+    h: "240",
+    bw: "3",
+    bm: "1",
+    bb: "1",
+    t: symbol,
+    tf: "d",
+    s: "linear",
+    pm: "0",
+    am: "0",
+    ct: "candle_stick",
+  });
+  return `https://charts2-node.finviz.com/chart?${q}&o[0][ot]=sma&o[0][op]=20&o[0][oc]=DC32B363&o[1][ot]=sma&o[1][op]=50&o[1][oc]=FF8F33C6&o[2][ot]=sma&o[2][op]=200&o[2][oc]=DCB3326D`;
 }
 
 export function finvizQuoteUrl(symbol: string) {

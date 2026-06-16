@@ -57,6 +57,12 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests -p 'test_*.py' -q
 
+      - name: Verify Finviz Elite CSV exports (watchlist pipeline)
+        if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
+        env:
+          FINVIZ_AUTH_KEY: ${{ secrets.FINVIZ_AUTH_KEY }}
+        run: python scripts/verify_finviz_elite_exports.py
+
       - name: Verify catalyst API keys
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
         env:

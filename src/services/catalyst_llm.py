@@ -95,26 +95,34 @@ def extract_catalyst(symbol: str) -> dict[str, Any]:
     prompt = (
         "You are a professional Swing Trader following Qullamaggie's Episodic Pivot strategy.\n"
         f"Review the following recent news headlines for stock ${symbol}.\n"
-        "Extract the core bullish catalyst in Chinese, max 30 characters. "
-        '(e.g., "业绩超预期", "FDA批准新药", "上调全年指引", "签下大合同").\n'
-        "If the news is purely negative, noise, or has no clear catalyst, "
-        'return exactly the word: "NONE".\n'
+        "Write ONE Chinese catalyst sentence (35–90 characters) for the watchlist card.\n"
+        "Rules:\n"
+        "- Include concrete numbers from headlines when available: deal $ size, revenue/EPS "
+        "% beat or miss vs consensus, guidance raise/cut %, FDA phase, price target, volume.\n"
+        "- Name the event type (业绩、订单、FDA、指引、回购、并购、合作等).\n"
+        "- No fluff, no English, no ticker repetition alone.\n"
+        "- If news is negative, noise, or no clear catalyst, return exactly: NONE\n"
+        "\n"
+        "Examples:\n"
+        '- "Q1营收$2.1B同比+28%超市场预期8%，上调全年指引"\n'
+        '- "签下$1.2B五年AI芯片供货合同，占去年营收约40%"\n'
+        '- "FDA批准III期临床关键适应症，峰值销售预期$3B+"\n'
         "\n"
         "Headlines:\n"
         + "\n".join(f"- {h}" for h in headlines)
-        + "\n\nReturn ONLY the short Chinese tag. No explanation. No English."
+        + "\n\nReturn ONLY the Chinese sentence (or NONE). No quotes. No explanation."
     )
 
     try:
         tag, model = deepseek_llm.chat(
             prompt,
-            max_tokens=100,
-            temperature=0.3,
+            max_tokens=200,
+            temperature=0.25,
             thinking="disabled",
         )
-        tag = tag.strip()
+        tag = tag.strip().strip('"').strip("'")
 
-        if tag == "NONE" or len(tag) > 50 or not tag:
+        if tag.upper() == "NONE" or len(tag) < 8 or len(tag) > 120 or not tag:
             logger.info("🤖 %s — AI tagged as noise (NONE)", symbol)
             return {}
 

@@ -216,17 +216,17 @@ export function WatchlistChartGrid({
     );
   }
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[78vh] overflow-y-auto pr-1">
+    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[78vh] overflow-y-auto pr-1 items-stretch">
       {watchlist.map((row) => {
         const industry = watchlistIndustryLabel(row, industryNames);
         return (
           <article
             key={row.symbol}
-            className="bg-black border border-slate-800 rounded-lg overflow-hidden hover:border-cyan-500/40 hover:shadow-[0_0_12px_rgba(34,211,238,0.08)] transition-all"
+            className="bg-black border border-slate-800 rounded-lg overflow-hidden hover:border-cyan-500/40 hover:shadow-[0_0_12px_rgba(34,211,238,0.08)] transition-all flex flex-col"
           >
-            <div className="px-2.5 py-1.5 border-b border-slate-800/80 bg-slate-950/80">
-              <div className="flex justify-between items-center gap-2">
-                <div className="flex flex-col min-w-0">
+            <div className="px-2.5 py-1.5 border-b border-slate-800/80 bg-slate-950/80 shrink-0">
+              <div className="flex justify-between items-start gap-2 min-h-[52px]">
+                <div className="flex flex-col min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <WatchlistFinvizSymbolLink symbol={row.symbol} />
                     {industry ? (
@@ -235,16 +235,18 @@ export function WatchlistChartGrid({
                       </span>
                     ) : null}
                   </div>
-                  {row.catalyst?.tag && (
-                    <span
-                      className="cursor-help mt-0.5 self-start text-[10px] font-bold bg-emerald-900/40 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800/50 hover:bg-emerald-800/60 transition-colors"
-                      title={row.catalyst.headlines?.join(' • ') ?? row.catalyst.tag}
+                  {row.catalyst?.tag ? (
+                    <p
+                      className="mt-1 text-[10px] leading-snug text-emerald-400/95 line-clamp-2"
+                      title={row.catalyst.headlines?.join(" • ") ?? row.catalyst.tag}
                     >
                       ⚡ {row.catalyst.tag}
-                    </span>
+                    </p>
+                  ) : (
+                    <span className="mt-1 block min-h-[28px]" aria-hidden />
                   )}
                 </div>
-                <div className="flex items-center gap-2 text-[10px] font-mono shrink-0">
+                <div className="flex items-center gap-2 text-[10px] font-mono shrink-0 pt-0.5">
                   <span
                     className={`font-bold ${rankDeltaClass(row.rank_w_delta)}`}
                     title="1W rank Δ"
@@ -259,13 +261,10 @@ export function WatchlistChartGrid({
               href={finvizQuoteUrl(row.symbol)}
               target="_blank"
               rel="noreferrer"
-              className="block"
-              title="Open Finviz quote & chart"
+              className="block flex-1 min-h-[200px] h-[200px]"
+              title="Open Finviz quote"
             >
-              <WatchlistFinvizChart symbol={row.symbol} />
-              <div className="px-2 py-1 border-t border-slate-900 text-[9px] font-mono text-slate-600">
-                Finviz · click for full chart
-              </div>
+              <WatchlistFinvizChart symbol={row.symbol} bars={row.chart_bars} />
             </a>
           </article>
         );

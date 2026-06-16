@@ -10,7 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
 
@@ -80,6 +80,39 @@ def _url_has_auth_param(url: str) -> bool:
     return bool((parse_qs(urlparse(url).query).get("auth") or [""])[0].strip())
 
 
+def _redact_auth_url(url: str) -> str:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    if "auth" in query:
+        query["auth"] = ["***"]
+    redacted = urlencode(query, doseq=True)
+    return urlunparse(parsed._replace(query=redacted))
+
+
+def elite_export_is_rate_limited(*, status_code: int = 0, body: str = "", message: str = "") -> bool:
+    blob = f"{status_code} {body} {message}".lower()
+    return status_code == 429 or "rate limit" in blob or "unusual high number of requests" in blob
+
+
+def _elite_export_error_detail(status_code: int, body: str) -> str:
+    text = (body or "").strip()
+    if elite_export_is_rate_limited(status_code=status_code, body=text):
+        return (
+            "HTTP 429 rate limited — Finviz allows ~1 export request per 60 seconds; "
+            "wait 60–90s and retry"
+        )
+    if "invalid export api token" in text.lower():
+        return (
+            "Invalid export API token — regenerate at elite.finviz.com → Settings → API "
+            "(Export API token; quote-page auth= links are not valid for CSV export)"
+        )
+    if status_code == 401:
+        return "401 Unauthorized — check FINVIZ_AUTH_KEY (Export API token)"
+    if text:
+        return f"HTTP {status_code}: {text[:120]}"
+    return f"HTTP {status_code}"
+
+
 def build_elite_export_url(*, view: str, auth_key: str, filters: str | None = None) -> str:
     filt = filters if filters is not None else elite_market_filter()
     return f"{ELITE_HOST}{ELITE_EXPORT_PATH}?v={view}&f={filt}&auth={auth_key}"
@@ -107,11 +140,6 @@ def _fetch_with_curl(url: str, *, timeout: int, use_cookies: bool) -> tuple[str,
         "-sL",
         "--max-time",
         str(timeout),
-        "--retry",
-        "2",
-        "--retry-delay",
-        "1",
-        "--retry-all-errors",
         "--compressed",
         "-A",
         _DEFAULT_USER_AGENT,
@@ -120,7 +148,7 @@ def _fetch_with_curl(url: str, *, timeout: int, use_cookies: bool) -> tuple[str,
         "-H",
         "Accept: text/csv,text/plain,*/*",
         "-w",
-        "\n__FINAL_URL__%{url_effective}",
+        "\n__HTTP__%{http_code}\n__FINAL_URL__%{url_effective}",
     ]
     if cookie_file:
         cmd.extend(["-b", cookie_file])
@@ -128,8 +156,21 @@ def _fetch_with_curl(url: str, *, timeout: int, use_cookies: bool) -> tuple[str,
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"curl exit {result.returncode}")
-    body, _, tail = result.stdout.rpartition("\n__FINAL_URL__")
-    final_url = tail.strip() if tail else url
+    body, _, meta = result.stdout.rpartition("\n__HTTP__")
+    http_code = 0
+    final_url = url
+    if meta:
+        code_part, _, url_part = meta.partition("\n__FINAL_URL__")
+        try:
+            http_code = int(code_part.strip())
+        except ValueError:
+            http_code = 0
+        final_url = url_part.strip() or url
+    if http_code >= 400 or elite_export_is_rate_limited(status_code=http_code, body=body):
+        detail = _elite_export_error_detail(http_code, body)
+        raise RuntimeError(
+            f"Elite export request failed ({_redact_auth_url(final_url)}): {detail}"
+        )
     if not body.strip():
         raise RuntimeError("curl returned empty body")
     return body, final_url
@@ -151,12 +192,20 @@ def _fetch_with_requests(url: str, *, timeout: int, use_cookies: bool) -> tuple[
             jar = _load_cookie_jar(cookie_file)
             if jar is not None:
                 session.cookies = jar
-    response = session.get(url, timeout=timeout)
-    response.raise_for_status()
+    response = session.get(url, timeout=timeout, allow_redirects=True)
+    if response.status_code >= 400:
+        detail = _elite_export_error_detail(response.status_code, response.text)
+        raise RuntimeError(
+            f"Elite export request failed ({_redact_auth_url(str(response.url))}): {detail}"
+        )
     return response.text, str(response.url)
 
 
 def _validate_export_body(text: str, *, final_url: str, label: str) -> None:
+    if elite_export_is_rate_limited(body=text):
+        raise RuntimeError(_elite_export_error_detail(429, text))
+    if "invalid export api token" in (text or "").lower():
+        raise RuntimeError(_elite_export_error_detail(401, text))
     lowered_url = final_url.lower()
     if lowered_url.rstrip("/").endswith("/elite"):
         raise RuntimeError(
