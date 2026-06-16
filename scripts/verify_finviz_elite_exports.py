@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Finviz Elite CSV exports (required for CI watchlist / industry picks)."""
+"""Verify Finviz Elite access required for CI watchlist / industry pipeline."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ load_dotenv()
 
 from src.logging_config import setup_logging
 from src.services.elite_data import elite_auth_key, elite_export_is_rate_limited, fetch_elite_market_data
-from src.services.elite_groups import _fetch_groups_export, _parse_groups_csv, _row_to_industry
+from src.services.elite_groups import fetch_elite_industry_rows
 
 
 def _fail_auth() -> int:
@@ -39,8 +39,8 @@ def _fail_rate_limited() -> int:
     return 2
 
 
-def _fail_token_or_export(exc: str) -> int:
-    print("[verify_elite] FAILED: industry groups export unavailable")
+def _fail_elite_access(exc: str) -> int:
+    print("[verify_elite] FAILED: Elite industry groups unavailable")
     if elite_export_is_rate_limited(message=exc):
         return _fail_rate_limited()
     if "invalid export api token" in exc.lower():
@@ -54,13 +54,13 @@ def _fail_token_or_export(exc: str) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verify Finviz Elite CSV export access.")
+    parser = argparse.ArgumentParser(description="Verify Finviz Elite access for CI pipeline.")
     parser.add_argument(
         "--wait",
         type=int,
         default=0,
         metavar="SEC",
-        help="Sleep before the first export call (use 70 after HTTP 429)",
+        help="Sleep before the first Elite call (use 70 after HTTP 429)",
     )
     parser.add_argument(
         "--full",
@@ -79,21 +79,17 @@ def main() -> int:
         print(f"[verify_elite] waiting {args.wait}s (Finviz rate limit cooldown)…")
         time.sleep(args.wait)
 
-    print("[verify_elite] checking industry groups export (v=140)…")
-    try:
-        text = _fetch_groups_export(key)
-    except RuntimeError as exc:
-        return _fail_token_or_export(str(exc))
-
-    groups = [row for raw in _parse_groups_csv(text) if (row := _row_to_industry(raw)) is not None]
-    if len(groups) < 100:
-        return _fail_token_or_export(f"too few industries parsed ({len(groups)})")
+    print("[verify_elite] checking Elite industry groups (groups.ashx v=110 + v=142)…")
+    groups = fetch_elite_industry_rows(auth_key=key)
+    if not groups or len(groups) < 100:
+        count = 0 if not groups else len(groups)
+        return _fail_elite_access(f"too few industries parsed ({count})")
 
     print(f"[verify_elite] industry groups OK ({len(groups)} industries)")
 
     if not args.full:
-        print("[verify_elite] OK — token valid for Elite CSV export (groups)")
-        print("  Tip: use --full to also test full-market export before CI deploy")
+        print("[verify_elite] OK — Elite token valid for industry groups")
+        print("  Tip: use --full to also test full-market CSV export before CI deploy")
         return 0
 
     print("[verify_elite] waiting 65s before full-market export (Finviz rate limit)…")
