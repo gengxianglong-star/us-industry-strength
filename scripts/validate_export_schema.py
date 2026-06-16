@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "frontend" / "public" / "data"
 MIN_BYTES = 10_240
-MAX_RS_BYTES = 350_000
+MAX_RS_BYTES = 400_000
 
 REQUIRED_FILES = (
     "meta.json",

@@ -75,6 +75,9 @@ EXPORT_FILES = (
     "sync_progress.json",
 )
 
+# Large bundles: compact JSON keeps GitHub Pages exports under validate_export limits.
+_COMPACT_JSON_FILES = frozenset({"rs.json", "rs_watchlist.json", "snapshot.json", "breadth.json"})
+
 
 def build_export_automation_status(storage: Storage, config: dict[str, Any]) -> dict[str, Any]:
     cfg = automation_settings(config)
@@ -175,7 +178,8 @@ def build_public_dashboard_payloads(
             "rows": rs_rows,
             "new_stock_rows": new_stock_rows,
             "new_stock_leaderboard": new_stock_leaderboard,
-            "watchlist": watchlist,
+            # Watchlist + chart bars live in rs_watchlist.json (Pages uses watchlist_only).
+            "watchlist": [],
         }
         rs_watchlist = {
             "snapshot_date": latest,
@@ -248,8 +252,12 @@ def write_public_dashboard(out_dir: Path, payloads: dict[str, Any]) -> list[Path
     written: list[Path] = []
     for name in EXPORT_FILES:
         path = out_dir / name
+        payload = payloads[name]
         with path.open("w", encoding="utf-8") as fh:
-            json.dump(payloads[name], fh, ensure_ascii=False, indent=2)
+            if name in _COMPACT_JSON_FILES:
+                json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"))
+            else:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
             fh.write("\n")
         written.append(path)
     return written
