@@ -34,23 +34,14 @@ class StockFiltersConfig(BaseModel):
 
 
 class StockRsConfig(BaseModel):
-    rs_data_provider: str = Field(default="auto")
-    request_timeout_seconds: int = Field(default=20, ge=5, le=120)
-    max_workers: int = Field(default=24, ge=4, le=64)
-    min_price_rows: int = Field(default=260, ge=120, le=1000)
-    save_price_history: bool = False
+    rs_data_provider: str = Field(default="elite")
     incremental_mode: bool = True
-    prefer_stooq: bool = False
     tier_a_score: float = Field(default=0.8, ge=0, le=1)
     tier_b_score: float = Field(default=0.65, ge=0, le=1)
     cross_top_percent: float = Field(default=0.1, ge=0.01, le=1.0)
     watchlist_mode: str = Field(default="finviz_cross")
     watchlist_cap: int = Field(default=100, ge=1, le=500)
     min_avg_dollar_volume_30d_usd: int = Field(default=100_000_000, ge=1)
-    universe_cap: int = Field(default=0, ge=0, le=12000)
-    universe_cache_hours: int = Field(default=24, ge=1, le=168)
-    yahoo_batch_size: int = Field(default=20, ge=5, le=50)
-    yahoo_batch_workers: int = Field(default=6, ge=1, le=12)
     new_stock_enabled: bool = True
     max_job_runtime_seconds: int = Field(default=7200, ge=60, le=86400)
     new_stock_job_runtime_seconds: int = Field(default=3600, ge=60, le=86400)
@@ -60,16 +51,10 @@ class StockRsConfigUpdate(BaseModel):
     """Partial stock_rs update from the web form (unset fields are not overwritten)."""
 
     rs_data_provider: str | None = None
-    request_timeout_seconds: int | None = Field(default=None, ge=5, le=120)
-    max_workers: int | None = Field(default=None, ge=4, le=64)
-    min_price_rows: int | None = Field(default=None, ge=120, le=1000)
-    save_price_history: bool | None = None
     incremental_mode: bool | None = None
-    prefer_stooq: bool | None = None
     tier_a_score: float | None = Field(default=None, ge=0, le=1)
     tier_b_score: float | None = Field(default=None, ge=0, le=1)
     cross_top_percent: float | None = Field(default=None, ge=0.01, le=1.0)
-    universe_cap: int | None = Field(default=None, ge=0, le=12000)
     new_stock_enabled: bool | None = None
     max_job_runtime_seconds: int | None = Field(default=None, ge=60, le=86400)
     new_stock_job_runtime_seconds: int | None = Field(default=None, ge=60, le=86400)

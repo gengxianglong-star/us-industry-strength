@@ -94,11 +94,20 @@ def test_top10_skips_empty_industries_and_promotes_lower_ranks(tmp_path) -> None
         "GOLD1": {**_elite_row(), "industry": "Gold"},
     }
 
-    def _mock_finviz(industry_key: str, config: dict) -> list[str]:  # noqa: ARG001
-        return {"empty_a": ["BAD1"], "empty_b": ["BAD2"]}.get(industry_key, [])
+    def _mock_elite_export(industry_key: str, config: dict) -> list[str]:  # noqa: ARG001
+        return {
+            "computerhardware": ["SNDK"],
+            "empty_a": ["BAD1"],
+            "empty_b": ["BAD2"],
+            "steel": ["STEEL1", "STEEL2"],
+            "gold": ["GOLD1"],
+        }.get(industry_key, [])
 
     config = load_config()
-    with patch("src.stock_picks._fetch_finviz_industry_candidates", side_effect=_mock_finviz):
+    with patch(
+        "src.services.elite_data.fetch_elite_industry_tickers",
+        side_effect=_mock_elite_export,
+    ):
         picks = build_and_store_elite_industry_picks(
             storage,
             snapshot_date,
@@ -140,12 +149,17 @@ def test_industry_keeps_all_qualifying_tickers_sorted_by_rs(tmp_path) -> None:
         "stock_rs": {"cross_top_percent": 0.1, "min_avg_dollar_volume_30d_usd": 100_000_000},
     }
 
-    picks = build_and_store_elite_industry_picks(
-        storage,
-        snapshot_date,
-        scored,
-        config,
-        elite_market=market,
-    )
+    symbols_list = [sym for sym, _ in symbols]
+    with patch(
+        "src.services.elite_data.fetch_elite_industry_tickers",
+        return_value=symbols_list,
+    ):
+        picks = build_and_store_elite_industry_picks(
+            storage,
+            snapshot_date,
+            scored,
+            config,
+            elite_market=market,
+        )
 
     assert picks["semiconductors"]["tickers"] == ["AAA", "BBB", "CCC", "DDD", "EEE"]

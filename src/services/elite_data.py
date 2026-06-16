@@ -7,6 +7,7 @@ import http.cookiejar
 import io
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,11 @@ _DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 _ROOT = Path(__file__).resolve().parent.parent.parent
+ELITE_MIN_INTERVAL_SECONDS = 65.0
+_ELITE_RATE_LOCK = threading.Lock()
+_ELITE_LAST_REQUEST_MONO = 0.0
+_ELITE_MARKET_CACHE: dict[str, dict[str, Any]] | None = None
+_ELITE_MARKET_CACHE_TS = 0.0
 
 _PERF_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "perf_week": ("Performance (Week)", "Perf Week"),
@@ -54,6 +60,34 @@ def elite_auth_key() -> str | None:
 
 def elite_market_filter() -> str:
     return (os.getenv("FINVIZ_ELITE_FILTER") or DEFAULT_US_FILTER).strip() or DEFAULT_US_FILTER
+
+
+def elite_rate_limit_wait() -> None:
+    """Serialize Elite export/groups HTTP calls (~1 request per 60s Finviz quota)."""
+    global _ELITE_LAST_REQUEST_MONO
+    with _ELITE_RATE_LOCK:
+        now = time.monotonic()
+        if _ELITE_LAST_REQUEST_MONO > 0:
+            elapsed = now - _ELITE_LAST_REQUEST_MONO
+            if elapsed < ELITE_MIN_INTERVAL_SECONDS:
+                wait = ELITE_MIN_INTERVAL_SECONDS - elapsed
+                logger.info("Elite rate limit: waiting %.1fs before next request", wait)
+                time.sleep(wait)
+        _ELITE_LAST_REQUEST_MONO = time.monotonic()
+
+
+def set_elite_market_cache(market: dict[str, dict[str, Any]] | None) -> None:
+    global _ELITE_MARKET_CACHE, _ELITE_MARKET_CACHE_TS
+    _ELITE_MARKET_CACHE = market
+    _ELITE_MARKET_CACHE_TS = time.monotonic()
+
+
+def get_elite_market_cache(*, max_age_seconds: float = 7200.0) -> dict[str, dict[str, Any]] | None:
+    if _ELITE_MARKET_CACHE is None:
+        return None
+    if time.monotonic() - _ELITE_MARKET_CACHE_TS > max_age_seconds:
+        return None
+    return _ELITE_MARKET_CACHE
 
 
 def _cookie_file_path() -> str:
@@ -116,6 +150,20 @@ def _elite_export_error_detail(status_code: int, body: str) -> str:
 def build_elite_export_url(*, view: str, auth_key: str, filters: str | None = None) -> str:
     filt = filters if filters is not None else elite_market_filter()
     return f"{ELITE_HOST}{ELITE_EXPORT_PATH}?v={view}&f={filt}&auth={auth_key}"
+
+
+def build_elite_industry_screener_url(
+    industry_key: str,
+    config: dict[str, Any],
+    auth_key: str,
+    *,
+    view: str = "111",
+) -> str:
+    """Elite CSV export for one industry + stock_filters (same f= as Playwright screener)."""
+    from src.stock_filters import build_screener_filters
+
+    filters = build_screener_filters(industry_key, config)
+    return f"{ELITE_HOST}{ELITE_EXPORT_PATH}?v={view}&f={filters}&auth={auth_key}"
 
 
 def _pick(row: dict[str, str], aliases: tuple[str, ...]) -> str:
@@ -201,7 +249,13 @@ def _fetch_with_requests(url: str, *, timeout: int, use_cookies: bool) -> tuple[
     return response.text, str(response.url)
 
 
-def _validate_export_body(text: str, *, final_url: str, label: str) -> None:
+def _validate_export_body(
+    text: str,
+    *,
+    final_url: str,
+    label: str,
+    allow_empty: bool = False,
+) -> None:
     if elite_export_is_rate_limited(body=text):
         raise RuntimeError(_elite_export_error_detail(429, text))
     if "invalid export api token" in (text or "").lower():
@@ -218,6 +272,8 @@ def _validate_export_body(text: str, *, final_url: str, label: str) -> None:
         )
     rows = _parse_csv(text)
     if not rows:
+        if allow_empty:
+            return
         raise RuntimeError(f"Elite {label}: CSV parsed to zero rows")
     first = rows[0]
     if "Ticker" not in first and "ticker" not in first:
@@ -236,15 +292,27 @@ def _export_label(url: str) -> str:
     return "export"
 
 
-def _fetch_export_text(url: str, *, timeout: int = 60, max_retries: int = 3) -> str:
+def _fetch_export_text(
+    url: str,
+    *,
+    timeout: int = 60,
+    max_retries: int = 3,
+    allow_empty: bool = False,
+) -> str:
     label = _export_label(url)
     # Elite export auth= token is sufficient; Netscape cookie file must not be raw-set as header.
     use_cookies = not _url_has_auth_param(url)
     last_error: Exception | None = None
     for attempt in range(max_retries):
+        elite_rate_limit_wait()
         try:
             text, final_url = _fetch_with_curl(url, timeout=timeout, use_cookies=use_cookies)
-            _validate_export_body(text, final_url=final_url, label=label)
+            _validate_export_body(
+                text,
+                final_url=final_url,
+                label=label,
+                allow_empty=allow_empty,
+            )
             logger.info(
                 "Elite %s export via curl OK (%d bytes, final=%s)",
                 label,
@@ -254,18 +322,67 @@ def _fetch_export_text(url: str, *, timeout: int = 60, max_retries: int = 3) -> 
             return text
         except (OSError, RuntimeError) as exc:
             last_error = exc
+            if elite_export_is_rate_limited(message=str(exc)) and attempt < max_retries - 1:
+                logger.info("Elite %s rate limited — waiting 65s before retry", label)
+                time.sleep(65)
+                continue
             logger.debug("Elite %s curl attempt %d failed: %s", label, attempt + 1, exc)
         try:
+            elite_rate_limit_wait()
             text, final_url = _fetch_with_requests(url, timeout=timeout, use_cookies=use_cookies)
-            _validate_export_body(text, final_url=final_url, label=label)
+            _validate_export_body(
+                text,
+                final_url=final_url,
+                label=label,
+                allow_empty=allow_empty,
+            )
             logger.info("Elite %s export via requests OK (%d bytes)", label, len(text))
             return text
         except (requests.RequestException, OSError, RuntimeError) as exc:
             last_error = exc
+            if elite_export_is_rate_limited(message=str(exc)) and attempt < max_retries - 1:
+                logger.info("Elite %s rate limited — waiting 65s before retry", label)
+                time.sleep(65)
+                continue
             logger.debug("Elite %s requests attempt %d failed: %s", label, attempt + 1, exc)
         if attempt < max_retries - 1:
             time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"Elite {label} export failed: {last_error}")
+
+
+def fetch_elite_industry_tickers(
+    industry_key: str,
+    config: dict[str, Any],
+    auth_key: str | None = None,
+    *,
+    timeout: int = 60,
+) -> list[str]:
+    """Pull tickers for one industry via Elite export (ind_{key} + stock_filters)."""
+    key = auth_key or elite_auth_key()
+    if not key:
+        logger.warning("fetch_elite_industry_tickers: FINVIZ_AUTH_KEY not set")
+        return []
+    url = build_elite_industry_screener_url(industry_key, config, key)
+    try:
+        text = _fetch_export_text(url, timeout=timeout, allow_empty=True)
+    except RuntimeError as exc:
+        logger.warning("Elite industry export failed for %s: %s", industry_key, exc)
+        return []
+    rows = _parse_csv(text)
+    tickers: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        ticker = str(row.get("Ticker") or row.get("ticker") or "").upper().strip()
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        tickers.append(ticker)
+    logger.info(
+        "Elite industry export %s: %d tickers",
+        industry_key,
+        len(tickers),
+    )
+    return tickers
 
 
 def _export_urls_from_env(auth_key: str) -> tuple[str, str] | None:
@@ -332,11 +449,9 @@ def fetch_elite_market_data(
 
     try:
         text_ov = _fetch_export_text(url_overview, timeout=timeout)
-        time.sleep(1.0)  # Elite recommends <= 1 req / 60s; brief pause between views
         text_pf = _fetch_export_text(url_perf, timeout=timeout)
         text_tech = ""
         if fetch_technical:
-            time.sleep(1.0)
             text_tech = _fetch_export_text(url_technical, timeout=timeout)
     except RuntimeError as exc:
         logger.warning("%s; falling back to free path", exc)
@@ -402,6 +517,7 @@ def fetch_elite_market_data(
         with_perf,
         with_tech,
     )
+    set_elite_market_cache(market_data)
     return market_data
 
 
@@ -466,6 +582,69 @@ def elite_row_to_perf(symbol: str, row: dict[str, Any] | None) -> dict[str, Any]
             return None
         perf[rs_key] = parsed
     return perf
+
+
+# Shortened new-stock RS cohorts (deepest match wins); perf_tq ≈ Elite perf_year (YTD).
+_ELITE_PARTIAL_COHORT_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("3Q", ("perf_w", "perf_m", "perf_q", "perf_h", "perf_tq")),
+    ("H", ("perf_w", "perf_m", "perf_q", "perf_h")),
+    ("Q", ("perf_w", "perf_m", "perf_q")),
+    ("M", ("perf_w", "perf_m")),
+)
+
+
+def elite_row_perf_values(row: dict[str, Any] | None) -> dict[str, float]:
+    """Parsed RS perf keys available on one Elite row (may be partial)."""
+    if not row:
+        return {}
+    key_map = {
+        "perf_w": "perf_week",
+        "perf_m": "perf_month",
+        "perf_q": "perf_quarter",
+        "perf_h": "perf_half",
+        "perf_y": "perf_year",
+    }
+    out: dict[str, float] = {}
+    for rs_key, elite_key in key_map.items():
+        parsed = parse_finviz_percent(row.get(elite_key))
+        if parsed is not None:
+            out[rs_key] = parsed
+    if "perf_y" in out:
+        out["perf_tq"] = out["perf_y"]
+    return out
+
+
+def classify_elite_partial_cohort(
+    row: dict[str, Any] | None,
+) -> tuple[str, dict[str, float]] | None:
+    """
+    Pick deepest new-stock cohort supported by Elite perf fields (not all five horizons).
+
+    Requires at least week + month. Full five horizons belong on the main RS path.
+    """
+    available = elite_row_perf_values(row)
+    if len(available) >= 5 and all(k in available for k in ("perf_w", "perf_m", "perf_q", "perf_h", "perf_y")):
+        return None
+    if "perf_w" not in available or "perf_m" not in available:
+        return None
+    for cohort, keys in _ELITE_PARTIAL_COHORT_KEYS:
+        if all(k in available for k in keys):
+            return cohort, {k: available[k] for k in keys}
+    return None
+
+
+def build_elite_partial_perf_inputs(
+    market_data: dict[str, dict[str, Any]],
+    symbols: list[str],
+) -> dict[str, tuple[str, dict[str, float]]]:
+    """symbol -> (cohort, perf_dict) for shortened Elite new-stock RS."""
+    out: dict[str, tuple[str, dict[str, float]]] = {}
+    for sym in symbols:
+        row = elite_row_for_symbol(market_data, sym)
+        hit = classify_elite_partial_cohort(row)
+        if hit:
+            out[sym.upper()] = hit
+    return out
 
 
 def elite_row_for_symbol(

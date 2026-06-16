@@ -14,6 +14,7 @@ from src.services.elite_data import (
     _url_has_auth_param,
     elite_auth_key,
     elite_export_is_rate_limited,
+    elite_rate_limit_wait,
 )
 
 logger = get_logger(__name__)
@@ -50,6 +51,7 @@ def _fetch_groups_page(
     use_cookies = not _url_has_auth_param(url)
     last_error: Exception | None = None
     for attempt in range(max_retries):
+        elite_rate_limit_wait()
         try:
             text, final_url = _fetch_with_curl(url, timeout=timeout, use_cookies=use_cookies)
             _validate_groups_html(text, final_url=final_url, label=label)
@@ -63,6 +65,7 @@ def _fetch_groups_page(
                 continue
             logger.debug("Elite groups %s curl attempt %d failed: %s", label, attempt + 1, exc)
         try:
+            elite_rate_limit_wait()
             text, final_url = _fetch_with_requests(url, timeout=timeout, use_cookies=use_cookies)
             _validate_groups_html(text, final_url=final_url, label=label)
             logger.info("Elite groups %s via requests OK (%d bytes)", label, len(text))

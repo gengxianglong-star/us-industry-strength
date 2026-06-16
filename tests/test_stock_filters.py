@@ -1,17 +1,13 @@
-"""Tests for Finviz industry stock screener filter assembly."""
+"""Tests for Finviz screener filter assembly."""
 
 from __future__ import annotations
 
 import unittest
 
-from src.finviz_stock_screener import (
-    _is_screener_results_page,
-    build_screener_filters,
-    default_stock_filter_codes,
-)
+from src.stock_filters import build_screener_filters, default_stock_filter_codes
 
 
-class FinvizStockScreenerTests(unittest.TestCase):
+class StockFiltersTests(unittest.TestCase):
     def test_default_filters_include_dollar_volume_100m(self) -> None:
         config = {"stock_filters": {}}
         codes = default_stock_filter_codes(config)
@@ -40,14 +36,6 @@ class FinvizStockScreenerTests(unittest.TestCase):
         filters = build_screener_filters("steel", config)
         self.assertNotIn("fa_epsqoq_o10", filters)
         self.assertNotIn("fa_salesqoq_o10", filters)
-
-    def test_screener_page_detection_rejects_cloudflare(self) -> None:
-        html = "<html><title>Just a moment...</title><body>challenge-platform</body></html>"
-        self.assertFalse(_is_screener_results_page(html))
-
-    def test_screener_page_detection_accepts_results_table(self) -> None:
-        html = '<div class="screener-body">#1 / 12 Total</div>'
-        self.assertTrue(_is_screener_results_page(html))
 
 
 if __name__ == "__main__":

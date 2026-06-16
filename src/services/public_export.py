@@ -14,7 +14,6 @@ from src.services.auto_scheduler import _stale_days, automation_settings
 from src.services.health import _result, check_db
 from src.services.snapshots import build_snapshot_response
 from src.storage import Storage, latest_trading_date
-from src.watchlist_charts import enrich_watchlist_chart_bars
 
 logger = get_logger(__name__)
 
@@ -162,9 +161,8 @@ def build_public_dashboard_payloads(
             rows=rows,
             top_n=top_n,
         )
-        watchlist = enrich_watchlist_chart_bars(
-            storage.get_stock_watchlist(latest, limit=watchlist_limit),
-        )
+        watchlist = storage.get_stock_watchlist(latest, limit=watchlist_limit)
+        watchlist_total = storage.count_stock_watchlist(latest)
         rs_rows = [_slim_rs_row(row) for row in storage.get_stock_rs(latest, limit=max(rs_limit, 1))]
         new_stock_rows = [_slim_new_stock_row(row) for row in storage.get_stock_rs_new(latest, limit=500)]
         new_stock_leaderboard = [
@@ -185,6 +183,7 @@ def build_public_dashboard_payloads(
             "snapshot_date": latest,
             "rs_count": rs_payload["rs_count"],
             "rs_meta": rs_payload["rs_meta"],
+            "watchlist_total": watchlist_total,
             "rows": [],
             "new_stock_rows": [],
             "new_stock_leaderboard": [],

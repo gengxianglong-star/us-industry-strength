@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import time
+
+import requests
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, Depends
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
@@ -37,8 +39,7 @@ from src.services.snapshots import (
     top_strong_from_rows,
 )
 from src.stock_rs import rebuild_stock_watchlist_for_snapshot
-from src.watchlist_charts import attach_watchlist_chart_bars
-from src.stock_picks import fetch_and_store_stock_picks
+from src.stock_picks import fetch_and_store_elite_stock_picks
 from src.services.auto_scheduler import AutoScheduler
 from src.services.breadth_jobs import BreadthSyncService
 from src.services.daily_jobs import (
@@ -176,6 +177,44 @@ def get_config() -> dict[str, Any]:
 @app.get("/api/health")
 def api_health(quick: bool = Query(default=False)) -> dict[str, Any]:
     return build_health_report(storage, config, quick=quick)
+
+
+@app.get("/api/chart/finviz/{symbol}")
+async def finviz_chart_proxy(symbol: str) -> Response:
+    """Proxy Finviz candlestick thumbnails for local dashboard (hotlink-safe)."""
+    sym = symbol.strip().upper()
+    if not sym or not sym.replace(".", "").isalnum():
+        raise HTTPException(status_code=400, detail="invalid symbol")
+    url = (
+        f"https://charts2.finviz.com/chart.ashx?t={sym}"
+        "&ty=c&ta=1&p=d&s=l&theme=dark"
+    )
+
+    def _fetch() -> requests.Response:
+        return requests.get(
+            url,
+            timeout=20,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                ),
+                "Referer": "https://finviz.com/",
+            },
+        )
+
+    try:
+        resp = await run_in_threadpool(_fetch)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"chart fetch failed: {exc}") from exc
+    if resp.status_code >= 400 or not resp.content:
+        raise HTTPException(status_code=502, detail="chart unavailable")
+    media_type = resp.headers.get("content-type", "image/png")
+    return Response(
+        content=resp.content,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 @app.post("/api/daily/run", dependencies=[Depends(require_api_key)])
@@ -532,7 +571,7 @@ def fetch_snapshot_stocks(
     if not keys:
         return {"status": "ok", "snapshot_date": snapshot_date, "fetched": 0, "results": {}}
 
-    results = fetch_and_store_stock_picks(storage, snapshot_date, keys, config)
+    results = fetch_and_store_elite_stock_picks(storage, snapshot_date, keys, config)
     watchlist_info: dict[str, Any] | None = None
     if refresh_watchlist:
         watchlist_info = rebuild_stock_watchlist_for_snapshot(
@@ -638,12 +677,13 @@ def rs_snapshot(
     watchlist_only: bool = Query(default=False),
 ) -> dict[str, Any]:
     watchlist = storage.get_stock_watchlist(snapshot_date, limit=watchlist_limit)
+    watchlist_total = storage.count_stock_watchlist(snapshot_date)
     if watchlist_only:
-        watchlist = attach_watchlist_chart_bars(watchlist)
         return {
             "snapshot_date": snapshot_date,
             "rs_count": storage.count_stock_rs(snapshot_date),
             "rs_meta": storage.get_stock_rs_meta(snapshot_date),
+            "watchlist_total": watchlist_total,
             "rows": [],
             "new_stock_rows": [],
             "new_stock_leaderboard": [],
@@ -656,6 +696,7 @@ def rs_snapshot(
         "snapshot_date": snapshot_date,
         "rs_count": storage.count_stock_rs(snapshot_date),
         "rs_meta": storage.get_stock_rs_meta(snapshot_date),
+        "watchlist_total": watchlist_total,
         "rows": rs_rows,
         "new_stock_rows": storage.get_stock_rs_new(snapshot_date, limit=500),
         "new_stock_leaderboard": storage.get_stock_rs_new(
@@ -678,7 +719,7 @@ def industry_stocks(
         raise HTTPException(status_code=404, detail="No snapshot")
 
     if refresh:
-        fetch_and_store_stock_picks(storage, date_key, [industry_key], config)
+        fetch_and_store_elite_stock_picks(storage, date_key, [industry_key], config)
 
     pick = storage.get_industry_stock_picks(date_key, industry_key)
     if not pick:

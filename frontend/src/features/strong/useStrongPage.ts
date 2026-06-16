@@ -40,8 +40,9 @@ export function useStrongPage() {
 
     const rsWatch = await fetchJson<{
       watchlist?: RsPayload["watchlist"];
+      watchlist_total?: number;
       rs_meta?: RsPayload["rs_meta"];
-    }>(`/api/rs/${encodeURIComponent(date)}?watchlist_only=true&watchlist_limit=120`).catch(() => null);
+    }>(`/api/rs/${encodeURIComponent(date)}?watchlist_only=true&watchlist_limit=150`).catch(() => null);
 
     setSnapshot({
       ...snapshotData,
@@ -53,6 +54,7 @@ export function useStrongPage() {
       snapshot_date: date,
       rows: [],
       watchlist: watchlistRows,
+      watchlist_total: rsWatch?.watchlist_total,
       new_stock_leaderboard: [],
       rs_meta: rsWatch?.rs_meta || snapshotData.rs_meta,
     });
@@ -114,6 +116,11 @@ export function useStrongPage() {
   const watchlist =
     rsPayload?.watchlist?.length ? rsPayload.watchlist : snapshot?.watchlist_preview || [];
 
+  const watchlistTotal =
+    rsPayload?.watchlist_total ??
+    snapshot?.rs_watchlist_count ??
+    watchlist.length;
+
   // 使用 useMemo 缓存顶部状态栏的计算结果
   const pulseLine = useMemo(() => {
     if (!snapshot) return "Loading snapshot…";
@@ -129,8 +136,8 @@ export function useStrongPage() {
       .map((r) => r.name.split(/[\s/&-]/)[0])
       .join(", ");
     const hotText = hot || "—";
-    return `${dateText} · Focus ${watchlist.length} · Hot themes: ${hotText} · RS universe scanned`;
-  }, [snapshot, automation?.lag_days, automation?.target_date, watchlist.length]);
+    return `${dateText} · Focus ${watchlistTotal}${watchlistTotal !== watchlist.length ? ` (showing ${watchlist.length})` : ""} · Hot themes: ${hotText} · RS universe scanned`;
+  }, [snapshot, automation?.lag_days, automation?.target_date, watchlist.length, watchlistTotal]);
 
   // 使用 useMemo 缓存行业列表的过滤和排序结果
   const filteredIndustries = useMemo(() => {

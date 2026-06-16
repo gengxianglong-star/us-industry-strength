@@ -6,7 +6,9 @@ from unittest.mock import patch
 
 from src.services.elite_data import (
     build_elite_export_url,
+    build_elite_partial_perf_inputs,
     build_perf_map_from_elite,
+    classify_elite_partial_cohort,
     elite_row_for_symbol,
     elite_row_to_perf,
     fetch_elite_market_data,
@@ -128,3 +130,46 @@ def test_build_perf_map_from_elite() -> None:
     perf_map, missing = build_perf_map_from_elite(market, ["NVDA", "AAPL", "MSFT"])
     assert list(perf_map.keys()) == ["NVDA"]
     assert set(missing) == {"AAPL", "MSFT"}
+
+
+def test_classify_elite_partial_m_cohort() -> None:
+    row = {
+        "perf_week": "5%",
+        "perf_month": "12%",
+        "perf_quarter": "-",
+    }
+    hit = classify_elite_partial_cohort(row)
+    assert hit is not None
+    cohort, perf = hit
+    assert cohort == "M"
+    assert perf["perf_w"] == 5.0
+    assert perf["perf_m"] == 12.0
+
+
+def test_classify_elite_partial_full_five_returns_none() -> None:
+    row = {
+        "perf_week": "1%",
+        "perf_month": "2%",
+        "perf_quarter": "3%",
+        "perf_half": "4%",
+        "perf_year": "5%",
+    }
+    assert classify_elite_partial_cohort(row) is None
+
+
+def test_build_elite_partial_perf_inputs() -> None:
+    market = {
+        "IPO1": {"perf_week": "2%", "perf_month": "8%", "perf_quarter": "15%"},
+        "FULL": {
+            "perf_week": "1%",
+            "perf_month": "2%",
+            "perf_quarter": "3%",
+            "perf_half": "4%",
+            "perf_year": "5%",
+        },
+    }
+    partial = build_elite_partial_perf_inputs(market, ["IPO1", "FULL", "MISSING"])
+    assert "IPO1" in partial
+    assert partial["IPO1"][0] == "Q"
+    assert "FULL" not in partial
+    assert "MISSING" not in partial

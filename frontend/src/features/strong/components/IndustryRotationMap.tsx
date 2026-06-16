@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import {
   ScatterChart,
   Scatter,
@@ -9,10 +9,13 @@ import {
   ReferenceArea,
   ResponsiveContainer,
   Tooltip,
+  Customized,
 } from "recharts";
 import { Crosshair } from "lucide-react";
 import type { IndustryRow } from "../../../lib/industry";
 import { buildAlphaRotationNodes, type RotationNode } from "../../../lib/rotationLogic";
+
+const CHART_HEIGHT = 380;
 
 type ScatterDotProps = {
   cx?: number;
@@ -21,7 +24,12 @@ type ScatterDotProps = {
   hoveredKey?: string | null;
 };
 
-function VectorScatterDot({ cx = 0, cy = 0, payload, hoveredKey }: ScatterDotProps) {
+const VectorScatterDot = memo(function VectorScatterDot({
+  cx = 0,
+  cy = 0,
+  payload,
+  hoveredKey,
+}: ScatterDotProps) {
   if (!payload) return null;
   const { rs_3m, rs_1m, industry_key } = payload;
   const isHovered = hoveredKey === industry_key;
@@ -57,7 +65,7 @@ function VectorScatterDot({ cx = 0, cy = 0, payload, hoveredKey }: ScatterDotPro
       />
     </g>
   );
-}
+});
 
 function RotationTooltip({
   active,
@@ -88,7 +96,9 @@ function RotationTooltip({
         </span>
       </div>
       {d.trajectory_5d.length >= 2 ? (
-        <div className="mt-1 text-[9px] text-slate-500">{d.trajectory_5d.length}d trail on hover</div>
+        <div className="mt-1 text-[9px] text-slate-500">
+          5d trail: {d.trajectory_5d.map((p) => `${p.rs_3m.toFixed(0)}/${p.rs_1m.toFixed(0)}`).join(" → ")}
+        </div>
       ) : null}
     </div>
   );
@@ -134,7 +144,6 @@ function buildAlphaPlot(nodes: RotationNode[]): PlotTransform {
   const dataXMin = Math.min(...xVals);
   const dataYMin = Math.min(...yVals);
 
-  // Widen the axis floor so high-RS leaders in the top-right occupy more plot area.
   const AXIS_FLOOR = 42;
   const AXIS_CEIL = 100;
   const xMin = Math.min(dataXMin - 6, AXIS_FLOOR);
@@ -184,6 +193,49 @@ function buildAlphaPlot(nodes: RotationNode[]): PlotTransform {
   };
 }
 
+type TrailPoint = { plot_x: number; plot_y: number };
+
+function ScatterTrailLayer({
+  xAxisMap,
+  yAxisMap,
+  trailData,
+}: {
+  xAxisMap?: Record<string, { scale?: (v: number) => number }>;
+  yAxisMap?: Record<string, { scale?: (v: number) => number }>;
+  trailData: TrailPoint[];
+}) {
+  if (trailData.length < 2) return null;
+  const xAxis = xAxisMap ? Object.values(xAxisMap)[0] : undefined;
+  const yAxis = yAxisMap ? Object.values(yAxisMap)[0] : undefined;
+  if (!xAxis?.scale || !yAxis?.scale) return null;
+
+  const points = trailData
+    .map((p) => `${xAxis.scale!(p.plot_x)},${yAxis.scale!(p.plot_y)}`)
+    .join(" ");
+
+  return (
+    <g pointerEvents="none">
+      <polyline
+        points={points}
+        fill="none"
+        stroke="#94a3b8"
+        strokeWidth={1.5}
+        strokeDasharray="5 4"
+      />
+      {trailData.slice(0, -1).map((p, i) => (
+        <circle
+          key={i}
+          cx={xAxis.scale!(p.plot_x)}
+          cy={yAxis.scale!(p.plot_y)}
+          r={2.5}
+          fill="#64748b"
+          opacity={0.55}
+        />
+      ))}
+    </g>
+  );
+}
+
 export function IndustryRotationMap({
   industries,
   breadthRatio10 = 1,
@@ -209,23 +261,34 @@ export function IndustryRotationMap({
     if (!hoveredKey) return [];
     const node = plotNodes.find((n) => n.industry_key === hoveredKey);
     if (!node?.trajectory_5d || node.trajectory_5d.length < 2) return [];
-    return node.trajectory_5d.map((p) => {
-      const plot = mapRsPoint(p.rs_3m, p.rs_1m);
-      return { plot_x: plot.plot_x, plot_y: plot.plot_y, date: p.date };
-    });
+    return node.trajectory_5d.map((p) => mapRsPoint(p.rs_3m, p.rs_1m));
   }, [hoveredKey, plotNodes, mapRsPoint]);
+
+  const renderDot = useCallback(
+    (props: ScatterDotProps) => <VectorScatterDot {...props} hoveredKey={hoveredKey} />,
+    [hoveredKey],
+  );
+
+  const handleMouseEnter = useCallback((node: { payload?: RotationNode }) => {
+    const key = node?.payload?.industry_key;
+    if (key) setHoveredKey(key);
+  }, []);
+
+  const handleMouseLeave = useCallback(() => {
+    setHoveredKey(null);
+  }, []);
 
   return (
     <div
       className={`bg-[#0b0f19] border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col h-[480px] ${className}`}
     >
-      <div className="border-b border-slate-800 pb-3 mb-3">
+      <div className="border-b border-slate-800 pb-3 mb-3 shrink-0">
         <h3 className="text-sm font-black text-slate-200 uppercase tracking-widest font-mono flex items-center gap-2">
           <Crosshair size={16} className="text-cyan-500" />
           Sector Vector Matrix (Alpha Group)
         </h3>
         <p className="text-[10px] text-slate-500 uppercase mt-1">
-          X: 3M RS · Y: 1M RS · Alpha-relative spread · Hover: 5d trail · ({alphaNodes.length} industries)
+          X: 3M RS · Y: 1M RS · Alpha-relative spread · Hover for 5d trail · ({alphaNodes.length} industries)
         </p>
         <div className="flex flex-wrap gap-4 text-[9px] font-mono uppercase font-bold mt-3 pt-2 border-t border-slate-800/60">
           <span className="flex items-center gap-1.5">
@@ -238,80 +301,67 @@ export function IndustryRotationMap({
         </div>
       </div>
 
-      <div className="flex-1 w-full min-h-0">
+      <div className="w-full shrink-0" style={{ height: CHART_HEIGHT }}>
         {alphaNodes.length === 0 ? (
           <div className="h-full flex items-center justify-center text-slate-500 text-xs font-mono">
             No alpha industries in current snapshot
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
             <ScatterChart margin={{ top: 28, right: 20, bottom: 10, left: -12 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-              <XAxis
-                type="number"
-                dataKey="plot_x"
-                domain={[0, 100]}
-                ticks={xTicks.map((t) => t.plot)}
-                tickFormatter={(plot) => xTicks.find((t) => Math.abs(t.plot - plot) < 0.5)?.label ?? ""}
-                stroke="#475569"
-                tick={{ fontSize: 10, fill: "#475569" }}
-                allowDataOverflow
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            <XAxis
+              type="number"
+              dataKey="plot_x"
+              domain={[0, 100]}
+              ticks={xTicks.map((t) => t.plot)}
+              tickFormatter={(plot) => xTicks.find((t) => Math.abs(t.plot - plot) < 0.5)?.label ?? ""}
+              stroke="#475569"
+              tick={{ fontSize: 10, fill: "#475569" }}
+              allowDataOverflow
+            />
+            <YAxis
+              type="number"
+              dataKey="plot_y"
+              domain={[0, 100]}
+              ticks={yTicks.map((t) => t.plot)}
+              tickFormatter={(plot) => yTicks.find((t) => Math.abs(t.plot - plot) < 0.5)?.label ?? ""}
+              stroke="#475569"
+              tick={{ fontSize: 10, fill: "#475569" }}
+              allowDataOverflow
+            />
+            {midX != null && midY != null ? (
+              <ReferenceArea x1={midX} x2={100 - PLOT_MARGIN} y1={midY} y2={100 - PLOT_MARGIN} fill="#10b981" fillOpacity={0.03} />
+            ) : null}
+            {midX != null && midY != null ? (
+              <ReferenceArea x1={PLOT_MARGIN} x2={midX} y1={midY} y2={100 - PLOT_MARGIN} fill="#06b6d4" fillOpacity={0.03} />
+            ) : null}
+            {midX != null && midY != null ? (
+              <ReferenceArea x1={midX} x2={100 - PLOT_MARGIN} y1={PLOT_MARGIN} y2={midY} fill="#f59e0b" fillOpacity={0.03} />
+            ) : null}
+            {midX != null ? <ReferenceLine x={midX} stroke="#334155" strokeWidth={2} /> : null}
+            {midY != null ? <ReferenceLine y={midY} stroke="#334155" strokeWidth={2} /> : null}
+            <Tooltip
+              content={<RotationTooltip />}
+              cursor={{ strokeDasharray: "3 3", stroke: "#475569", strokeWidth: 1 }}
+              isAnimationActive={false}
+            />
+            {trailData.length >= 2 ? (
+              <Customized
+                component={(props: {
+                  xAxisMap?: Record<string, { scale?: (v: number) => number }>;
+                  yAxisMap?: Record<string, { scale?: (v: number) => number }>;
+                }) => <ScatterTrailLayer {...props} trailData={trailData} />}
               />
-              <YAxis
-                type="number"
-                dataKey="plot_y"
-                domain={[0, 100]}
-                ticks={yTicks.map((t) => t.plot)}
-                tickFormatter={(plot) => yTicks.find((t) => Math.abs(t.plot - plot) < 0.5)?.label ?? ""}
-                stroke="#475569"
-                tick={{ fontSize: 10, fill: "#475569" }}
-                allowDataOverflow
-              />
-              {midX != null && midY != null ? (
-                <ReferenceArea x1={midX} x2={100 - PLOT_MARGIN} y1={midY} y2={100 - PLOT_MARGIN} fill="#10b981" fillOpacity={0.03} />
-              ) : null}
-              {midX != null && midY != null ? (
-                <ReferenceArea x1={PLOT_MARGIN} x2={midX} y1={midY} y2={100 - PLOT_MARGIN} fill="#06b6d4" fillOpacity={0.03} />
-              ) : null}
-              {midX != null && midY != null ? (
-                <ReferenceArea x1={midX} x2={100 - PLOT_MARGIN} y1={PLOT_MARGIN} y2={midY} fill="#f59e0b" fillOpacity={0.03} />
-              ) : null}
-              {midX != null ? <ReferenceLine x={midX} stroke="#334155" strokeWidth={2} /> : null}
-              {midY != null ? <ReferenceLine y={midY} stroke="#334155" strokeWidth={2} /> : null}
-              <Tooltip
-                content={<RotationTooltip />}
-                cursor={{ strokeDasharray: "3 3", stroke: "#475569", strokeWidth: 1 }}
-                isAnimationActive={false}
-              />
-              {trailData.length >= 2 ? (
-                <Scatter
-                  data={trailData}
-                  isAnimationActive={false}
-                  line={{
-                    stroke: "#94a3b8",
-                    strokeWidth: 1.5,
-                    strokeDasharray: "5 4",
-                  }}
-                  shape={(props: { cx?: number; cy?: number; index?: number }) => {
-                    const { cx = 0, cy = 0, index = 0 } = props;
-                    if (index === trailData.length - 1) return null;
-                    return <circle cx={cx} cy={cy} r={2.5} fill="#64748b" opacity={0.5} />;
-                  }}
-                />
-              ) : null}
-              <Scatter
-                data={plotNodes}
-                isAnimationActive={false}
-                onMouseEnter={(node) => {
-                  const key = (node as { payload?: RotationNode })?.payload?.industry_key;
-                  if (key) setHoveredKey(key);
-                }}
-                onMouseLeave={() => setHoveredKey(null)}
-                shape={(props: ScatterDotProps) => (
-                  <VectorScatterDot {...props} hoveredKey={hoveredKey} />
-                )}
-              />
-            </ScatterChart>
+            ) : null}
+            <Scatter
+              data={plotNodes}
+              isAnimationActive={false}
+              onMouseEnter={handleMouseEnter}
+              onMouseLeave={handleMouseLeave}
+              shape={renderDot}
+            />
+          </ScatterChart>
           </ResponsiveContainer>
         )}
       </div>

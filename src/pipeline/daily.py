@@ -6,17 +6,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.breadth_data import sync_breadth_history
-from src.finviz_scraper import fetch_industries
+from src.services.elite_data import elite_auth_key
 from src.services.elite_groups import fetch_elite_industry_rows
 from src.logging_config import get_logger
 from src.scoring import filter_top_strong, score_industries
-from src.stock_picks import build_and_store_elite_industry_picks, fetch_top_industry_stock_picks
+from src.stock_picks import apply_elite_picks_after_rs
 from src.stock_rs import (
     backfill_new_stock_rs_for_snapshot,
     compute_and_store_stock_rs,
-    enrich_catalysts_for_snapshot,
     load_us_universe_with_cache,
-    rebuild_stock_watchlist_for_snapshot,
 )
 from src.storage import Storage
 from src.services.rs_jobs import RsJobService
@@ -26,7 +24,7 @@ logger = get_logger(__name__)
 
 @dataclass
 class DailyPipelineOptions:
-    skip_stocks: bool = False
+    skip_stocks: bool = True  # deprecated: Elite picks always run after RS
     skip_rs: bool = False
     skip_breadth: bool = True
     full_breadth: bool = False
@@ -64,10 +62,10 @@ def run_daily_pipeline(
         "running",
         current_step="industry_fetch",
         details={
-            "skip_stocks": opts.skip_stocks,
             "skip_rs": opts.skip_rs,
             "skip_breadth": opts.skip_breadth,
             "full_breadth": opts.full_breadth,
+            "pipeline_mode": "elite_only",
         },
     )
 
@@ -76,61 +74,34 @@ def run_daily_pipeline(
         rows = fetch_elite_industry_rows()
         if rows:
             _log(opts, f"Elite Groups 已加载 {len(rows)} 个行业")
+        elif elite_auth_key():
+            raise RuntimeError(
+                "Elite 行业组抓取失败（FINVIZ_AUTH_KEY 已配置）。"
+                "请运行 scripts/verify_finviz_elite_exports.py --full 排查 token/限流。"
+            )
         else:
-            _log(opts, "Elite 不可用，回退 Finviz 网页抓取…")
-            rows = fetch_industries(config, storage=storage)
+            raise RuntimeError(
+                "未配置 FINVIZ_AUTH_KEY，无法运行 Elite 管道。"
+                "请在 .env 或 GitHub Secrets 中设置 Export API token。"
+            )
         scored = score_industries(rows, config)
         top = filter_top_strong(scored, config)
         storage.save_snapshot(snapshot_date, scored)
         result["industry_count"] = len(rows)
+        result["top_count"] = len(top)
 
         storage.upsert_snapshot_run(
             snapshot_date,
             "running",
-            current_step="stock_picks",
+            current_step="stock_rs",
             details={"top_count": len(top)},
         )
-
-        picks: dict[str, dict[str, Any]] = {}
-        if opts.skip_stocks:
-            result["top_count"] = len(top)
-            _log(opts, f"共获取 {len(rows)} 个行业，Top {len(top)}")
-        elif not top:
-            result["top_count"] = 0
-            _log(opts, f"共获取 {len(rows)} 个行业，Top 0")
-        else:
-            _log(opts, f"正在抓取 Top 候选行业的筛选个股…")
-            picks = fetch_top_industry_stock_picks(storage, snapshot_date, scored, config)
-            top = filter_top_strong(scored, config, stock_picks=picks)
-            result["top_count"] = len(top)
-            result["stock_pick_count"] = sum(len(v.get("tickers") or []) for v in picks.values())
-            result["stock_pick_errors"] = sum(1 for v in picks.values() if v.get("error"))
-            result["picks_summary"] = {
-                "total": len(picks),
-                "stale": sum(
-                    1
-                    for v in picks.values()
-                    if str(v.get("error") or "").startswith("沿用缓存(")
-                ),
-                "with_tickers": sum(1 for v in picks.values() if v.get("tickers")),
-            }
-            _log(opts, f"共获取 {len(rows)} 个行业，Top {len(top)}（含筛股命中）")
-            for key, payload in picks.items():
-                name = next((c.name for c in top if c.key == key), key)
-                tickers = payload.get("tickers", [])
-                err = payload.get("error")
-                stale = payload.get("stale_fallback")
-                if err:
-                    suffix = " [stale]" if stale else ""
-                    _log(opts, f"  {name}: 失败 ({err}){suffix}")
-                else:
-                    _log(opts, f"  {name} ({len(tickers)}): {', '.join(tickers) if tickers else '（无匹配）'}")
+        _log(opts, f"共获取 {len(rows)} 个行业，Top {len(top)}")
 
         rs_result: dict[str, Any] = {}
         if not opts.skip_rs:
-            storage.upsert_snapshot_run(snapshot_date, "running", current_step="stock_rs")
             if opts.rs_async:
-                _log(opts, "已启动后台 RS 任务（行业与筛股可先展示）…")
+                _log(opts, "已启动后台 RS 任务（完成后自动跑 Elite 行业筛股）…")
                 kick = RsJobService().start_compute_rs(
                     storage=storage,
                     snapshot_date=snapshot_date,
@@ -159,7 +130,10 @@ def run_daily_pipeline(
                 )
                 if config.get("stock_rs", {}).get("new_stock_enabled", True):
                     if int(rs_result.get("new_stock_leaderboard_count", 0) or 0) <= 0:
-                        if int(rs_result.get("insufficient_history_count", 0) or 0) > 0:
+                        issues = storage.get_stock_rs_issues(snapshot_date)
+                        from src.stock_rs import _elite_partial_candidate_symbols
+
+                        if _elite_partial_candidate_symbols(issues):
                             _log(opts, "正在补算新股 RS…")
                             try:
                                 new_rs = backfill_new_stock_rs_for_snapshot(
@@ -171,44 +145,41 @@ def run_daily_pipeline(
                             except Exception as exc:  # noqa: BLE001
                                 logger.exception("new stock RS backfill failed")
                                 rs_result = {**rs_result, "new_stock_error": str(exc)}
+
+                _log(opts, "正在用 Elite export 抓取 Top 行业个股…")
+                elite_out = apply_elite_picks_after_rs(
+                    storage,
+                    snapshot_date,
+                    scored,
+                    config,
+                )
+                picks = elite_out.get("picks") or {}
+                top = filter_top_strong(scored, config, stock_picks=picks)
+                result["top_count"] = elite_out.get("top_count", len(top))
+                result["stock_pick_count"] = elite_out.get("stock_pick_count", 0)
+                result["stock_pick_errors"] = elite_out.get("stock_pick_errors", 0)
+                result["picks_summary"] = elite_out.get("picks_summary") or {}
+                rs_result["watchlist_count"] = elite_out.get(
+                    "watchlist_count",
+                    rs_result.get("watchlist_count", 0),
+                )
+                if elite_out.get("catalyst"):
+                    result["catalyst"] = elite_out["catalyst"]
+                    cat = elite_out["catalyst"]
+                    _log(
+                        opts,
+                        "观察名单催化剂："
+                        f"{cat.get('tagged_count', 0)}/{cat.get('candidate_count', 0)} "
+                        f"（最终名单 {cat.get('watchlist_count', 0)} 只）",
+                    )
+                _log(
+                    opts,
+                    f"Elite 行业筛股完成：Top {result['top_count']}，"
+                    f"Watchlist={rs_result.get('watchlist_count', 0)}",
+                )
+
             result["rs"] = rs_result
             if not rs_result.get("async_started"):
-                if opts.skip_stocks:
-                    _log(opts, "正在用 Elite 数据配对 Top 行业个股…")
-                    elite_picks = build_and_store_elite_industry_picks(
-                        storage,
-                        snapshot_date,
-                        scored,
-                        config,
-                    )
-                    if elite_picks:
-                        picks = elite_picks
-                        top = filter_top_strong(scored, config, stock_picks=picks)
-                        result["top_count"] = len(top)
-                        result["stock_pick_count"] = sum(
-                            len(payload.get("tickers") or []) for payload in picks.values()
-                        )
-                        result["stock_pick_errors"] = max(0, len(top) - len(picks))
-                        result["picks_summary"] = {
-                            "total": len(picks),
-                            "stale": 0,
-                            "with_tickers": sum(1 for payload in picks.values() if payload.get("tickers")),
-                        }
-                        rebuild = rebuild_stock_watchlist_for_snapshot(
-                            storage,
-                            snapshot_date,
-                            scored,
-                            config,
-                        )
-                        rs_result["watchlist_count"] = rebuild.get(
-                            "watchlist_count",
-                            rs_result.get("watchlist_count", 0),
-                        )
-                        result["rs"] = rs_result
-                        _log(
-                            opts,
-                            f"Elite 行业配对完成：Top {len(top)}，Watchlist={rs_result.get('watchlist_count', 0)}",
-                        )
                 _log(
                     opts,
                     "RS 完成："
@@ -216,20 +187,10 @@ def run_daily_pipeline(
                     f"Computed={rs_result.get('computed_count', 0)} "
                     f"Watchlist={rs_result.get('watchlist_count', 0)}",
                 )
-                if int(rs_result.get("watchlist_count", 0) or 0) > 0:
-                    cat = enrich_catalysts_for_snapshot(storage, snapshot_date, config)
-                    result["catalyst"] = cat
-                    _log(
-                        opts,
-                        "观察名单催化剂："
-                        f"{cat.get('tagged_count', 0)}/{cat.get('candidate_count', 0)} "
-                        f"（最终名单 {cat.get('watchlist_count', 0)} 只）",
-                    )
 
         breadth_result: dict[str, Any] = {}
         if not opts.skip_breadth:
             storage.upsert_snapshot_run(snapshot_date, "running", current_step="breadth_sync")
-            # 使用 try-except 包裹宽度同步，防止其失败导致整个个股分析流程不可用
             try:
                 breadth_result = sync_breadth_history(storage, full=opts.full_breadth, config=config)
                 result["breadth"] = breadth_result
@@ -247,8 +208,6 @@ def run_daily_pipeline(
                 logger.error("市场宽度同步发生异常，跳过此步骤: %s", breadth_exc)
                 result["breadth_error"] = str(breadth_exc)
 
-        # 只要走到这里，前三步（行业和筛股）都成功了，将其标记为 completed
-        # （如果宽度失败，页面上顶多是没宽度数据，但仍能选股）
         if not (opts.rs_async and rs_result.get("async_started")):
             storage.upsert_snapshot_run(
                 snapshot_date,

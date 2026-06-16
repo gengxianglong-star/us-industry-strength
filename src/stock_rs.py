@@ -1,25 +1,17 @@
-"""Compute US stock relative strength (RS) from free sources."""
+"""Compute US stock relative strength (RS) from Finviz Elite export only."""
 
 from __future__ import annotations
 
-import csv
-import ftplib
-import io
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from typing import Any, Callable
 
-import requests
-
-from src.config_loader import ROOT, TIMEFRAMES, load_config
+from src.config_loader import TIMEFRAMES, load_config
 from src.logging_config import get_logger
 from src.math_utils import percentile_rank, rank_dict_by_key, weighted_momentum_composite
 from src.scoring import ScoredIndustry, filter_top_strong
 from src.storage import Storage
 
 logger = get_logger(__name__)
+
 
 def _save_watchlist(
     storage: Storage,
@@ -34,7 +26,7 @@ def enrich_catalysts_for_snapshot(
     snapshot_date: str,
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Pull Finviz news + Gemini tags for the saved final watchlist (post-build only)."""
+    """Pull Finviz news + LLM tags for the saved final watchlist (post-build only)."""
     cfg = (config or load_config()).get("catalyst") or {}
     max_symbols = int(cfg.get("max_symbols", 30))
     watchlist_count = storage.count_stock_watchlist(snapshot_date)
@@ -94,17 +86,8 @@ def _save_watchlist_and_enrich_catalysts(
     snapshot_date: str,
     watch_rows: list[dict[str, Any]],
 ) -> None:
-    """Save watchlist only (catalysts run once after the final list is ready)."""
     _save_watchlist(storage, snapshot_date, watch_rows)
 
-
-PERF_INDEX_OFFSETS = {
-    "week": 5,
-    "month": 21,
-    "quarter": 63,
-    "half": 126,
-    "year": 252,
-}
 
 PERF_KEY_MAP = {
     "week": "perf_w",
@@ -114,27 +97,12 @@ PERF_KEY_MAP = {
     "year": "perf_y",
 }
 
-THREE_Q_OFFSET = 189
-NEW_STOCK_MIN_BARS = 22
-
-# 新股分档：互斥，仅 bar_count < min_price_rows（默认 260）
 NEW_STOCK_COHORTS: dict[str, dict[str, Any]] = {
-    "M": {"min_bars": 22, "max_bars": 63, "timeframes": ("week", "month")},
-    "Q": {"min_bars": 63, "max_bars": 126, "timeframes": ("week", "month", "quarter")},
-    "H": {"min_bars": 126, "max_bars": 189, "timeframes": ("week", "month", "quarter", "half")},
-    "3Q": {
-        "min_bars": 189,
-        "max_bars": 260,
-        "timeframes": ("week", "month", "quarter", "half", "three_q"),
-    },
+    "M": {"timeframes": ("week", "month")},
+    "Q": {"timeframes": ("week", "month", "quarter")},
+    "H": {"timeframes": ("week", "month", "quarter", "half")},
+    "3Q": {"timeframes": ("week", "month", "quarter", "half", "three_q")},
 }
-
-
-def _perf_key_for_timeframe(tf: str) -> str:
-    if tf == "three_q":
-        return "perf_tq"
-    return PERF_KEY_MAP[tf]
-
 
 RANK_KEY_MAP = {
     "week": "rank_w",
@@ -145,56 +113,14 @@ RANK_KEY_MAP = {
 }
 
 
+def _perf_key_for_timeframe(tf: str) -> str:
+    if tf == "three_q":
+        return "perf_tq"
+    return PERF_KEY_MAP[tf]
+
+
 def _rank_key_for_timeframe(tf: str) -> str:
     return RANK_KEY_MAP[tf]
-
-
-def classify_new_stock_cohort(bar_count: int, min_main_rows: int) -> str | None:
-    if bar_count >= min_main_rows or bar_count < NEW_STOCK_MIN_BARS:
-        return None
-    for cohort, spec in NEW_STOCK_COHORTS.items():
-        if spec["min_bars"] <= bar_count < spec["max_bars"]:
-            return cohort
-    return None
-
-
-def _top_industries_with_picks(
-    storage: Storage,
-    snapshot_date: str,
-    scored: list[ScoredIndustry],
-    config: dict[str, Any],
-) -> list[ScoredIndustry]:
-    picks = storage.get_stock_picks_for_snapshot(snapshot_date)
-    return filter_top_strong(scored, config, stock_picks=picks)
-
-
-def _offsets_for_cohort(cohort: str) -> dict[str, int]:
-    spec = NEW_STOCK_COHORTS[cohort]
-    offsets: dict[str, int] = {}
-    for tf in spec["timeframes"]:
-        if tf == "three_q":
-            offsets[tf] = THREE_Q_OFFSET
-        else:
-            offsets[tf] = PERF_INDEX_OFFSETS[tf]
-    return offsets
-
-
-def _calc_performance_for_cohort(bars: list[dict[str, Any]], cohort: str) -> dict[str, float] | None:
-    offsets = _offsets_for_cohort(cohort)
-    need = max(offsets.values()) + 1
-    if len(bars) < need:
-        return None
-    closes = [float(bar["close"]) for bar in bars]
-    last = closes[-1]
-    if last <= 0:
-        return None
-    result: dict[str, float] = {}
-    for tf, offset in offsets.items():
-        prev = closes[-1 - offset]
-        if prev <= 0:
-            return None
-        result[_perf_key_for_timeframe(tf)] = (last / prev - 1.0) * 100.0
-    return result
 
 
 def _apply_market_rs_scores(
@@ -204,7 +130,6 @@ def _apply_market_rs_scores(
     tier_a: float,
     tier_b: float,
 ) -> None:
-    """Composite momentum (40/30/20/5/5 on raw %) then cross-sectional percentile RS."""
     weights = config.get("_normalized_weights") or {
         "week": 0.05,
         "month": 0.3,
@@ -287,6 +212,44 @@ def _score_new_stock_rows(
             row["tier"] = "C"
 
 
+def _should_defer_finviz_cross_watchlist(
+    storage: Storage,
+    snapshot_date: str,
+    _config: dict[str, Any],
+) -> bool:
+    """finviz_cross watchlist needs industry picks — skip premature build during RS."""
+    picks = storage.get_stock_picks_for_snapshot(snapshot_date)
+    if not picks:
+        return True
+    return not any(payload.get("tickers") for payload in picks.values())
+
+
+def _top_industries_with_picks(
+    storage: Storage,
+    snapshot_date: str,
+    scored: list[ScoredIndustry],
+    config: dict[str, Any],
+) -> list[ScoredIndustry]:
+    picks = storage.get_stock_picks_for_snapshot(snapshot_date)
+    return filter_top_strong(scored, config, stock_picks=picks)
+
+
+def _build_main_watchlist_from_rows(
+    ranked_rows: list[dict[str, Any]],
+    storage: Storage,
+    snapshot_date: str,
+    scored_industries: list[ScoredIndustry],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rs_cfg = config.get("stock_rs", {})
+    cross_top_percent = float(rs_cfg.get("cross_top_percent", 0.1))
+    cross_top_percent = max(0.01, min(1.0, cross_top_percent))
+    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
+    top_keys = {item.key for item in top_industries}
+    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
+    return _cross_watchlist_candidates(ranked_rows, symbol_to_industries, cross_top_percent)
+
+
 def _industry_pick_map(
     storage: Storage,
     snapshot_date: str,
@@ -300,27 +263,6 @@ def _industry_pick_map(
         for symbol in payload.get("tickers", []) or []:
             symbol_to_industries.setdefault(symbol.upper(), []).append(key)
     return symbol_to_industries
-
-
-def _build_main_watchlist_from_rows(
-    ranked_rows: list[dict[str, Any]],
-    storage: Storage,
-    snapshot_date: str,
-    scored_industries: list[ScoredIndustry],
-    config: dict[str, Any],
-) -> list[dict[str, Any]]:
-    from src.watchlist_build import build_rs_technical_watchlist, use_rs_technical_watchlist
-
-    if use_rs_technical_watchlist(config):
-        return build_rs_technical_watchlist(ranked_rows, config)
-
-    rs_cfg = config.get("stock_rs", {})
-    cross_top_percent = float(rs_cfg.get("cross_top_percent", 0.1))
-    cross_top_percent = max(0.01, min(1.0, cross_top_percent))
-    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
-    top_keys = {item.key for item in top_industries}
-    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
-    return _cross_watchlist_candidates(ranked_rows, symbol_to_industries, cross_top_percent)
 
 
 def _cross_watchlist_candidates(
@@ -366,375 +308,45 @@ def _merge_watchlists(
     return merged
 
 
-def backfill_new_stock_rs_for_snapshot(
-    storage: Storage,
-    snapshot_date: str,
-    config: dict[str, Any],
-    progress_callback: Callable[[int, int], None] | None = None,
-) -> dict[str, Any]:
-    """仅对 insufficient_history 股票拉价并计算新股 RS，再与主 RS 观察名单合并。"""
-    rs_cfg = config.get("stock_rs", {})
-    min_price_rows = int(rs_cfg.get("min_price_rows", 260))
-    cross_top_percent = float(rs_cfg.get("cross_top_percent", 0.1))
-    cross_top_percent = max(0.01, min(1.0, cross_top_percent))
-    max_workers = max(4, min(64, int(rs_cfg.get("max_workers", 24))))
-    request_timeout = int(rs_cfg.get("request_timeout_seconds", 20))
-    prefer_stooq = bool(rs_cfg.get("prefer_stooq", False))
-
-    issues = storage.get_stock_rs_issues(snapshot_date)
-    symbols = sorted(s for s, r in issues.items() if r == "insufficient_history")
-    insufficient_bars: dict[str, list[dict[str, Any]]] = {}
-    user_agent = "Mozilla/5.0"
-    total = len(symbols)
-    processed = 0
-    if progress_callback:
-        progress_callback(0, total)
-
-    def _fetch_one(symbol: str) -> tuple[str, list[dict[str, Any]]]:
-        with requests.Session() as session:
-            session.headers.update({"User-Agent": user_agent})
-            bars: list[dict[str, Any]] = []
-            if prefer_stooq:
-                bars = fetch_stooq_daily_bars(symbol, session, timeout=request_timeout)
-            if not bars:
-                bars = fetch_yahoo_daily_bars(symbol, session, timeout=request_timeout)
-        return symbol, bars
-
-    if symbols:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(_fetch_one, symbol) for symbol in symbols]
-            for future in as_completed(futures):
-                symbol, bars = future.result()
-                if bars and len(bars) < min_price_rows:
-                    insufficient_bars[symbol] = bars
-                processed += 1
-                if progress_callback and (processed % 20 == 0 or processed == total):
-                    progress_callback(processed, total)
-    elif progress_callback:
-        progress_callback(0, 0)
-
-    scored_rows = storage.get_snapshot(snapshot_date)
-
-    class _Industry:
-        def __init__(self, d: dict[str, Any]):
-            self.key = d["industry_key"]
-            self.name = d["name"]
-            self.score = float(d.get("score") or 0)
-            self.rank_m = int(d.get("rank_m") or 9999)
-            self.rank_q = int(d.get("rank_q") or 9999)
-            self.excluded = bool(d.get("excluded"))
-
-    scored = [_Industry(r) for r in scored_rows if not r.get("excluded")]
-    new_stock_result = compute_and_store_new_stock_rs(
-        storage,
-        snapshot_date,
-        insufficient_bars,
-        config,
-        min_price_rows,
-        cross_top_percent,
-        scored,
+def _elite_partial_candidate_symbols(issues_map: dict[str, str]) -> list[str]:
+    return sorted(
+        sym
+        for sym, reason in issues_map.items()
+        if reason in {"elite_no_perf", "insufficient_history", "perf_invalid"}
     )
 
-    main_rows = storage.get_stock_rs_raw(snapshot_date)
-    main_watch = _build_main_watchlist_from_rows(main_rows, storage, snapshot_date, scored, config)
-    from src.watchlist_build import use_rs_technical_watchlist
 
-    new_watch = (
-        []
-        if use_rs_technical_watchlist(config)
-        else new_stock_result["new_watch_candidates"]
-    )
-    watch_rows = _merge_watchlists(main_watch, new_watch)
-    _save_watchlist_and_enrich_catalysts(storage, snapshot_date, watch_rows)
+def _build_elite_partial_inputs(
+    elite_market: dict[str, dict[str, Any]] | None,
+    issues_map: dict[str, str],
+) -> dict[str, tuple[str, dict[str, float]]]:
+    if not elite_market:
+        return {}
+    from src.services.elite_data import build_elite_partial_perf_inputs
 
-    prev_meta = storage.get_stock_rs_meta(snapshot_date) or {}
-    storage.save_stock_rs_meta(
-        snapshot_date,
-        {
-            "universe_count": int(prev_meta.get("universe_count", 0)),
-            "computed_count": int(prev_meta.get("computed_count", 0)),
-            "no_bars_count": int(prev_meta.get("no_bars_count", 0)),
-            "insufficient_history_count": int(prev_meta.get("insufficient_history_count", 0)),
-            "perf_invalid_count": int(prev_meta.get("perf_invalid_count", 0)),
-            "coverage_ratio": float(prev_meta.get("coverage_ratio", 0.0)),
-            "new_stock_m_count": new_stock_result["new_stock_m_count"],
-            "new_stock_q_count": new_stock_result["new_stock_q_count"],
-            "new_stock_h_count": new_stock_result["new_stock_h_count"],
-            "new_stock_3q_count": new_stock_result["new_stock_3q_count"],
-            "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
-            "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
-        },
-    )
-
-    return {
-        **new_stock_result,
-        "fetched_symbols": len(symbols),
-        "bars_for_new_rs": len(insufficient_bars),
-        "watchlist_count": len(watch_rows),
-    }
-
-
-def compute_and_store_new_stock_rs(
-    storage: Storage,
-    snapshot_date: str,
-    insufficient_bars: dict[str, list[dict[str, Any]]],
-    config: dict[str, Any],
-    min_price_rows: int,
-    cross_top_percent: float,
-    scored_industries: list[ScoredIndustry],
-) -> dict[str, Any]:
-    rs_cfg = config.get("stock_rs", {})
-    tier_a = float(rs_cfg.get("tier_a_score", 0.8))
-    tier_b = float(rs_cfg.get("tier_b_score", 0.65))
-    if not bool(rs_cfg.get("new_stock_enabled", True)):
-        return {
-            "new_stock_m_count": 0,
-            "new_stock_q_count": 0,
-            "new_stock_h_count": 0,
-            "new_stock_3q_count": 0,
-            "new_stock_leaderboard_count": 0,
-            "new_stock_rows": [],
-            "new_watch_candidates": [],
-        }
-
-    cohort_rows: dict[str, list[dict[str, Any]]] = {k: [] for k in NEW_STOCK_COHORTS}
-    for symbol, bars in insufficient_bars.items():
-        cohort = classify_new_stock_cohort(len(bars), min_price_rows)
-        if not cohort:
-            continue
-        perf = _calc_performance_for_cohort(bars, cohort)
-        if not perf:
-            continue
-        row: dict[str, Any] = {
-            "symbol": symbol,
-            "cohort": cohort,
-            "bar_count": len(bars),
-            "in_leaderboard": False,
-        }
-        row.update(perf)
-        cohort_rows[cohort].append(row)
-
-    counts = {c: len(cohort_rows[c]) for c in NEW_STOCK_COHORTS}
-    all_scored: list[dict[str, Any]] = []
-    leaderboard: list[dict[str, Any]] = []
-
-    for cohort, rows in cohort_rows.items():
-        if not rows:
-            continue
-        _score_new_stock_rows(rows, cohort, config, tier_a, tier_b)
-        rows.sort(key=lambda x: (-x["rs_score"], x["symbol"]))
-        cutoff = max(1, int(len(rows) * cross_top_percent))
-        for row in rows:
-            row["in_leaderboard"] = False
-        for row in rows[:cutoff]:
-            row["in_leaderboard"] = True
-            leaderboard.append(row)
-        all_scored.extend(rows)
-
-    from src.watchlist_build import use_rs_technical_watchlist
-
-    if use_rs_technical_watchlist(config):
-        new_watch: list[dict[str, Any]] = []
-    else:
-        top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
-        top_keys = {item.key for item in top_industries}
-        symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
-        new_watch = _cross_watchlist_candidates(leaderboard, symbol_to_industries, cross_top_percent)
-
-    storage.save_stock_rs_new_snapshot(snapshot_date, all_scored)
-    return {
-        "new_stock_m_count": counts["M"],
-        "new_stock_q_count": counts["Q"],
-        "new_stock_h_count": counts["H"],
-        "new_stock_3q_count": counts["3Q"],
-        "new_stock_leaderboard_count": len(leaderboard),
-        "new_stock_rows": all_scored,
-        "new_watch_candidates": new_watch,
-    }
-
-
-
-def _download_nasdaq_file(filename: str, timeout: int = 25) -> str:
-    chunks: list[str] = []
-    ftp = ftplib.FTP("ftp.nasdaqtrader.com", timeout=timeout)
-    try:
-        ftp.login()
-        ftp.cwd("/SymbolDirectory")
-        ftp.retrlines(f"RETR {filename}", chunks.append)
-    finally:
-        try:
-            ftp.quit()
-        except Exception:
-            logger.debug("ftp quit failed (ignored)", exc_info=True)
-    return "\n".join(chunks)
-
-
-def _is_common_symbol(symbol: str) -> bool:
-    if not symbol:
-        return False
-    bad_tokens = ("$", "^", "/", " ")
-    return all(token not in symbol for token in bad_tokens)
-
-
-def load_us_universe_from_nasdaq() -> list[dict[str, Any]]:
-    nasdaq_text = _download_nasdaq_file("nasdaqlisted.txt")
-    other_text = _download_nasdaq_file("otherlisted.txt")
-
-    symbols: dict[str, dict[str, Any]] = {}
-
-    nasdaq_rows = csv.DictReader(io.StringIO(nasdaq_text), delimiter="|")
-    for row in nasdaq_rows:
-        symbol = (row.get("Symbol") or "").strip().upper()
-        if symbol in {"", "File Creation Time"}:
-            continue
-        if row.get("Test Issue", "N") == "Y":
-            continue
-        if row.get("ETF", "N") == "Y":
-            continue
-        if not _is_common_symbol(symbol):
-            continue
-        symbols[symbol] = {
-            "symbol": symbol,
-            "name": (row.get("Security Name") or "").strip(),
-            "exchange": "NASDAQ",
-        }
-
-    other_rows = csv.DictReader(io.StringIO(other_text), delimiter="|")
-    for row in other_rows:
-        symbol = (row.get("ACT Symbol") or "").strip().upper()
-        if symbol in {"", "File Creation Time"}:
-            continue
-        if row.get("Test Issue", "N") == "Y":
-            continue
-        if row.get("ETF", "N") == "Y":
-            continue
-        if not _is_common_symbol(symbol):
-            continue
-        exchange = (row.get("Exchange") or "").strip().upper()
-        symbols.setdefault(
-            symbol,
-            {
-                "symbol": symbol,
-                "name": (row.get("Security Name") or "").strip(),
-                "exchange": exchange or "OTHER",
-            },
+    symbols = _elite_partial_candidate_symbols(issues_map)
+    if not symbols:
+        return {}
+    partial = build_elite_partial_perf_inputs(elite_market, symbols)
+    if partial:
+        logger.info(
+            "Elite shortened RS: %d symbols with partial perf (cohorts M/Q/H/3Q)",
+            len(partial),
         )
-
-    return sorted(symbols.values(), key=lambda x: x["symbol"])
-
-
-def load_us_universe_with_cache(storage: Storage, config: dict[str, Any]) -> list[dict[str, Any]]:
-    rs_cfg = config.get("stock_rs", {})
-    cache_hours = int(rs_cfg.get("universe_cache_hours", 24))
-    universe_cap = int(rs_cfg.get("universe_cap", 0))
-
-    freshness = storage.get_stock_universe_freshness()
-    count = storage.count_stock_universe()
-    updated_at_raw = freshness.get("updated_at") if freshness else None
-    if count > 500 and updated_at_raw:
-        try:
-            updated_at = datetime.fromisoformat(str(updated_at_raw))
-            age_hours = (datetime.now(timezone.utc) - updated_at).total_seconds() / 3600.0
-            if age_hours <= cache_hours:
-                rows = storage.list_stock_universe()
-                return rows[:universe_cap] if universe_cap > 0 else rows
-        except ValueError:
-            pass
-
-    universe = load_us_universe_from_nasdaq()
-    if universe_cap > 0:
-        universe = universe[:universe_cap]
-    storage.upsert_stock_universe(universe, source="nasdaqtrader")
-    return universe
+    return partial
 
 
-def _pipeline_sanity_settings(config: dict[str, Any] | None) -> dict[str, Any]:
-    pipeline = (config or {}).get("pipeline") or {}
-    raw = pipeline.get("sanity_check") or {}
-    return {
-        "max_allowed_daily_return": float(raw.get("max_allowed_daily_return", 1.5)),
-        "min_allowed_volume": float(raw.get("min_allowed_volume", 1)),
-    }
+def _rs_provider_requires_elite(rs_cfg: dict[str, Any]) -> bool:
+    return str(rs_cfg.get("rs_data_provider", "elite")).strip().lower() == "elite"
 
 
-def _log_price_anomaly(symbol: str, detail: str) -> None:
-    log_path = ROOT / "logs" / "pipeline_anomalies.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    line = f"{datetime.now(timezone.utc).isoformat()} {symbol} {detail}\n"
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(line)
-
-
-def _bars_price_anomaly(
-    bars: list[dict[str, Any]],
-    settings: dict[str, Any],
-) -> str | None:
-    if len(bars) < 2:
-        return None
-    max_ret = float(settings.get("max_allowed_daily_return", 1.5))
-    min_vol = float(settings.get("min_allowed_volume", 1))
-    last = bars[-1]
-    prev = bars[-2]
-    volume = last.get("volume")
-    if volume is not None and float(volume) <= min_vol:
-        return f"volume={volume} <= min_allowed_volume={min_vol}"
-    close_last = last.get("close")
-    close_prev = prev.get("close")
-    if close_prev and float(close_prev) > 0 and close_last is not None:
-        daily_return = abs(float(close_last) - float(close_prev)) / float(close_prev)
-        if daily_return > max_ret:
-            return f"daily_return={daily_return:.4f} > max_allowed_daily_return={max_ret}"
-    return None
-
-
-def _symbol_payload_from_bars(
-    symbol: str,
-    bars: list[dict[str, Any]],
-    *,
-    min_price_rows: int,
-    source: str,
-    sanity_settings: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    if not bars:
-        return {"symbol": symbol, "status": "no_bars", "reason": "no_bars"}
-    if sanity_settings:
-        anomaly = _bars_price_anomaly(bars, sanity_settings)
-        if anomaly:
-            _log_price_anomaly(symbol, anomaly)
-            return {"symbol": symbol, "status": "price_anomaly", "reason": "price_anomaly"}
-    if len(bars) < min_price_rows:
-        return {
-            "symbol": symbol,
-            "status": "insufficient_history",
-            "reason": "insufficient_history",
-            "bars": bars,
-        }
-    perf = _calc_performance(bars)
-    if not perf:
-        return {"symbol": symbol, "status": "perf_invalid", "reason": "perf_invalid"}
-    return {
-        "symbol": symbol,
-        "status": "ok",
-        "source": source,
-        "bars": bars[-320:],
-        "perf": perf,
-    }
-
-
-def _elite_rs_provider_enabled(rs_cfg: dict[str, Any], *, prefer_stooq: bool) -> bool:
-    provider = str(rs_cfg.get("rs_data_provider", "auto")).strip().lower()
-    return not prefer_stooq and provider != "yahoo"
-
-
-def _fetch_elite_market_if_enabled(
-    rs_cfg: dict[str, Any],
-    *,
-    prefer_stooq: bool,
-) -> dict[str, dict[str, Any]] | None:
-    if not _elite_rs_provider_enabled(rs_cfg, prefer_stooq=prefer_stooq):
-        return None
+def _fetch_elite_market(rs_cfg: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
     from src.services.elite_data import fetch_elite_market_data
 
+    if not _rs_provider_requires_elite(rs_cfg):
+        mode = str(rs_cfg.get("rs_data_provider", "elite")).strip().lower()
+        if mode not in {"auto", "elite"}:
+            logger.warning("rs_data_provider=%s is deprecated; using elite only", mode)
     return fetch_elite_market_data()
 
 
@@ -745,6 +357,23 @@ def _universe_rows_from_elite(market_data: dict[str, dict[str, Any]]) -> list[di
         label = str(row.get("industry") or row.get("sector") or sym).strip() or sym
         rows.append({"symbol": sym, "name": label, "exchange": "ELITE"})
     return rows
+
+
+def load_us_universe_with_cache(
+    storage: Storage,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Elite market universe (for async RS job status / universe_count)."""
+    from src.services.elite_data import fetch_elite_market_data, get_elite_market_cache
+
+    _ = config
+    market = get_elite_market_cache() or fetch_elite_market_data()
+    if not market:
+        cached = storage.list_stock_universe()
+        return cached if cached else []
+    universe = _universe_rows_from_elite(market)
+    storage.upsert_stock_universe(universe, source="elite")
+    return universe
 
 
 def _incremental_rs_targets(
@@ -788,24 +417,19 @@ def _elite_rs_prefetch(
     issues_map: dict[str, str],
     rs_cfg: dict[str, Any],
     *,
-    prefer_stooq: bool,
     elite_market: dict[str, dict[str, Any]] | None = None,
-    skip_yahoo_fallback: bool = False,
 ) -> tuple[list[str], str, dict[str, Any]]:
-    """Try Finviz Elite exports before Yahoo/Stooq; returns symbols still needing fetch."""
+    """Apply Finviz Elite perf to target symbols; no Yahoo/Stooq fallback."""
     stats: dict[str, Any] = {
         "elite_applied": 0,
         "elite_missing": 0,
         "elite_skipped_yahoo": 0,
     }
-    if not _elite_rs_provider_enabled(rs_cfg, prefer_stooq=prefer_stooq):
-        return target_symbols, "yahoo", stats
-
     from src.services.elite_data import build_perf_map_from_elite, fetch_elite_market_data
 
     market = elite_market if elite_market is not None else fetch_elite_market_data()
     if not market:
-        return target_symbols, "yahoo", stats
+        return target_symbols, "elite", stats
 
     elite_perf, missing = build_perf_map_from_elite(market, target_symbols)
     for sym, row in elite_perf.items():
@@ -813,37 +437,17 @@ def _elite_rs_prefetch(
         issues_map.pop(sym, None)
     stats["elite_applied"] = len(elite_perf)
     stats["elite_missing"] = len(missing)
-
-    if skip_yahoo_fallback and missing:
-        for sym in missing:
-            issues_map[sym] = "elite_no_perf"
-        stats["elite_skipped_yahoo"] = len(missing)
-        rs_source = "elite" if elite_perf else "yahoo"
+    for sym in missing:
+        issues_map[sym] = "elite_no_perf"
+    stats["elite_skipped_yahoo"] = len(missing)
+    rs_source = "elite" if elite_perf else "elite"
+    if elite_perf:
         logger.info(
-            "⚡ Elite RS fast track: %d ranked; skipped %d illiquid/no-perf symbols "
-            "(no Yahoo fallback)",
+            "⚡ Elite RS: %d ranked; %d skipped (no perf / illiquid)",
             stats["elite_applied"],
             stats["elite_skipped_yahoo"],
         )
-        return [], rs_source, stats
-
-    if not missing:
-        rs_source = "elite"
-        logger.info(
-            "⚡ Elite RS fast track: %d symbols, skipping Yahoo/Stooq fetch",
-            stats["elite_applied"],
-        )
-    elif elite_perf:
-        rs_source = "hybrid"
-        logger.info(
-            "Elite RS prefetch: %d from Elite, %d for Yahoo fallback (source=hybrid)",
-            stats["elite_applied"],
-            stats["elite_missing"],
-        )
-    else:
-        rs_source = "yahoo"
-        logger.info("Elite unavailable; using Yahoo/Stooq for %d symbols", len(target_symbols))
-    return missing, rs_source, stats
+    return [], rs_source, stats
 
 
 def _rs_meta_payload(
@@ -855,13 +459,10 @@ def _rs_meta_payload(
     perf_invalid_count: int,
     coverage_ratio: float,
     new_stock_result: dict[str, Any] | None = None,
-    worker_errors: list[str] | None = None,
-    adaptive_stats: dict[str, Any] | None = None,
-    rs_source: str = "yahoo",
+    rs_source: str = "elite",
     elite_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     new_stock_result = new_stock_result or {}
-    adaptive_stats = adaptive_stats or {}
     return {
         "universe_count": universe_count,
         "computed_count": computed_count,
@@ -879,13 +480,6 @@ def _rs_meta_payload(
         "new_stock_watchlist_added": int(
             new_stock_result.get("new_stock_watchlist_added", 0) or 0
         ),
-        "worker_error_count": len(worker_errors or []),
-        "worker_error_sample": (worker_errors or [])[:3],
-        "adaptive_passes": int(adaptive_stats.get("adaptive_passes", 0) or 0),
-        "adaptive_pass_details": adaptive_stats.get("adaptive_pass_details") or [],
-        "adaptive_recovered_total": int(adaptive_stats.get("adaptive_recovered_total", 0) or 0),
-        "adaptive_converged": bool(adaptive_stats.get("adaptive_converged")),
-        "adaptive_stop_reason": str(adaptive_stats.get("adaptive_stop_reason") or ""),
         "rs_source": rs_source,
         "elite_applied": int((elite_stats or {}).get("elite_applied", 0) or 0),
         "elite_missing": int((elite_stats or {}).get("elite_missing", 0) or 0),
@@ -893,682 +487,148 @@ def _rs_meta_payload(
     }
 
 
-def _apply_symbol_payload(
-    payload: dict[str, Any],
-    *,
+def compute_and_store_new_stock_rs(
     storage: Storage,
     snapshot_date: str,
-    perf_map: dict[str, dict[str, Any]],
-    issues_map: dict[str, str],
-    insufficient_bars: dict[str, list[dict[str, Any]]],
-    save_price_history: bool,
-) -> None:
-    status = payload.get("status")
-    symbol = str(payload.get("symbol") or "")
-    if not symbol:
-        return
-    if status == "ok":
-        if save_price_history:
-            storage.replace_stock_price_history(
-                symbol,
-                payload["bars"],
-                source=payload.get("source", "yahoo"),
-            )
-        perf_map[symbol] = {"symbol": symbol, **payload["perf"]}
-        issues_map.pop(symbol, None)
-        return
-    reason = str(payload.get("reason") or "no_bars")
-    issues_map[symbol] = reason
-    if reason == "insufficient_history" and payload.get("bars"):
-        insufficient_bars[symbol] = payload["bars"]
-
-
-def _stooq_symbol_candidates(symbol: str) -> list[str]:
-    s = symbol.lower()
-    candidates = [s]
-    if "." in s:
-        candidates.append(s.replace(".", "-"))
-    if "-" in s:
-        candidates.append(s.replace("-", "."))
-    seen: set[str] = set()
-    uniq: list[str] = []
-    for item in candidates:
-        if item not in seen:
-            seen.add(item)
-            uniq.append(item)
-    return uniq
-
-
-def _parse_stooq_csv(text: str) -> list[dict[str, Any]]:
-    text = text.strip()
-    if not text:
-        return []
-    if text.lower().startswith("get your apikey"):
-        return []
-    rows = list(csv.DictReader(io.StringIO(text)))
-    bars: list[dict[str, Any]] = []
-    for row in rows:
-        date_val = (row.get("Date") or "").strip()
-        close_val = row.get("Close")
-        if not date_val or not close_val or close_val in {"0", "0.0"}:
-            continue
-        try:
-            close_num = float(close_val)
-        except ValueError:
-            continue
-        volume_num: float | None = None
-        volume_val = row.get("Volume")
-        if volume_val not in {None, "", "0"}:
-            try:
-                volume_num = float(volume_val)
-            except ValueError:
-                volume_num = None
-        bars.append({"date": date_val, "close": close_num, "volume": volume_num})
-    bars.sort(key=lambda x: x["date"])
-    return bars
-
-
-def fetch_stooq_daily_bars(
-    symbol: str,
-    session: requests.Session,
-    timeout: int = 20,
-) -> list[dict[str, Any]]:
-    candidates = _stooq_symbol_candidates(symbol)
-    for idx, candidate in enumerate(candidates):
-        url = f"http://stooq.com/q/d/l/?s={candidate}.us&i=d"
-        try:
-            resp = session.get(url, timeout=timeout)
-            if resp.status_code == 200:
-                bars = _parse_stooq_csv(resp.text)
-                if bars:
-                    return bars
-        except requests.RequestException:
-            pass
-
-        # 如果这次没蒙对名字，稍微等半秒钟再去试下一个，防止被 Stooq 秒封 IP
-        if idx < len(candidates) - 1:
-            time.sleep(0.5)
-
-    return []
-
-
-def fetch_yahoo_daily_bars(
-    symbol: str,
-    session: requests.Session,
-    timeout: int = 20,
-) -> list[dict[str, Any]]:
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=2y"
-    try:
-        resp = session.get(url, timeout=timeout)
-        if resp.status_code != 200:
-            return []
-        payload = resp.json()
-    except (requests.RequestException, ValueError):
-        return []
-
-    result = payload.get("chart", {}).get("result") or []
-    if not result:
-        return []
-    first = result[0]
-    timestamps = first.get("timestamp") or []
-    quote = ((first.get("indicators") or {}).get("quote") or [{}])[0]
-    adj = ((first.get("indicators") or {}).get("adjclose") or [{}])[0]
-    closes = quote.get("close") or []
-    adj_closes = adj.get("adjclose") or []
-    volumes = quote.get("volume") or []
-    if not timestamps or not closes:
-        return []
-
-    bars: list[dict[str, Any]] = []
-    for idx, ts in enumerate(timestamps):
-        if idx >= len(closes):
-            break
-        close = closes[idx]
-        if idx < len(adj_closes) and adj_closes[idx] not in (None, 0):
-            close = adj_closes[idx]
-        if close in (None, 0):
-            continue
-        volume = volumes[idx] if idx < len(volumes) else None
-        date_iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).date().isoformat()
-        bars.append(
-            {
-                "date": date_iso,
-                "close": float(close),
-                "volume": float(volume) if volume not in (None, "") else None,
-            }
-        )
-    bars.sort(key=lambda x: x["date"])
-    return bars
-
-
-def fetch_yahoo_batch_daily_bars(
-    symbols: list[str],
-    session: requests.Session,
-    timeout: int = 20,
-) -> dict[str, list[dict[str, Any]]]:
-    if not symbols:
-        return {}
-    url = "https://query1.finance.yahoo.com/v7/finance/spark"
-    try:
-        resp = session.get(
-            url,
-            params={
-                "symbols": ",".join(symbols),
-                "range": "2y",
-                "interval": "1d",
-            },
-            timeout=timeout,
-        )
-        if resp.status_code != 200:
-            return {}
-        payload = resp.json()
-    except (requests.RequestException, ValueError):
-        return {}
-
-    results = (payload.get("spark") or {}).get("result") or []
-    out: dict[str, list[dict[str, Any]]] = {}
-    for item in results:
-        symbol = str(item.get("symbol") or "").upper()
-        response = (item.get("response") or [{}])[0]
-        timestamps = response.get("timestamp") or []
-        quote = ((response.get("indicators") or {}).get("quote") or [{}])[0]
-        adj = ((response.get("indicators") or {}).get("adjclose") or [{}])[0]
-        closes = quote.get("close") or []
-        adj_closes = adj.get("adjclose") or []
-        volumes = quote.get("volume") or []
-        bars: list[dict[str, Any]] = []
-        for idx, ts in enumerate(timestamps):
-            if idx >= len(closes):
-                break
-            close = closes[idx]
-            if idx < len(adj_closes) and adj_closes[idx] not in (None, 0):
-                close = adj_closes[idx]
-            if close in (None, 0):
-                continue
-            volume = volumes[idx] if idx < len(volumes) else None
-            date_iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).date().isoformat()
-            bars.append(
-                {
-                    "date": date_iso,
-                    "close": float(close),
-                    "volume": float(volume) if volume not in (None, "") else None,
-                }
-            )
-        bars.sort(key=lambda x: x["date"])
-        out[symbol] = bars
-    return out
-
-
-def _yahoo_rs_batches(symbols: list[str], batch_size: int) -> list[list[str]]:
-    return [symbols[i : i + batch_size] for i in range(0, len(symbols), batch_size)]
-
-
-_yahoo_session_cache = threading.local()
-
-
-def _get_yahoo_session(user_agent: str) -> requests.Session:
-    """Return a thread-local requests.Session, reused across batch calls."""
-    if not hasattr(_yahoo_session_cache, "session"):
-        _yahoo_session_cache.session = requests.Session()
-        _yahoo_session_cache.session.headers.update({"User-Agent": user_agent})
-    return _yahoo_session_cache.session
-
-
-def _fetch_yahoo_batch_with_retry(
-    batch: list[str],
+    config: dict[str, Any],
+    cross_top_percent: float,
+    scored_industries: list[ScoredIndustry],
     *,
-    request_timeout: int,
-    user_agent: str,
-    retry_pause_seconds: float = 0.8,
-) -> dict[str, list[dict[str, Any]]]:
-    if not batch:
-        return {}
-    session = _get_yahoo_session(user_agent)
-    bars_map = fetch_yahoo_batch_daily_bars(batch, session, timeout=request_timeout)
-    if bars_map:
-        return bars_map
-    time.sleep(retry_pause_seconds)
-    return fetch_yahoo_batch_daily_bars(batch, session, timeout=request_timeout)
-
-
-def _run_yahoo_batch_rs_fetch(
-    *,
-    target_symbols: list[str],
-    yahoo_batch_size: int,
-    yahoo_batch_workers: int,
-    request_timeout: int,
-    user_agent: str,
-    storage: Storage,
-    snapshot_date: str,
-    min_price_rows: int,
-    perf_map: dict[str, dict[str, Any]],
-    issues_map: dict[str, str],
-    insufficient_bars: dict[str, list[dict[str, Any]]],
-    save_price_history: bool,
-    progress_callback: Callable[[int, int], None] | None,
-    sanity_settings: dict[str, Any] | None = None,
-) -> None:
-    batches = _yahoo_rs_batches(target_symbols, yahoo_batch_size)
-    total_symbols = len(target_symbols)
-    processed = 0
-    apply_lock = threading.Lock()
-
-    def _process_batch(batch: list[str]) -> None:
-        nonlocal processed
-        if processed > 0:
-            time.sleep(0.3)  # Inter-batch delay to avoid Yahoo rate limiting
-        bars_map = _fetch_yahoo_batch_with_retry(
-            batch,
-            request_timeout=request_timeout,
-            user_agent=user_agent,
-        )
-        with apply_lock:
-            for symbol in batch:
-                payload = _symbol_payload_from_bars(
-                    symbol,
-                    bars_map.get(symbol, []),
-                    min_price_rows=min_price_rows,
-                    source="yahoo",
-                    sanity_settings=sanity_settings,
-                )
-                _apply_symbol_payload(
-                    payload,
-                    storage=storage,
-                    snapshot_date=snapshot_date,
-                    perf_map=perf_map,
-                    issues_map=issues_map,
-                    insufficient_bars=insufficient_bars,
-                    save_price_history=save_price_history,
-                )
-            processed += len(batch)
-            if progress_callback and (processed % 25 == 0 or processed >= total_symbols):
-                progress_callback(processed, total_symbols)
-
-    workers = max(1, min(yahoo_batch_workers, len(batches)))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        list(executor.map(_process_batch, batches))
-
-
-RETRYABLE_RS_REASONS = frozenset({"no_bars", "perf_invalid"})
-
-_DEFAULT_ADAPTIVE_CFG: dict[str, Any] = {
-    "enabled": True,
-    "max_passes": 5,
-    "cooldown_seconds": 45,
-    "min_recovered_per_pass": 20,
-    "stall_passes_to_stop": 2,
-    "worker_schedule": [10, 6, 3, 1],
-    "batch_size_schedule": [40, 20, 10, 5],
-    "final_pass_single_symbol": True,
-}
-
-
-def _resolve_adaptive_cfg(rs_cfg: dict[str, Any]) -> dict[str, Any]:
-    raw = rs_cfg.get("adaptive_fetch") or {}
-    cfg = {**_DEFAULT_ADAPTIVE_CFG, **raw}
-    cfg["enabled"] = bool(cfg.get("enabled", True))
-    cfg["max_passes"] = max(1, min(8, int(cfg.get("max_passes", 5))))
-    cfg["cooldown_seconds"] = max(0, min(300, int(cfg.get("cooldown_seconds", 45))))
-    cfg["min_recovered_per_pass"] = max(1, int(cfg.get("min_recovered_per_pass", 20)))
-    cfg["stall_passes_to_stop"] = max(1, int(cfg.get("stall_passes_to_stop", 2)))
-    cfg["final_pass_single_symbol"] = bool(cfg.get("final_pass_single_symbol", True))
-    worker_sched = [
-        max(1, min(12, int(x))) for x in (cfg.get("worker_schedule") or _DEFAULT_ADAPTIVE_CFG["worker_schedule"])
-    ]
-    batch_sched = [
-        max(5, min(50, int(x)))
-        for x in (cfg.get("batch_size_schedule") or _DEFAULT_ADAPTIVE_CFG["batch_size_schedule"])
-    ]
-    cfg["worker_schedule"] = worker_sched or list(_DEFAULT_ADAPTIVE_CFG["worker_schedule"])
-    cfg["batch_size_schedule"] = batch_sched or list(_DEFAULT_ADAPTIVE_CFG["batch_size_schedule"])
-    return cfg
-
-
-def _retryable_symbols(
-    issues_map: dict[str, str],
-    *,
-    symbol_set: set[str] | None = None,
-) -> list[str]:
-    symbols = [
-        symbol
-        for symbol, reason in issues_map.items()
-        if reason in RETRYABLE_RS_REASONS and (symbol_set is None or symbol in symbol_set)
-    ]
-    return sorted(symbols)
-
-
-def _issue_reason_counts(issues_map: dict[str, str]) -> dict[str, int]:
-    counts = {"no_bars": 0, "insufficient_history": 0, "perf_invalid": 0}
-    for reason in issues_map.values():
-        if reason in counts:
-            counts[reason] += 1
-    return counts
-
-
-def _adaptive_pass_record(
-    *,
-    pass_num: int,
-    workers: int,
-    batch_size: int,
-    mode: str,
-    attempted: int,
-    computed_count: int,
-    issue_counts: dict[str, int],
-    recovered: int | None,
+    elite_partial: dict[str, tuple[str, dict[str, float]]] | None = None,
 ) -> dict[str, Any]:
-    record: dict[str, Any] = {
-        "pass": pass_num,
-        "workers": workers,
-        "batch_size": batch_size,
-        "mode": mode,
-        "attempted": attempted,
-        "computed_after": computed_count,
-        "no_bars_after": issue_counts["no_bars"],
-        "insufficient_after": issue_counts["insufficient_history"],
-        "perf_invalid_after": issue_counts["perf_invalid"],
-    }
-    if recovered is not None:
-        record["recovered"] = recovered
-    return record
+    rs_cfg = config.get("stock_rs", {})
+    tier_a = float(rs_cfg.get("tier_a_score", 0.8))
+    tier_b = float(rs_cfg.get("tier_b_score", 0.65))
+    if not bool(rs_cfg.get("new_stock_enabled", True)):
+        return {
+            "new_stock_m_count": 0,
+            "new_stock_q_count": 0,
+            "new_stock_h_count": 0,
+            "new_stock_3q_count": 0,
+            "new_stock_leaderboard_count": 0,
+            "new_stock_rows": [],
+            "new_watch_candidates": [],
+        }
 
+    cohort_rows: dict[str, list[dict[str, Any]]] = {k: [] for k in NEW_STOCK_COHORTS}
+    for symbol, (cohort, perf) in (elite_partial or {}).items():
+        row = {
+            "symbol": symbol.upper(),
+            "cohort": cohort,
+            "bar_count": 0,
+            "source": "elite_partial",
+            "in_leaderboard": False,
+        }
+        row.update(perf)
+        cohort_rows[cohort].append(row)
 
-def _adaptive_should_stop(
-    *,
-    pass_num: int,
-    max_passes: int,
-    recovered: int,
-    stall_passes: int,
-    min_recovered: int,
-    at_final_tier: bool,
-    final_single_complete: bool,
-    retryable_remaining: int,
-    stall_passes_to_stop: int,
-) -> tuple[bool, str]:
-    if pass_num >= max_passes:
-        return True, "max_passes"
-    if retryable_remaining == 0:
-        return True, "no_retryable"
-    if recovered == 0 and stall_passes >= stall_passes_to_stop:
-        return True, "stall"
-    if (
-        at_final_tier
-        and final_single_complete
-        and recovered < min_recovered
-        and pass_num > 1
-    ):
-        return True, "min_recovered"
-    return False, ""
+    counts = {c: len(cohort_rows[c]) for c in NEW_STOCK_COHORTS}
+    all_scored: list[dict[str, Any]] = []
+    leaderboard: list[dict[str, Any]] = []
 
+    for cohort, rows in cohort_rows.items():
+        if not rows:
+            continue
+        _score_new_stock_rows(rows, cohort, config, tier_a, tier_b)
+        rows.sort(key=lambda x: (-x["rs_score"], x["symbol"]))
+        cutoff = max(1, int(len(rows) * cross_top_percent))
+        for row in rows:
+            row["in_leaderboard"] = False
+        for row in rows[:cutoff]:
+            row["in_leaderboard"] = True
+            leaderboard.append(row)
+        all_scored.extend(rows)
 
-def _run_yahoo_single_symbol_rs_fetch(
-    *,
-    target_symbols: list[str],
-    max_workers: int,
-    request_timeout: int,
-    user_agent: str,
-    storage: Storage,
-    snapshot_date: str,
-    min_price_rows: int,
-    perf_map: dict[str, dict[str, Any]],
-    issues_map: dict[str, str],
-    insufficient_bars: dict[str, list[dict[str, Any]]],
-    save_price_history: bool,
-    progress_callback: Callable[[int, int], None] | None,
-    worker_errors: list[str],
-    progress_base: int = 0,
-    progress_total: int | None = None,
-    sanity_settings: dict[str, Any] | None = None,
-) -> None:
-    total_symbols = len(target_symbols)
-    if not total_symbols:
-        return
-    progress_total = progress_total or total_symbols
-    processed = 0
-    apply_lock = threading.Lock()
+    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
+    top_keys = {item.key for item in top_industries}
+    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
+    new_watch = _cross_watchlist_candidates(leaderboard, symbol_to_industries, cross_top_percent)
 
-    def _fetch_one(symbol: str) -> dict[str, Any]:
-        with requests.Session() as session:
-            session.headers.update({"User-Agent": user_agent})
-            bars = fetch_yahoo_daily_bars(symbol, session, timeout=request_timeout)
-        return _symbol_payload_from_bars(
-            symbol,
-            bars,
-            min_price_rows=min_price_rows,
-            source="yahoo",
-            sanity_settings=sanity_settings,
-        )
-
-    def _run_symbol(symbol: str) -> None:
-        nonlocal processed
-        try:
-            payload = _fetch_one(symbol)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("stock RS fetch failed for %s: %s", symbol, exc)
-            if len(worker_errors) < 20:
-                worker_errors.append(f"{symbol}: {exc}")
-            payload = {"symbol": symbol, "status": "no_bars", "reason": "no_bars"}
-        with apply_lock:
-            _apply_symbol_payload(
-                payload,
-                storage=storage,
-                snapshot_date=snapshot_date,
-                perf_map=perf_map,
-                issues_map=issues_map,
-                insufficient_bars=insufficient_bars,
-                save_price_history=save_price_history,
-            )
-            processed += 1
-            if progress_callback and (processed % 25 == 0 or processed >= total_symbols):
-                progress_callback(min(progress_base + processed, progress_total), progress_total)
-
-    workers = max(1, min(max_workers, total_symbols))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        list(executor.map(_run_symbol, target_symbols))
-
-
-def _run_adaptive_yahoo_rs_fetch(
-    *,
-    target_symbols: list[str],
-    symbol_set: set[str],
-    adaptive_cfg: dict[str, Any],
-    request_timeout: int,
-    user_agent: str,
-    storage: Storage,
-    snapshot_date: str,
-    min_price_rows: int,
-    perf_map: dict[str, dict[str, Any]],
-    issues_map: dict[str, str],
-    insufficient_bars: dict[str, list[dict[str, Any]]],
-    save_price_history: bool,
-    progress_callback: Callable[[int, int], None] | None,
-    worker_errors: list[str],
-    sanity_settings: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    worker_sched = adaptive_cfg["worker_schedule"]
-    batch_sched = adaptive_cfg["batch_size_schedule"]
-    max_passes = int(adaptive_cfg["max_passes"])
-    cooldown = int(adaptive_cfg["cooldown_seconds"])
-    min_recovered = int(adaptive_cfg["min_recovered_per_pass"])
-    stall_limit = int(adaptive_cfg["stall_passes_to_stop"])
-    final_single = bool(adaptive_cfg["final_pass_single_symbol"])
-
-    pass_records: list[dict[str, Any]] = []
-    recovered_total = 0
-    stall_passes = 0
-    stop_reason = "no_retryable"
-    progress_total = max(1, len(target_symbols))
-
-    workers = worker_sched[0]
-    batch_size = batch_sched[0]
-    logger.info(
-        "RS adaptive pass 1/%s: batch workers=%s batch_size=%s symbols=%s",
-        max_passes, workers, batch_size, len(target_symbols),
-    )
-    _run_yahoo_batch_rs_fetch(
-        target_symbols=target_symbols,
-        yahoo_batch_size=batch_size,
-        yahoo_batch_workers=workers,
-        request_timeout=request_timeout,
-        user_agent=user_agent,
-        storage=storage,
-        snapshot_date=snapshot_date,
-        min_price_rows=min_price_rows,
-        perf_map=perf_map,
-        issues_map=issues_map,
-        insufficient_bars=insufficient_bars,
-        save_price_history=save_price_history,
-        progress_callback=progress_callback,
-        sanity_settings=sanity_settings,
-    )
-    issue_counts = _issue_reason_counts(issues_map)
-    pass_records.append(
-        _adaptive_pass_record(
-            pass_num=1,
-            workers=workers,
-            batch_size=batch_size,
-            mode="batch",
-            attempted=len(target_symbols),
-            computed_count=len(perf_map),
-            issue_counts=issue_counts,
-            recovered=None,
-        )
-    )
-
-    final_single_complete = False
-    for pass_num in range(2, max_passes + 1):
-        retryable = _retryable_symbols(issues_map, symbol_set=symbol_set)
-        if not retryable:
-            stop_reason = "no_retryable"
-            break
-
-        if cooldown > 0:
-            logger.info(
-                "RS adaptive cooldown %ss before pass %s", cooldown, pass_num,
-            )
-            time.sleep(cooldown)
-
-        schedule_idx = min(pass_num - 1, len(worker_sched) - 1)
-        workers = worker_sched[schedule_idx]
-        batch_size = batch_sched[min(pass_num - 1, len(batch_sched) - 1)]
-        at_final_tier = schedule_idx >= len(worker_sched) - 1
-        retryable_before = len(retryable)
-
-        if at_final_tier and final_single:
-            mode = "single"
-            logger.info(
-                "RS adaptive pass %s/%s: single-symbol workers=1 symbols=%s",
-                pass_num, max_passes, len(retryable),
-            )
-            _run_yahoo_single_symbol_rs_fetch(
-                target_symbols=retryable,
-                max_workers=1,
-                request_timeout=request_timeout,
-                user_agent=user_agent,
-                storage=storage,
-                snapshot_date=snapshot_date,
-                min_price_rows=min_price_rows,
-                perf_map=perf_map,
-                issues_map=issues_map,
-                insufficient_bars=insufficient_bars,
-                save_price_history=save_price_history,
-                progress_callback=progress_callback,
-                worker_errors=worker_errors,
-                progress_base=len(target_symbols),
-                progress_total=progress_total + len(retryable),
-                sanity_settings=sanity_settings,
-            )
-            final_single_complete = True
-        else:
-            mode = "batch"
-            logger.info(
-                "RS adaptive pass %s/%s: batch workers=%s batch_size=%s symbols=%s",
-                pass_num, max_passes, workers, batch_size, len(retryable),
-            )
-            _run_yahoo_batch_rs_fetch(
-                target_symbols=retryable,
-                yahoo_batch_size=batch_size,
-                yahoo_batch_workers=workers,
-                request_timeout=request_timeout,
-                user_agent=user_agent,
-                storage=storage,
-                snapshot_date=snapshot_date,
-                min_price_rows=min_price_rows,
-                perf_map=perf_map,
-                issues_map=issues_map,
-                insufficient_bars=insufficient_bars,
-                save_price_history=save_price_history,
-                progress_callback=progress_callback,
-                sanity_settings=sanity_settings,
-            )
-
-        issue_counts = _issue_reason_counts(issues_map)
-        retryable_after = len(_retryable_symbols(issues_map, symbol_set=symbol_set))
-        recovered = max(0, retryable_before - retryable_after)
-        recovered_total += recovered
-        pass_records.append(
-            _adaptive_pass_record(
-                pass_num=pass_num,
-                workers=1 if mode == "single" else workers,
-                batch_size=1 if mode == "single" else batch_size,
-                mode=mode,
-                attempted=len(retryable),
-                computed_count=len(perf_map),
-                issue_counts=issue_counts,
-                recovered=recovered,
-            )
-        )
-        logger.info(
-            "RS adaptive pass %s recovered=%s no_bars=%s retryable=%s",
-            pass_num, recovered, issue_counts["no_bars"], retryable_after,
-        )
-
-        should_stop, reason = _adaptive_should_stop(
-            pass_num=pass_num,
-            max_passes=max_passes,
-            recovered=recovered,
-            stall_passes=stall_passes,
-            min_recovered=min_recovered,
-            at_final_tier=at_final_tier,
-            final_single_complete=final_single_complete or (not final_single and at_final_tier),
-            retryable_remaining=retryable_after,
-            stall_passes_to_stop=stall_limit,
-        )
-        if should_stop:
-            stop_reason = reason
-            break
-        if recovered == 0:
-            stall_passes += 1
-        else:
-            stall_passes = 0
-
-    converged = stop_reason in {"no_retryable", "min_recovered", "stall"}
-    logger.info(
-        "RS adaptive stop=%s passes=%s recovered_total=%s converged=%s",
-        stop_reason, len(pass_records), recovered_total, converged,
-    )
+    storage.save_stock_rs_new_snapshot(snapshot_date, all_scored)
     return {
-        "adaptive_passes": len(pass_records),
-        "adaptive_pass_details": pass_records,
-        "adaptive_recovered_total": recovered_total,
-        "adaptive_converged": converged,
-        "adaptive_stop_reason": stop_reason,
+        "new_stock_m_count": counts["M"],
+        "new_stock_q_count": counts["Q"],
+        "new_stock_h_count": counts["H"],
+        "new_stock_3q_count": counts["3Q"],
+        "new_stock_leaderboard_count": len(leaderboard),
+        "new_stock_rows": all_scored,
+        "new_watch_candidates": new_watch,
     }
 
 
-def _calc_performance(bars: list[dict[str, Any]]) -> dict[str, float] | None:
-    if len(bars) < PERF_INDEX_OFFSETS["year"] + 1:
-        return None
-    closes = [float(bar["close"]) for bar in bars]
-    last = closes[-1]
-    if last <= 0:
-        return None
-    result: dict[str, float] = {}
-    for tf, offset in PERF_INDEX_OFFSETS.items():
-        prev = closes[-1 - offset]
-        if prev <= 0:
-            return None
-        result[PERF_KEY_MAP[tf]] = (last / prev - 1.0) * 100.0
-    return result
+def backfill_new_stock_rs_for_snapshot(
+    storage: Storage,
+    snapshot_date: str,
+    config: dict[str, Any],
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    """对 perf 不全的股票用 Elite 已有周期做缩短版 RS，并合并观察名单。"""
+    rs_cfg = config.get("stock_rs", {})
+    cross_top_percent = float(rs_cfg.get("cross_top_percent", 0.1))
+    cross_top_percent = max(0.01, min(1.0, cross_top_percent))
+
+    if progress_callback:
+        progress_callback(0, 1)
+
+    from src.services.elite_data import fetch_elite_market_data, get_elite_market_cache
+
+    elite_market = get_elite_market_cache() or fetch_elite_market_data()
+    issues = storage.get_stock_rs_issues(snapshot_date)
+    elite_partial = _build_elite_partial_inputs(elite_market, issues)
+
+    if progress_callback:
+        progress_callback(1, 1)
+
+    scored_rows = storage.get_snapshot(snapshot_date)
+
+    class _Industry:
+        def __init__(self, d: dict[str, Any]):
+            self.key = d["industry_key"]
+            self.name = d["name"]
+            self.score = float(d.get("score") or 0)
+            self.rank_m = int(d.get("rank_m") or 9999)
+            self.rank_q = int(d.get("rank_q") or 9999)
+            self.excluded = bool(d.get("excluded"))
+
+    scored = [_Industry(r) for r in scored_rows if not r.get("excluded")]
+    new_stock_result = compute_and_store_new_stock_rs(
+        storage,
+        snapshot_date,
+        config,
+        cross_top_percent,
+        scored,
+        elite_partial=elite_partial,
+    )
+
+    main_rows = storage.get_stock_rs_raw(snapshot_date)
+    main_watch = _build_main_watchlist_from_rows(main_rows, storage, snapshot_date, scored, config)
+    watch_rows = _merge_watchlists(main_watch, new_stock_result["new_watch_candidates"])
+    _save_watchlist_and_enrich_catalysts(storage, snapshot_date, watch_rows)
+
+    prev_meta = storage.get_stock_rs_meta(snapshot_date) or {}
+    storage.save_stock_rs_meta(
+        snapshot_date,
+        {
+            "universe_count": int(prev_meta.get("universe_count", 0)),
+            "computed_count": int(prev_meta.get("computed_count", 0)),
+            "no_bars_count": int(prev_meta.get("no_bars_count", 0)),
+            "insufficient_history_count": int(prev_meta.get("insufficient_history_count", 0)),
+            "perf_invalid_count": int(prev_meta.get("perf_invalid_count", 0)),
+            "coverage_ratio": float(prev_meta.get("coverage_ratio", 0.0)),
+            "new_stock_m_count": new_stock_result["new_stock_m_count"],
+            "new_stock_q_count": new_stock_result["new_stock_q_count"],
+            "new_stock_h_count": new_stock_result["new_stock_h_count"],
+            "new_stock_3q_count": new_stock_result["new_stock_3q_count"],
+            "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
+            "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
+        },
+    )
+
+    return {
+        **new_stock_result,
+        "elite_partial_count": len(elite_partial),
+        "watchlist_count": len(watch_rows),
+    }
 
 
 def compute_and_store_stock_rs(
@@ -1581,43 +641,24 @@ def compute_and_store_stock_rs(
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     rs_cfg = config.get("stock_rs", {})
-    request_timeout = int(rs_cfg.get("request_timeout_seconds", 20))
-    min_price_rows = int(rs_cfg.get("min_price_rows", 260))
-    max_workers = int(rs_cfg.get("max_workers", 24))
-    max_workers = max(4, min(64, max_workers))
-    save_price_history = bool(rs_cfg.get("save_price_history", False))
     incremental_mode = bool(rs_cfg.get("incremental_mode", True)) and (not force_full)
     cross_top_percent = float(rs_cfg.get("cross_top_percent", 0.1))
     cross_top_percent = max(0.01, min(1.0, cross_top_percent))
     tier_a = float(rs_cfg.get("tier_a_score", 0.8))
     tier_b = float(rs_cfg.get("tier_b_score", 0.65))
-    prefer_stooq = bool(rs_cfg.get("prefer_stooq", False))
-    yahoo_batch_size = int(rs_cfg.get("yahoo_batch_size", 20))
-    yahoo_batch_size = max(5, min(50, yahoo_batch_size))
-    yahoo_batch_workers = int(rs_cfg.get("yahoo_batch_workers", 6))
-    yahoo_batch_workers = max(1, min(12, yahoo_batch_workers))
 
-    worker_errors: list[str] = []
-    adaptive_stats: dict[str, Any] = {}
-    rs_source = "yahoo"
-    elite_stats: dict[str, Any] = {}
-    insufficient_bars: dict[str, list[dict[str, Any]]] = {}
-    sanity_settings = _pipeline_sanity_settings(config)
-
-    elite_market = _fetch_elite_market_if_enabled(rs_cfg, prefer_stooq=prefer_stooq)
-    if elite_market:
-        logger.info(
-            "⚡ Elite universe: %d symbols — skipping Nasdaq FTP",
-            len(elite_market),
+    elite_market = _fetch_elite_market(rs_cfg)
+    if not elite_market:
+        raise RuntimeError(
+            "Elite 全市场 export 不可用。"
+            "请检查 FINVIZ_AUTH_KEY（Export API token）与限流状态。"
         )
-        universe = _universe_rows_from_elite(elite_market)
-        symbols = [row["symbol"] for row in universe]
-        symbol_set = set(symbols)
-        storage.upsert_stock_universe(universe, source="elite")
-    else:
-        universe = load_us_universe_with_cache(storage, config)
-        symbols = [row["symbol"] for row in universe]
-        symbol_set = set(symbols)
+
+    logger.info("⚡ Elite universe: %d symbols", len(elite_market))
+    universe = _universe_rows_from_elite(elite_market)
+    symbols = [row["symbol"] for row in universe]
+    symbol_set = set(symbols)
+    storage.upsert_stock_universe(universe, source="elite")
 
     existing_rows, existing_perf_map, existing_issues, target_symbols = _incremental_rs_targets(
         storage,
@@ -1629,113 +670,25 @@ def compute_and_store_stock_rs(
     perf_map = dict(existing_perf_map)
     issues_map = dict(existing_issues)
 
-    target_symbols, rs_source, elite_stats = _elite_rs_prefetch(
+    _target_remaining, rs_source, elite_stats = _elite_rs_prefetch(
         target_symbols,
         perf_map,
         issues_map,
         rs_cfg,
-        prefer_stooq=prefer_stooq,
         elite_market=elite_market,
-        skip_yahoo_fallback=bool(elite_market),
     )
 
-    user_agent = "Mozilla/5.0"
-    total_symbols = len(target_symbols)
-    processed = 0
+    elite_done = int(elite_stats.get("elite_applied", 0) or 0)
+    total_work = max(elite_done, len(target_symbols))
     if progress_callback:
-        progress_callback(0, total_symbols)
-
-    def _fetch_one_stooq(symbol: str) -> dict[str, Any]:
-        with requests.Session() as session:
-            session.headers.update({"User-Agent": user_agent})
-            bars = fetch_stooq_daily_bars(symbol, session, timeout=request_timeout)
-            source = "stooq"
-            if not bars:
-                bars = fetch_yahoo_daily_bars(symbol, session, timeout=request_timeout)
-                source = "yahoo"
-        return _symbol_payload_from_bars(
-            symbol,
-            bars,
-            min_price_rows=min_price_rows,
-            source=source,
-            sanity_settings=sanity_settings,
-        )
-
-    if target_symbols:
-        if prefer_stooq:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_map = {
-                    executor.submit(_fetch_one_stooq, symbol): symbol for symbol in target_symbols
-                }
-                for future in as_completed(future_map):
-                    symbol = future_map[future]
-                    try:
-                        payload = future.result()
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("stooq RS fetch failed for %s: %s", symbol, exc)
-                        if len(worker_errors) < 20:
-                            worker_errors.append(f"{symbol}: {exc}")
-                        payload = {"symbol": symbol, "status": "no_bars", "reason": "no_bars"}
-                    _apply_symbol_payload(
-                        payload,
-                        storage=storage,
-                        snapshot_date=snapshot_date,
-                        perf_map=perf_map,
-                        issues_map=issues_map,
-                        insufficient_bars=insufficient_bars,
-                        save_price_history=save_price_history,
-                    )
-                    processed += 1
-                    if progress_callback and (processed % 25 == 0 or processed == total_symbols):
-                        progress_callback(processed, total_symbols)
-        else:
-            adaptive_cfg = _resolve_adaptive_cfg(rs_cfg)
-            if adaptive_cfg["enabled"]:
-                adaptive_stats = _run_adaptive_yahoo_rs_fetch(
-                    target_symbols=target_symbols,
-                    symbol_set=symbol_set,
-                    adaptive_cfg=adaptive_cfg,
-                    request_timeout=request_timeout,
-                    user_agent=user_agent,
-                    storage=storage,
-                    snapshot_date=snapshot_date,
-                    min_price_rows=min_price_rows,
-                    perf_map=perf_map,
-                    issues_map=issues_map,
-                    insufficient_bars=insufficient_bars,
-                    save_price_history=save_price_history,
-                    progress_callback=progress_callback,
-                    worker_errors=worker_errors,
-                    sanity_settings=sanity_settings,
-                )
-            else:
-                _run_yahoo_batch_rs_fetch(
-                    target_symbols=target_symbols,
-                    yahoo_batch_size=yahoo_batch_size,
-                    yahoo_batch_workers=yahoo_batch_workers,
-                    request_timeout=request_timeout,
-                    user_agent=user_agent,
-                    storage=storage,
-                    snapshot_date=snapshot_date,
-                    min_price_rows=min_price_rows,
-                    perf_map=perf_map,
-                    issues_map=issues_map,
-                    insufficient_bars=insufficient_bars,
-                    save_price_history=save_price_history,
-                    progress_callback=progress_callback,
-                    sanity_settings=sanity_settings,
-                )
-    elif progress_callback:
-        elite_done = int(elite_stats.get("elite_applied", 0) or 0)
-        if rs_source == "elite" and elite_done > 0:
-            progress_callback(elite_done, elite_done)
-        else:
-            progress_callback(0, 0)
+        progress_callback(elite_done, total_work)
 
     rows = list(perf_map.values())
     coverage_ratio = (len(rows) / len(universe)) if universe else 0.0
     no_bars_count = sum(1 for r in issues_map.values() if r == "no_bars")
-    insufficient_history_count = sum(1 for r in issues_map.values() if r == "insufficient_history")
+    insufficient_history_count = sum(
+        1 for r in issues_map.values() if r == "insufficient_history"
+    )
     perf_invalid_count = sum(1 for r in issues_map.values() if r == "perf_invalid")
 
     if not rows:
@@ -1759,30 +712,30 @@ def compute_and_store_stock_rs(
                 "new_stock_watchlist_added": int(
                     prev_meta.get("new_stock_watchlist_added", 0) or 0
                 ),
-                "worker_errors": worker_errors,
                 "preserved_existing_rs": True,
             }
 
-        # 全量或无历史时，如果所有目标股票都 no_bars，视为上游行情源不可用，交给任务层报错重试
-        if target_symbols and no_bars_count >= len(target_symbols):
-            raise RuntimeError(
-                "RS 计算失败：行情源返回空数据（no_bars 全量命中）。"
-                "请检查网络/代理，或稍后重试。"
-            )
-
         storage.save_stock_rs_snapshot(snapshot_date, [])
         storage.save_stock_rs_issues(snapshot_date, issues_map)
+        elite_partial_inputs = _build_elite_partial_inputs(elite_market, issues_map)
         new_stock_result = compute_and_store_new_stock_rs(
             storage,
             snapshot_date,
-            insufficient_bars,
             config,
-            min_price_rows,
             cross_top_percent,
             scored_industries,
+            elite_partial=elite_partial_inputs,
         )
-        watch_rows = _merge_watchlists([], new_stock_result["new_watch_candidates"])
-        _save_watchlist_and_enrich_catalysts(storage, snapshot_date, watch_rows)
+        defer_watchlist = _should_defer_finviz_cross_watchlist(storage, snapshot_date, config)
+        if defer_watchlist:
+            watch_rows: list[dict[str, Any]] = []
+            logger.info(
+                "Deferring watchlist build until Elite industry picks are stored (%s)",
+                snapshot_date,
+            )
+        else:
+            watch_rows = _merge_watchlists([], new_stock_result["new_watch_candidates"])
+            _save_watchlist_and_enrich_catalysts(storage, snapshot_date, watch_rows)
         storage.save_stock_rs_meta(
             snapshot_date,
             _rs_meta_payload(
@@ -1796,8 +749,6 @@ def compute_and_store_stock_rs(
                     **new_stock_result,
                     "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
                 },
-                worker_errors=worker_errors,
-                adaptive_stats=adaptive_stats,
                 rs_source=rs_source,
                 elite_stats=elite_stats,
             ),
@@ -1815,41 +766,44 @@ def compute_and_store_stock_rs(
             "coverage_ratio": coverage_ratio,
             "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
             "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
-            "worker_errors": worker_errors,
-            **adaptive_stats,
         }
 
     _apply_market_rs_scores(rows, config, tier_a=tier_a, tier_b=tier_b)
-
     rows.sort(key=lambda x: (-x["rs_score"], x["rank_m"], x["symbol"]))
     storage.save_stock_rs_snapshot(snapshot_date, rows)
     storage.save_stock_rs_issues(snapshot_date, issues_map)
 
-    main_watch_candidates = _build_main_watchlist_from_rows(
-        rows,
-        storage,
-        snapshot_date,
-        scored_industries,
-        config,
-    )
+    defer_watchlist = _should_defer_finviz_cross_watchlist(storage, snapshot_date, config)
+    elite_partial_inputs = _build_elite_partial_inputs(elite_market, issues_map)
     new_stock_result = compute_and_store_new_stock_rs(
         storage,
         snapshot_date,
-        insufficient_bars,
         config,
-        min_price_rows,
         cross_top_percent,
         scored_industries,
+        elite_partial=elite_partial_inputs,
     )
-    from src.watchlist_build import use_rs_technical_watchlist
 
-    new_watch = (
-        []
-        if use_rs_technical_watchlist(config)
-        else new_stock_result["new_watch_candidates"]
-    )
-    watch_rows = _merge_watchlists(main_watch_candidates, new_watch)
-    _save_watchlist_and_enrich_catalysts(storage, snapshot_date, watch_rows)
+    if defer_watchlist:
+        watch_rows = []
+        logger.info(
+            "Deferring watchlist build until Elite industry picks are stored (%s)",
+            snapshot_date,
+        )
+    else:
+        main_watch_candidates = _build_main_watchlist_from_rows(
+            rows,
+            storage,
+            snapshot_date,
+            scored_industries,
+            config,
+        )
+        watch_rows = _merge_watchlists(
+            main_watch_candidates,
+            new_stock_result["new_watch_candidates"],
+        )
+        _save_watchlist_and_enrich_catalysts(storage, snapshot_date, watch_rows)
+
     storage.save_stock_rs_meta(
         snapshot_date,
         _rs_meta_payload(
@@ -1863,8 +817,6 @@ def compute_and_store_stock_rs(
                 **new_stock_result,
                 "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
             },
-            worker_errors=worker_errors,
-            adaptive_stats=adaptive_stats,
             rs_source=rs_source,
             elite_stats=elite_stats,
         ),
@@ -1883,9 +835,6 @@ def compute_and_store_stock_rs(
         "coverage_ratio": coverage_ratio,
         "new_stock_leaderboard_count": new_stock_result["new_stock_leaderboard_count"],
         "new_stock_watchlist_added": len(new_stock_result["new_watch_candidates"]),
-        "worker_errors": worker_errors,
-        "worker_error_count": len(worker_errors),
-        **adaptive_stats,
     }
 
 
@@ -1896,10 +845,6 @@ def rebuild_stock_watchlist_for_snapshot(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     """Rebuild cross watchlist from existing RS rows and latest industry stock picks."""
-    rs_cfg = config.get("stock_rs", {})
-    cross_top_percent = float(rs_cfg.get("cross_top_percent", 0.1))
-    cross_top_percent = max(0.01, min(1.0, cross_top_percent))
-
     rows = storage.get_stock_rs_raw(snapshot_date)
     if not rows:
         return {
@@ -1916,24 +861,19 @@ def rebuild_stock_watchlist_for_snapshot(
         scored_industries,
         config,
     )
-    from src.watchlist_build import use_rs_technical_watchlist
-
-    if use_rs_technical_watchlist(config):
-        new_watch: list[dict[str, Any]] = []
-    else:
-        top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
-        top_keys = {item.key for item in top_industries}
-        symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
-        leaderboard = storage.get_stock_rs_new(
-            snapshot_date,
-            leaderboard_only=True,
-            limit=5000,
-        )
-        new_watch_rows = [
-            {"symbol": row["symbol"], "rs_score": float(row["rs_score"])}
-            for row in leaderboard
-        ]
-        new_watch = _cross_watchlist_candidates(new_watch_rows, symbol_to_industries, 1.0)
+    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
+    top_keys = {item.key for item in top_industries}
+    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
+    leaderboard = storage.get_stock_rs_new(
+        snapshot_date,
+        leaderboard_only=True,
+        limit=5000,
+    )
+    new_watch_rows = [
+        {"symbol": row["symbol"], "rs_score": float(row["rs_score"])}
+        for row in leaderboard
+    ]
+    new_watch = _cross_watchlist_candidates(new_watch_rows, symbol_to_industries, 1.0)
 
     watch_rows = _merge_watchlists(main_watch, new_watch)
     _save_watchlist_and_enrich_catalysts(storage, snapshot_date, watch_rows)

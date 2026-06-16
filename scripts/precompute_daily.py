@@ -25,7 +25,7 @@ def main() -> int:
         "--skip-stocks",
         action="store_true",
         dest="skip_stocks",
-        help="跳过 Top 行业 Finviz 筛股（只跑行业+RS 等后续步骤）",
+        help="(deprecated) Elite picks always run after RS; flag is ignored",
     )
     parser.add_argument("--skip-breadth", action="store_true")
     parser.add_argument("--full-breadth", action="store_true")
@@ -60,7 +60,7 @@ def main() -> int:
         if args.skip_rs:
             opts.skip_rs = True
         if args.skip_stocks:
-            opts.skip_stocks = True
+            print("[precompute] note: --skip-screener is deprecated (Elite picks always run after RS)")
         if args.skip_breadth:
             opts.skip_breadth = True
         if args.full_breadth:

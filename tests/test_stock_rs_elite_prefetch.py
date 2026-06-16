@@ -22,16 +22,14 @@ def test_elite_prefetch_skips_yahoo_when_elite_universe() -> None:
     }
     perf_map: dict = {}
     issues_map: dict = {}
-    rs_cfg = {"rs_data_provider": "auto"}
+    rs_cfg = {"rs_data_provider": "elite"}
 
     remaining, rs_source, stats = _elite_rs_prefetch(
         ["AAPL", "DEAD"],
         perf_map,
         issues_map,
         rs_cfg,
-        prefer_stooq=False,
         elite_market=market,
-        skip_yahoo_fallback=True,
     )
 
     assert remaining == []

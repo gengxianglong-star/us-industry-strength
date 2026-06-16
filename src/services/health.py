@@ -6,8 +6,6 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-import requests
-
 from src.breadth_data import PRIMARY_MARKET_MONITOR_GID, _breadth_settings, _fetch_gid_rows_remote
 from src.logging_config import get_logger
 from src.storage import Storage
@@ -48,20 +46,29 @@ def check_proxy(config: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def check_finviz(config: dict[str, Any]) -> dict[str, Any]:
+def check_elite_export(config: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG001
+    """Probe Finviz Elite groups API (no free-site HTML scrape)."""
     started = time.perf_counter()
     try:
-        from src.finviz_scraper import fetch_industries_health_check
+        from src.services.elite_groups import fetch_elite_industry_rows
 
-        ok, detail = fetch_industries_health_check(config)
+        rows = fetch_elite_industry_rows()
+        ok = bool(rows) and len(rows) >= 100
+        detail = f"{len(rows)} industries" if rows else "Elite groups unavailable"
         return _result(
             ok,
             int((time.perf_counter() - started) * 1000),
-            detail=detail or None,
+            detail=detail,
+            industry_count=len(rows) if rows else 0,
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("health check failed: %s", exc)
         return _result(False, int((time.perf_counter() - started) * 1000), detail=str(exc))
+
+
+def check_finviz(config: dict[str, Any]) -> dict[str, Any]:
+    """Backward-compatible alias for Elite export health."""
+    return check_elite_export(config)
 
 
 def check_breadth_source(config: dict[str, Any]) -> dict[str, Any]:
@@ -85,12 +92,15 @@ def build_health_report(
         "proxy": check_proxy(config),
     }
     if not quick:
-        checks["finviz"] = check_finviz(config)
+        checks["elite_export"] = check_elite_export(config)
+        checks["finviz"] = checks["elite_export"]
         checks["breadth_source"] = check_breadth_source(config)
     if all(v.get("ok") for v in checks.values()):
         status = "ok"
     elif checks["db"].get("ok") and (
-        quick or checks.get("finviz", {}).get("ok") or checks.get("breadth_source", {}).get("ok")
+        quick
+        or checks.get("elite_export", {}).get("ok")
+        or checks.get("breadth_source", {}).get("ok")
     ):
         status = "degraded"
     else:

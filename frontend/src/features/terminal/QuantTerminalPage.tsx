@@ -124,8 +124,8 @@ function ThrustPanel({ rows, ratio10, ratio5 }: { rows: BreadthRow[]; ratio10: n
         </div>
       </div>
 
-      <div className="h-28 w-full">
-        <ResponsiveContainer width="100%" height="100%">
+      <div className="h-28 w-full shrink-0">
+        <ResponsiveContainer width="100%" height={112}>
           <LineChart data={series} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
             <CartesianGrid stroke="#1e293b" vertical={false} />
             <XAxis dataKey="i" hide />

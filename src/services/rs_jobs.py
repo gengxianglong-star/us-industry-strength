@@ -21,8 +21,56 @@ def _finalize_after_rs(
     snapshot_date: str,
     config: dict[str, Any],
     result: dict[str, Any],
+    *,
+    scored: list[Any] | None = None,
 ) -> None:
+    from src.scoring import ScoredIndustry
     from src.services.daily_jobs import finalize_snapshot_run
+    from src.stock_picks import apply_elite_picks_after_rs
+
+    industries = scored
+    if industries is None:
+        rows = storage.get_snapshot(snapshot_date) or []
+        industries = [
+            ScoredIndustry(
+                key=str(row["industry_key"]),
+                name=str(row.get("name") or row["industry_key"]),
+                stocks=int(row.get("stocks") or 0),
+                perf_w=float(row.get("perf_w") or 0),
+                perf_m=float(row.get("perf_m") or 0),
+                perf_q=float(row.get("perf_q") or 0),
+                perf_h=float(row.get("perf_h") or 0),
+                perf_y=float(row.get("perf_y") or 0),
+                rank_w=int(row.get("rank_w") or 9999),
+                rank_m=int(row.get("rank_m") or 9999),
+                rank_q=int(row.get("rank_q") or 9999),
+                rank_h=int(row.get("rank_h") or 9999),
+                rank_y=int(row.get("rank_y") or 9999),
+                score=float(row.get("score") or 0),
+                tier=str(row.get("tier") or ""),
+                tags=list(row.get("tags") or []),
+                excluded=bool(row.get("excluded")),
+                exclude_reason=row.get("exclude_reason"),
+                finviz_url=str(row.get("finviz_url") or ""),
+            )
+            for row in rows
+        ]
+
+    if industries:
+        elite_out = apply_elite_picks_after_rs(
+            storage,
+            snapshot_date,
+            industries,
+            config,
+        )
+        result["watchlist_count"] = elite_out.get(
+            "watchlist_count",
+            result.get("watchlist_count", 0),
+        )
+        result["elite_picks"] = {
+            "industry_count": len(elite_out.get("picks") or {}),
+            "stock_pick_count": elite_out.get("stock_pick_count", 0),
+        }
 
     finalize_snapshot_run(storage, config, snapshot_date, rs_result=result)
 
@@ -287,7 +335,10 @@ class RsJobService:
                 progress_callback=progress_cb,
             )
             if int(result.get("new_stock_leaderboard_count", 0) or 0) <= 0:
-                if int(result.get("insufficient_history_count", 0) or 0) > 0:
+                issues = storage.get_stock_rs_issues(snapshot_date)
+                from src.stock_rs import _elite_partial_candidate_symbols
+
+                if _elite_partial_candidate_symbols(issues):
                     backfill = backfill_new_stock_rs_for_snapshot(
                         storage,
                         snapshot_date,
@@ -295,7 +346,7 @@ class RsJobService:
                         progress_callback=progress_cb,
                     )
                     result = {**result, **backfill}
-            _finalize_after_rs(storage, snapshot_date, config, result)
+            _finalize_after_rs(storage, snapshot_date, config, result, scored=scored)
             return result
 
         return self._start_job(

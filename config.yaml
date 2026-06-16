@@ -19,32 +19,14 @@ stock_filters:
   price_above_sma200: ta_sma200_pa
   dollar_volume_min: sh_curvol_ousd100M
 stock_rs:
-  rs_data_provider: auto  # auto | elite | yahoo — auto tries Finviz Elite then Yahoo fallback
-  request_timeout_seconds: 20
-  max_workers: 24
-  min_price_rows: 260
-  save_price_history: false
+  rs_data_provider: elite
   incremental_mode: true
-  prefer_stooq: false
   tier_a_score: 0.8
   tier_b_score: 0.65
   cross_top_percent: 0.1
   watchlist_mode: finviz_cross
   watchlist_cap: 100
   min_avg_dollar_volume_30d_usd: 100000000
-  universe_cap: 0
-  universe_cache_hours: 24
-  yahoo_batch_size: 20
-  yahoo_batch_workers: 4
-  adaptive_fetch:
-    enabled: true
-    max_passes: 5
-    cooldown_seconds: 45
-    min_recovered_per_pass: 20
-    stall_passes_to_stop: 2
-    worker_schedule: [10, 6, 3, 1]
-    batch_size_schedule: [40, 20, 10, 5]
-    final_pass_single_symbol: true
   new_stock_enabled: true
 scraper:
   user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0
@@ -54,11 +36,6 @@ scraper:
   prefer_curl: true
   use_system_proxy: true
   stale_fallback_enabled: true
-  cookie_file: data/finviz_cookies.txt
-  use_playwright: true
-  playwright_channel: msedge
-  playwright_headless: true
-  playwright_profile: data/playwright_edge_profile
 breadth_confluence:
   min_score: 2
 breadth:
@@ -91,7 +68,7 @@ automation:
   auto_install_service: true
   daily:
     force_full_rs: false
-    skip_stocks: false
+    skip_stocks: true
     skip_breadth: false
     rs_async: true
 pipeline:

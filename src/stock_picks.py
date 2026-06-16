@@ -1,23 +1,12 @@
-"""Fetch and cache filtered stock picks for industries."""
+"""Elite industry stock picks and watchlist pairing."""
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from copy import deepcopy
-import threading
-import time
 from typing import Any
 
-from src.finviz_stock_screener import (
-    build_screener_filters,
-    build_screener_url,
-    fetch_industry_tickers,
-    open_playwright_session,
-    prepare_finviz_session,
-    use_playwright_scraper,
-)
 from src.logging_config import get_logger
 from src.scoring import ScoredIndustry, top_strong_sort_key
+from src.stock_filters import build_screener_filters
 from src.storage import Storage
 
 logger = get_logger(__name__)
@@ -47,47 +36,6 @@ def _build_elite_industry_index(
             if sym_u not in bucket:
                 bucket.append(sym_u)
     return by_industry
-
-
-def _lookup_elite_candidates(
-    item: ScoredIndustry,
-    by_industry: dict[str, list[str]],
-) -> list[str]:
-    lookup_keys = [
-        item.name.strip().lower(),
-        normalize_industry_label(item.name),
-    ]
-    seen: set[str] = set()
-    out: list[str] = []
-    for key in lookup_keys:
-        if not key:
-            continue
-        for sym in by_industry.get(key, []):
-            if sym in seen:
-                continue
-            seen.add(sym)
-            out.append(sym)
-    return out
-
-
-def _fetch_finviz_industry_candidates(
-    industry_key: str,
-    config: dict[str, Any],
-) -> list[str]:
-    try:
-        if use_playwright_scraper(config):
-            with open_playwright_session(config) as playwright_session:
-                payload = fetch_industry_tickers(
-                    industry_key,
-                    config,
-                    playwright_session=playwright_session,
-                )
-        else:
-            payload = fetch_industry_tickers(industry_key, config)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Finviz screener fallback failed for %s: %s", industry_key, exc)
-        return []
-    return [str(ticker).upper() for ticker in (payload.get("tickers") or []) if ticker]
 
 
 def _rank_industry_tickers(
@@ -135,13 +83,10 @@ def _resolve_qualified_industry_tickers(
     min_rs_score: float,
     min_daily_dv: float,
 ) -> tuple[list[str], str, list[str]]:
-    """Return (tickers, candidate_source, candidates) for one industry."""
-    candidate_source = "elite_name"
-    candidates = _lookup_elite_candidates(item, by_industry)
-    if not candidates:
-        candidates = _fetch_finviz_industry_candidates(item.key, config)
-        candidate_source = "finviz_screener"
+    from src.services.elite_data import fetch_elite_industry_tickers
 
+    candidate_source = "elite_screener_export"
+    candidates = fetch_elite_industry_tickers(item.key, config)
     tickers = _rank_industry_tickers(
         candidates,
         rs_map=rs_map,
@@ -149,20 +94,6 @@ def _resolve_qualified_industry_tickers(
         min_rs_score=min_rs_score,
         min_daily_dv=min_daily_dv,
     )
-
-    if not tickers and candidate_source == "elite_name":
-        finviz_candidates = _fetch_finviz_industry_candidates(item.key, config)
-        if finviz_candidates:
-            candidate_source = "finviz_screener"
-            candidates = finviz_candidates
-            tickers = _rank_industry_tickers(
-                candidates,
-                rs_map=rs_map,
-                market=market,
-                min_rs_score=min_rs_score,
-                min_daily_dv=min_daily_dv,
-            )
-
     return tickers, candidate_source, candidates
 
 
@@ -170,185 +101,62 @@ def _stale_fallback_enabled(config: dict[str, Any]) -> bool:
     return bool(config.get("scraper", {}).get("stale_fallback_enabled", True))
 
 
-def _save_pick_failure_with_stale_fallback(
-    storage: Storage,
-    snapshot_date: str,
-    industry_key: str,
-    config: dict[str, Any],
-    exc: Exception,
-) -> dict[str, Any]:
-    filters = build_screener_filters(industry_key, config)
-    screener_url = build_screener_url(industry_key, config, 1)
-    err_text = str(exc)
-
-    stale_row: dict[str, Any] | None = None
-    stale_from: str | None = None
-    if _stale_fallback_enabled(config):
-        current = storage.get_industry_stock_picks(snapshot_date, industry_key)
-        if current and current.get("tickers") and not str(current.get("error") or "").strip():
-            stale_row = current
-            stale_from = snapshot_date
-        else:
-            stale_row = storage.get_latest_successful_industry_stock_picks(
-                industry_key,
-                before_snapshot_date=snapshot_date,
-            )
-            if stale_row:
-                stale_from = str(stale_row.get("snapshot_date") or "")
-
-    if stale_row and stale_row.get("tickers"):
-        error = f"沿用缓存({stale_from}): {err_text}"
-        tickers = list(stale_row["tickers"])
-        storage.save_industry_stock_picks(
-            snapshot_date,
-            industry_key,
-            tickers,
-            str(stale_row.get("screener_url") or screener_url),
-            str(stale_row.get("filters") or filters),
-            error=error,
-        )
-        return {
-            "industry_key": industry_key,
-            "tickers": tickers,
-            "ticker_count": len(tickers),
-            "error": error,
-            "screener_url": str(stale_row.get("screener_url") or screener_url),
-            "filters": str(stale_row.get("filters") or filters),
-            "stale_fallback": True,
-            "stale_from_snapshot_date": stale_from,
-        }
-
-    storage.save_industry_stock_picks(
-        snapshot_date,
-        industry_key,
-        [],
-        screener_url,
-        filters,
-        error=err_text,
-    )
-    return {
-        "industry_key": industry_key,
-        "tickers": [],
-        "error": err_text,
-        "screener_url": screener_url,
-        "filters": filters,
-        "stale_fallback": False,
-    }
-
-
-def fetch_and_store_stock_picks(
+def fetch_and_store_elite_stock_picks(
     storage: Storage,
     snapshot_date: str,
     industry_keys: list[str],
     config: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    results: dict[str, dict[str, Any]] = {}
+    """Manual/UI refresh via Elite per-industry export."""
     if not industry_keys:
-        return results
+        return {}
 
-    scraper_cfg = config.get("scraper", {})
-    playwright_mode = use_playwright_scraper(config)
-    max_workers = 1 if playwright_mode else int(scraper_cfg.get("stock_pick_workers", 3))
-    max_workers = max(1, min(6, max_workers))
+    rows = storage.get_snapshot(snapshot_date) or []
+    scored_by_key = {
+        str(row["industry_key"]): ScoredIndustry(
+            key=str(row["industry_key"]),
+            name=str(row.get("name") or row["industry_key"]),
+            stocks=int(row.get("stocks") or 0),
+            perf_w=float(row.get("perf_w") or 0),
+            perf_m=float(row.get("perf_m") or 0),
+            perf_q=float(row.get("perf_q") or 0),
+            perf_h=float(row.get("perf_h") or 0),
+            perf_y=float(row.get("perf_y") or 0),
+            rank_w=int(row.get("rank_w") or 9999),
+            rank_m=int(row.get("rank_m") or 9999),
+            rank_q=int(row.get("rank_q") or 9999),
+            rank_h=int(row.get("rank_h") or 9999),
+            rank_y=int(row.get("rank_y") or 9999),
+            score=float(row.get("score") or 0),
+            tier=str(row.get("tier") or ""),
+            tags=list(row.get("tags") or []),
+            excluded=bool(row.get("excluded")),
+            exclude_reason=row.get("exclude_reason"),
+            finviz_url=str(row.get("finviz_url") or ""),
+        )
+        for row in rows
+    }
 
-    shared_session, session_lock = (None, threading.Lock())
-    if not playwright_mode:
-        shared_session, session_lock = prepare_finviz_session(config)
+    subset = [scored_by_key[key] for key in industry_keys if key in scored_by_key]
+    if not subset:
+        return {}
 
-    def _fetch_one(
-        key: str,
-        cfg: dict[str, Any],
-        *,
-        playwright_session=None,
-    ) -> tuple[str, dict[str, Any]]:
-        try:
-            payload = fetch_industry_tickers(
-                key,
-                cfg,
-                session=shared_session,
-                session_lock=session_lock,
-                skip_warmup=True,
-                playwright_session=playwright_session,
-            )
-            storage.save_industry_stock_picks(
-                snapshot_date,
-                key,
-                payload["tickers"],
-                payload["screener_url"],
-                payload["filters"],
-            )
-            return key, payload
-        except Exception as exc:  # noqa: BLE001 - persist error for UI
-            logger.warning("stock pick failed for %s: %s", key, exc)
-            payload = _save_pick_failure_with_stale_fallback(
-                storage,
-                snapshot_date,
-                key,
-                cfg,
-                exc,
-            )
-            return key, payload
-
-    def _run_http_workers() -> None:
-        nonlocal shared_session, session_lock
-        if shared_session is None:
-            shared_session, session_lock = prepare_finviz_session(config)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(_fetch_one, key, config) for key in industry_keys]
-            for future in as_completed(futures):
-                key, payload = future.result()
-                results[key] = payload
-
-    used_playwright = False
-    try:
-        if playwright_mode:
-            try:
-                with open_playwright_session(config) as playwright_session:
-                    for key in industry_keys:
-                        key, payload = _fetch_one(
-                            key, config, playwright_session=playwright_session
-                        )
-                        results[key] = payload
-                        time.sleep(float(scraper_cfg.get("request_delay_seconds", 1.5)))
-                used_playwright = True
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Playwright unavailable (%s); falling back to curl/cookie HTTP",
-                    exc,
-                )
-                _run_http_workers()
-        else:
-            _run_http_workers()
-    finally:
-        if shared_session is not None:
-            shared_session.close()
-
-    # 动态限速回补：若出现 Cloudflare/连接类错误，则降并发+增延时重试失败行业。
-    if used_playwright:
-        return results
-
-    retry_keys: list[str] = []
-    for key, payload in results.items():
-        err = str(payload.get("error") or "").lower()
-        if not err:
-            continue
-        if "cloudflare" in err or "timed out" in err or "ssl" in err or "connection" in err:
-            retry_keys.append(key)
-    if retry_keys:
-        retry_cfg = deepcopy(config)
-        scraper_cfg = retry_cfg.setdefault("scraper", {})
-        scraper_cfg["stock_pick_workers"] = 1
-        old_delay = float(scraper_cfg.get("request_delay_seconds", 1.5))
-        scraper_cfg["request_delay_seconds"] = min(6.0, max(2.0, old_delay * 1.8))
-        # 轻微错峰，降低连续请求触发风控的概率
-        time.sleep(1.0)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            futures = [executor.submit(_fetch_one, key, retry_cfg) for key in retry_keys]
-            for future in as_completed(futures):
-                key, payload = future.result()
-                results[key] = payload
-
-    return results
+    batch = build_and_store_elite_industry_picks(
+        storage,
+        snapshot_date,
+        subset,
+        config,
+    )
+    return {
+        key: {
+            "tickers": payload.get("tickers") or [],
+            "screener_url": payload.get("screener_url"),
+            "filters": payload.get("filters"),
+            "elite_source": True,
+            "candidate_source": payload.get("candidate_source", "elite_screener_export"),
+        }
+        for key, payload in batch.items()
+    }
 
 
 def build_and_store_elite_industry_picks(
@@ -360,9 +168,14 @@ def build_and_store_elite_industry_picks(
     elite_market: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Build Top-N industries that each have RS-qualified picks; scan lower ranks to backfill slots."""
-    from src.services.elite_data import fetch_elite_market_data
+    from src.services.elite_data import (
+        build_elite_industry_screener_url,
+        elite_auth_key,
+        fetch_elite_market_data,
+        get_elite_market_cache,
+    )
 
-    market = elite_market or fetch_elite_market_data()
+    market = elite_market or get_elite_market_cache() or fetch_elite_market_data()
     if not market:
         return {}
 
@@ -376,6 +189,7 @@ def build_and_store_elite_industry_picks(
         str(row["symbol"]).upper(): row for row in storage.get_stock_rs_raw(snapshot_date)
     }
     by_industry = _build_elite_industry_index(market)
+    auth_key = elite_auth_key() or ""
 
     active = [item for item in scored if not item.excluded]
     active.sort(key=lambda item: top_strong_sort_key(item.score, item.rank_m, item.rank_q, item.key))
@@ -398,6 +212,13 @@ def build_and_store_elite_industry_picks(
             min_daily_dv=min_daily_dv,
         )
 
+        filters = build_screener_filters(item.key, config)
+        screener_url = (
+            build_elite_industry_screener_url(item.key, config, auth_key)
+            if auth_key
+            else f"elite://export/industry/{item.key}"
+        )
+
         if not tickers:
             skipped_empty += 1
             logger.info(
@@ -405,18 +226,24 @@ def build_and_store_elite_industry_picks(
                 item.name,
                 min_rs_score,
             )
-            continue
+            if _stale_fallback_enabled(config):
+                stale = storage.get_latest_successful_industry_stock_picks(
+                    item.key,
+                    before_snapshot_date=snapshot_date,
+                )
+                if stale and stale.get("tickers"):
+                    tickers = list(stale["tickers"])
+                    screener_url = str(stale.get("screener_url") or screener_url)
+                    filters = str(stale.get("filters") or filters)
+                    logger.info(
+                        "Elite picks: stale fallback for %s (%d tickers from %s)",
+                        item.name,
+                        len(tickers),
+                        stale.get("snapshot_date"),
+                    )
+            if not tickers:
+                continue
 
-        filters = (
-            "elite_industry_match,minervini,liquidity,rs_top"
-            if candidate_source == "elite_name"
-            else "finviz_screener,minervini,liquidity,rs_top"
-        )
-        screener_url = (
-            "elite://export/local"
-            if candidate_source == "elite_name"
-            else build_screener_url(item.key, config, 1)
-        )
         storage.save_industry_stock_picks(
             snapshot_date,
             item.key,
@@ -429,6 +256,7 @@ def build_and_store_elite_industry_picks(
             "screener_url": screener_url,
             "filters": filters,
             "elite_source": True,
+            "candidate_source": candidate_source,
         }
         filled += 1
 
@@ -441,34 +269,40 @@ def build_and_store_elite_industry_picks(
     return results
 
 
-def fetch_top_industry_stock_picks(
+def apply_elite_picks_after_rs(
     storage: Storage,
     snapshot_date: str,
     scored: list[ScoredIndustry],
     config: dict[str, Any],
-) -> dict[str, dict[str, Any]]:
-    """Fetch screener hits until Top N industries each have tickers, scanning lower ranks as needed."""
-    top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
-    active = [s for s in scored if not s.excluded]
-    active.sort(key=lambda x: top_strong_sort_key(x.score, x.rank_m, x.rank_q, x.key))
-    if not active:
-        return {}
+    *,
+    elite_market: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Run Elite per-industry export picks, rebuild watchlist, enrich catalysts."""
+    from src.scoring import filter_top_strong
+    from src.stock_rs import enrich_catalysts_for_snapshot, rebuild_stock_watchlist_for_snapshot
 
-    all_results: dict[str, dict[str, Any]] = {}
-    filled_keys: list[str] = []
-
-    for item in active:
-        if len(filled_keys) >= top_n:
-            break
-        batch_result = fetch_and_store_stock_picks(
-            storage,
-            snapshot_date,
-            [item.key],
-            config,
-        )
-        all_results.update(batch_result)
-        tickers = (batch_result.get(item.key) or {}).get("tickers") or []
-        if tickers:
-            filled_keys.append(item.key)
-
-    return all_results
+    picks = build_and_store_elite_industry_picks(
+        storage,
+        snapshot_date,
+        scored,
+        config,
+        elite_market=elite_market,
+    )
+    top = filter_top_strong(scored, config, stock_picks=picks)
+    rebuild = rebuild_stock_watchlist_for_snapshot(storage, snapshot_date, scored, config)
+    catalyst: dict[str, Any] = {}
+    if int(rebuild.get("watchlist_count", 0) or 0) > 0:
+        catalyst = enrich_catalysts_for_snapshot(storage, snapshot_date, config)
+    return {
+        "picks": picks,
+        "top_count": len(top),
+        "stock_pick_count": sum(len(v.get("tickers") or []) for v in picks.values()),
+        "stock_pick_errors": max(0, len(top) - len(picks)),
+        "picks_summary": {
+            "total": len(picks),
+            "stale": 0,
+            "with_tickers": sum(1 for payload in picks.values() if payload.get("tickers")),
+        },
+        "watchlist_count": rebuild.get("watchlist_count", 0),
+        "catalyst": catalyst,
+    }

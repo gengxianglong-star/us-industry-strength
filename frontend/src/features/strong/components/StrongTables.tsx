@@ -264,7 +264,7 @@ export function WatchlistChartGrid({
               className="block flex-1 min-h-[200px] h-[200px]"
               title="Open Finviz quote"
             >
-              <WatchlistFinvizChart symbol={row.symbol} bars={row.chart_bars} />
+              <WatchlistFinvizChart symbol={row.symbol} />
             </a>
           </article>
         );

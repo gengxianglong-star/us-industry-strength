@@ -62,6 +62,7 @@ export type SnapshotPayload = {
   industries: IndustryRow[];
   rs_meta?: RsMeta;
   rs_count?: number;
+  rs_watchlist_count?: number;
   watchlist_preview?: WatchlistRow[];
 };
 
@@ -96,6 +97,7 @@ export type RsPayload = {
   snapshot_date: string;
   rows: Array<Record<string, unknown>>;
   watchlist: WatchlistRow[];
+  watchlist_total?: number;
   new_stock_leaderboard: Array<Record<string, unknown>>;
   rs_meta?: RsMeta;
 };
@@ -205,21 +207,15 @@ export function rankHeat(rank: number) {
   return "rank-cell";
 }
 
+/** Finviz dark candlestick thumbnail (same as legacy dashboard). */
 export function finvizDailyChartUrl(symbol: string) {
-  const q = new URLSearchParams({
-    w: "520",
-    h: "240",
-    bw: "3",
-    bm: "1",
-    bb: "1",
-    t: symbol,
-    tf: "d",
-    s: "linear",
-    pm: "0",
-    am: "0",
-    ct: "candle_stick",
-  });
-  return `https://charts2-node.finviz.com/chart?${q}&o[0][ot]=sma&o[0][op]=20&o[0][oc]=DC32B363&o[1][ot]=sma&o[1][op]=50&o[1][oc]=FF8F33C6&o[2][ot]=sma&o[2][op]=200&o[2][oc]=DCB3326D`;
+  const t = encodeURIComponent(symbol.trim().toUpperCase());
+  return `https://charts2.finviz.com/chart.ashx?t=${t}&ty=c&ta=1&p=d&s=l&theme=dark`;
+}
+
+/** Local server proxy — avoids hotlink blocks from localhost. */
+export function finvizChartProxyUrl(symbol: string) {
+  return `/api/chart/finviz/${encodeURIComponent(symbol.trim().toUpperCase())}`;
 }
 
 export function finvizQuoteUrl(symbol: string) {

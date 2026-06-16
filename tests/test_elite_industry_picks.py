@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from src.scoring import ScoredIndustry
 from src.stock_picks import build_and_store_elite_industry_picks
 from src.storage import Storage
@@ -91,13 +93,17 @@ def test_build_and_store_elite_industry_picks(tmp_path) -> None:
         "stock_rs": {"cross_top_percent": 0.1, "min_avg_dollar_volume_30d_usd": 100_000_000},
     }
 
-    picks = build_and_store_elite_industry_picks(
-        storage,
-        snapshot_date,
-        scored,
-        config,
-        elite_market=market,
-    )
+    with patch(
+        "src.services.elite_data.fetch_elite_industry_tickers",
+        return_value=["NVDA", "AMD"],
+    ):
+        picks = build_and_store_elite_industry_picks(
+            storage,
+            snapshot_date,
+            scored,
+            config,
+            elite_market=market,
+        )
 
     assert "semiconductors" in picks
     assert picks["semiconductors"]["tickers"] == ["NVDA"]
