@@ -41,7 +41,12 @@ class StockRsConfig(BaseModel):
     cross_top_percent: float = Field(default=0.1, ge=0.01, le=1.0)
     watchlist_mode: str = Field(default="finviz_cross")
     watchlist_cap: int = Field(default=100, ge=1, le=500)
-    min_avg_dollar_volume_30d_usd: int = Field(default=100_000_000, ge=1)
+    min_daily_dollar_volume_usd: int = Field(default=100_000_000, ge=1)
+    min_avg_dollar_volume_30d_usd: int | None = Field(
+        default=None,
+        ge=1,
+        description="Deprecated alias for min_daily_dollar_volume_usd",
+    )
     new_stock_enabled: bool = True
     max_job_runtime_seconds: int = Field(default=7200, ge=60, le=86400)
     new_stock_job_runtime_seconds: int = Field(default=3600, ge=60, le=86400)
@@ -55,6 +60,7 @@ class StockRsConfigUpdate(BaseModel):
     tier_a_score: float | None = Field(default=None, ge=0, le=1)
     tier_b_score: float | None = Field(default=None, ge=0, le=1)
     cross_top_percent: float | None = Field(default=None, ge=0.01, le=1.0)
+    min_daily_dollar_volume_usd: int | None = Field(default=None, ge=1)
     new_stock_enabled: bool | None = None
     max_job_runtime_seconds: int | None = Field(default=None, ge=60, le=86400)
     new_stock_job_runtime_seconds: int | None = Field(default=None, ge=60, le=86400)

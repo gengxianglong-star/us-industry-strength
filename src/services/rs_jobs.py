@@ -24,37 +24,14 @@ def _finalize_after_rs(
     *,
     scored: list[Any] | None = None,
 ) -> None:
-    from src.scoring import ScoredIndustry
+    from src.scoring import scored_industries_from_storage_rows
     from src.services.daily_jobs import finalize_snapshot_run
     from src.stock_picks import apply_elite_picks_after_rs
 
     industries = scored
     if industries is None:
         rows = storage.get_snapshot(snapshot_date) or []
-        industries = [
-            ScoredIndustry(
-                key=str(row["industry_key"]),
-                name=str(row.get("name") or row["industry_key"]),
-                stocks=int(row.get("stocks") or 0),
-                perf_w=float(row.get("perf_w") or 0),
-                perf_m=float(row.get("perf_m") or 0),
-                perf_q=float(row.get("perf_q") or 0),
-                perf_h=float(row.get("perf_h") or 0),
-                perf_y=float(row.get("perf_y") or 0),
-                rank_w=int(row.get("rank_w") or 9999),
-                rank_m=int(row.get("rank_m") or 9999),
-                rank_q=int(row.get("rank_q") or 9999),
-                rank_h=int(row.get("rank_h") or 9999),
-                rank_y=int(row.get("rank_y") or 9999),
-                score=float(row.get("score") or 0),
-                tier=str(row.get("tier") or ""),
-                tags=list(row.get("tags") or []),
-                excluded=bool(row.get("excluded")),
-                exclude_reason=row.get("exclude_reason"),
-                finviz_url=str(row.get("finviz_url") or ""),
-            )
-            for row in rows
-        ]
+        industries = scored_industries_from_storage_rows(rows)
 
     if industries:
         elite_out = apply_elite_picks_after_rs(

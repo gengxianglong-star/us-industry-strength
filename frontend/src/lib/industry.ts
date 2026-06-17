@@ -49,6 +49,7 @@ export type RsMeta = {
   new_stock_3q_count?: number;
   new_stock_leaderboard_count?: number;
   new_stock_watchlist_added?: number;
+  elite_skipped_no_perf?: number;
   worker_error_count?: number;
   adaptive_passes?: number;
   adaptive_recovered_total?: number;

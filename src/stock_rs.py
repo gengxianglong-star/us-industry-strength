@@ -7,7 +7,7 @@ from typing import Any, Callable
 from src.config_loader import TIMEFRAMES, load_config
 from src.logging_config import get_logger
 from src.math_utils import percentile_rank, rank_dict_by_key, weighted_momentum_composite
-from src.scoring import ScoredIndustry, filter_top_strong
+from src.scoring import ScoredIndustry, filter_top_strong, scored_industries_from_storage_rows
 from src.storage import Storage
 
 logger = get_logger(__name__)
@@ -250,6 +250,96 @@ def _build_main_watchlist_from_rows(
     return _cross_watchlist_candidates(ranked_rows, symbol_to_industries, cross_top_percent)
 
 
+def _top_industry_keys(
+    scored_industries: list[ScoredIndustry],
+    config: dict[str, Any],
+) -> set[str]:
+    """Top-N strong industries by score (for new-stock industry match; no pick required)."""
+    from src.scoring import top_strong_sort_key
+
+    top_n = int(config.get("thresholds", {}).get("top_list_count", 10))
+    active = [item for item in scored_industries if not item.excluded]
+    active.sort(key=lambda item: top_strong_sort_key(item.score, item.rank_m, item.rank_q, item.key))
+    return {item.key for item in active[:top_n]}
+
+
+def _industry_keys_for_elite_label(
+    raw_industry: str,
+    scored_industries: list[ScoredIndustry],
+    top_keys: set[str],
+    *,
+    industry_names: dict[str, str] | None = None,
+) -> list[str]:
+    from src.stock_picks import normalize_industry_label
+
+    label = str(raw_industry or "").strip()
+    if not label:
+        return []
+    norm = normalize_industry_label(label)
+    low = label.lower()
+    names = industry_names or {}
+    hits: list[str] = []
+    for item in scored_industries:
+        if item.key not in top_keys:
+            continue
+        name = str(getattr(item, "name", None) or names.get(item.key) or item.key)
+        if normalize_industry_label(name) == norm or name.lower() == low:
+            hits.append(item.key)
+    return hits
+
+
+def _build_new_stock_watchlist_candidates(
+    leaderboard: list[dict[str, Any]],
+    *,
+    market: dict[str, dict[str, Any]],
+    scored_industries: list[ScoredIndustry],
+    config: dict[str, Any],
+    industry_names: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Leaderboard ∩ Top industries (Elite industry field) ∩ relaxed new-stock screener."""
+    from src.config_loader import stock_rs_min_daily_dollar_volume
+    from src.services.elite_data import elite_row_for_symbol, passes_new_stock_screener_filters
+
+    if not market or not leaderboard:
+        return []
+
+    rs_cfg = config.get("stock_rs", {})
+    min_dv = float(rs_cfg.get("new_stock_screener_min_daily_dollar_volume_usd", 100_000_000))
+    if min_dv <= 0:
+        min_dv = stock_rs_min_daily_dollar_volume(rs_cfg)
+
+    top_keys = _top_industry_keys(scored_industries, config)
+    out: list[dict[str, Any]] = []
+    for row in leaderboard:
+        sym = str(row.get("symbol") or "").upper()
+        elite_row = elite_row_for_symbol(market, sym)
+        if not elite_row:
+            continue
+        if not passes_new_stock_screener_filters(elite_row, min_daily_dollar_volume=min_dv):
+            continue
+        industries = _industry_keys_for_elite_label(
+            str(elite_row.get("industry") or ""),
+            scored_industries,
+            top_keys,
+            industry_names=industry_names,
+        )
+        if not industries:
+            continue
+        out.append(
+            {
+                "symbol": sym,
+                "rs_score": float(row.get("rs_score", 0) or 0),
+                "industries": sorted(industries),
+            }
+        )
+    logger.info(
+        "New-stock watchlist gate: %d/%d leaderboard symbols passed relaxed screener + Top industry",
+        len(out),
+        len(leaderboard),
+    )
+    return out
+
+
 def _industry_pick_map(
     storage: Storage,
     snapshot_date: str,
@@ -423,7 +513,7 @@ def _elite_rs_prefetch(
     stats: dict[str, Any] = {
         "elite_applied": 0,
         "elite_missing": 0,
-        "elite_skipped_yahoo": 0,
+        "elite_skipped_no_perf": 0,
     }
     from src.services.elite_data import build_perf_map_from_elite, fetch_elite_market_data
 
@@ -439,13 +529,13 @@ def _elite_rs_prefetch(
     stats["elite_missing"] = len(missing)
     for sym in missing:
         issues_map[sym] = "elite_no_perf"
-    stats["elite_skipped_yahoo"] = len(missing)
+    stats["elite_skipped_no_perf"] = len(missing)
     rs_source = "elite" if elite_perf else "elite"
     if elite_perf:
         logger.info(
             "⚡ Elite RS: %d ranked; %d skipped (no perf / illiquid)",
             stats["elite_applied"],
-            stats["elite_skipped_yahoo"],
+            stats["elite_skipped_no_perf"],
         )
     return [], rs_source, stats
 
@@ -483,7 +573,7 @@ def _rs_meta_payload(
         "rs_source": rs_source,
         "elite_applied": int((elite_stats or {}).get("elite_applied", 0) or 0),
         "elite_missing": int((elite_stats or {}).get("elite_missing", 0) or 0),
-        "elite_skipped_yahoo": int((elite_stats or {}).get("elite_skipped_yahoo", 0) or 0),
+        "elite_skipped_no_perf": int((elite_stats or {}).get("elite_skipped_no_perf", 0) or 0),
     }
 
 
@@ -495,7 +585,19 @@ def compute_and_store_new_stock_rs(
     scored_industries: list[ScoredIndustry],
     *,
     elite_partial: dict[str, tuple[str, dict[str, float]]] | None = None,
+    elite_market: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """
+    New-stock RS: per cohort M/Q/H/3Q, rank full Elite universe with cohort perf,
+    take market top cross_top_percent, then keep 新股 (partial perf) in that slice.
+    """
+    from src.services.elite_data import (
+        build_all_elite_partial_perf_inputs,
+        build_cohort_universe_rows,
+        fetch_elite_market_data,
+        get_elite_market_cache,
+    )
+
     rs_cfg = config.get("stock_rs", {})
     tier_a = float(rs_cfg.get("tier_a_score", 0.8))
     tier_b = float(rs_cfg.get("tier_b_score", 0.65))
@@ -510,8 +612,11 @@ def compute_and_store_new_stock_rs(
             "new_watch_candidates": [],
         }
 
+    market = elite_market or get_elite_market_cache() or fetch_elite_market_data()
+    partial = elite_partial or (build_all_elite_partial_perf_inputs(market) if market else {})
+
     cohort_rows: dict[str, list[dict[str, Any]]] = {k: [] for k in NEW_STOCK_COHORTS}
-    for symbol, (cohort, perf) in (elite_partial or {}).items():
+    for symbol, (cohort, perf) in partial.items():
         row = {
             "symbol": symbol.upper(),
             "cohort": cohort,
@@ -523,28 +628,67 @@ def compute_and_store_new_stock_rs(
         cohort_rows[cohort].append(row)
 
     counts = {c: len(cohort_rows[c]) for c in NEW_STOCK_COHORTS}
-    all_scored: list[dict[str, Any]] = []
     leaderboard: list[dict[str, Any]] = []
 
-    for cohort, rows in cohort_rows.items():
-        if not rows:
-            continue
-        _score_new_stock_rows(rows, cohort, config, tier_a, tier_b)
-        rows.sort(key=lambda x: (-x["rs_score"], x["symbol"]))
-        cutoff = max(1, int(len(rows) * cross_top_percent))
-        for row in rows:
-            row["in_leaderboard"] = False
-        for row in rows[:cutoff]:
-            row["in_leaderboard"] = True
-            leaderboard.append(row)
-        all_scored.extend(rows)
+    if market:
+        for cohort, rows in cohort_rows.items():
+            if not rows:
+                continue
+            universe = build_cohort_universe_rows(market, cohort)
+            if not universe:
+                continue
+            _score_new_stock_rows(universe, cohort, config, tier_a, tier_b)
+            universe.sort(key=lambda x: (-x["rs_score"], x["symbol"]))
+            cutoff = max(1, int(len(universe) * cross_top_percent))
+            top_symbols = {r["symbol"] for r in universe[:cutoff]}
+            score_by_symbol = {r["symbol"]: r for r in universe}
+            lb_count = 0
+            for row in rows:
+                scored = score_by_symbol.get(row["symbol"])
+                if scored:
+                    for key, val in scored.items():
+                        if key.startswith("rank_") or key in {"rs_score", "tier"}:
+                            row[key] = val
+                row["in_leaderboard"] = row["symbol"] in top_symbols
+                if row["in_leaderboard"]:
+                    leaderboard.append(row)
+                    lb_count += 1
+            logger.info(
+                "New-stock cohort %s: universe=%d top_slice=%d new_pool=%d leaderboard=%d",
+                cohort,
+                len(universe),
+                cutoff,
+                len(rows),
+                lb_count,
+            )
+    else:
+        logger.warning("Elite market unavailable — new-stock leaderboard empty for %s", snapshot_date)
 
-    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
-    top_keys = {item.key for item in top_industries}
-    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
-    new_watch = _cross_watchlist_candidates(leaderboard, symbol_to_industries, cross_top_percent)
+    all_scored: list[dict[str, Any]] = []
+    for cohort in NEW_STOCK_COHORTS:
+        all_scored.extend(cohort_rows[cohort])
+
+    new_watch = _build_new_stock_watchlist_candidates(
+        leaderboard,
+        market=market or {},
+        scored_industries=scored_industries,
+        config=config,
+    )
 
     storage.save_stock_rs_new_snapshot(snapshot_date, all_scored)
+    prev_meta = storage.get_stock_rs_meta(snapshot_date) or {}
+    storage.save_stock_rs_meta(
+        snapshot_date,
+        {
+            **prev_meta,
+            "new_stock_m_count": counts["M"],
+            "new_stock_q_count": counts["Q"],
+            "new_stock_h_count": counts["H"],
+            "new_stock_3q_count": counts["3Q"],
+            "new_stock_leaderboard_count": len(leaderboard),
+            "new_stock_watchlist_added": len(new_watch),
+        },
+    )
     return {
         "new_stock_m_count": counts["M"],
         "new_stock_q_count": counts["Q"],
@@ -570,34 +714,30 @@ def backfill_new_stock_rs_for_snapshot(
     if progress_callback:
         progress_callback(0, 1)
 
-    from src.services.elite_data import fetch_elite_market_data, get_elite_market_cache
+    from src.services.elite_data import (
+        build_all_elite_partial_perf_inputs,
+        fetch_elite_market_data,
+        get_elite_market_cache,
+    )
 
     elite_market = get_elite_market_cache() or fetch_elite_market_data()
-    issues = storage.get_stock_rs_issues(snapshot_date)
-    elite_partial = _build_elite_partial_inputs(elite_market, issues)
+    partial = build_all_elite_partial_perf_inputs(elite_market) if elite_market else _build_elite_partial_inputs(
+        elite_market, storage.get_stock_rs_issues(snapshot_date)
+    )
 
     if progress_callback:
         progress_callback(1, 1)
 
     scored_rows = storage.get_snapshot(snapshot_date)
-
-    class _Industry:
-        def __init__(self, d: dict[str, Any]):
-            self.key = d["industry_key"]
-            self.name = d["name"]
-            self.score = float(d.get("score") or 0)
-            self.rank_m = int(d.get("rank_m") or 9999)
-            self.rank_q = int(d.get("rank_q") or 9999)
-            self.excluded = bool(d.get("excluded"))
-
-    scored = [_Industry(r) for r in scored_rows if not r.get("excluded")]
+    scored = scored_industries_from_storage_rows(scored_rows)
     new_stock_result = compute_and_store_new_stock_rs(
         storage,
         snapshot_date,
         config,
         cross_top_percent,
         scored,
-        elite_partial=elite_partial,
+        elite_partial=partial,
+        elite_market=elite_market,
     )
 
     main_rows = storage.get_stock_rs_raw(snapshot_date)
@@ -626,7 +766,7 @@ def backfill_new_stock_rs_for_snapshot(
 
     return {
         **new_stock_result,
-        "elite_partial_count": len(elite_partial),
+        "elite_partial_count": len(partial),
         "watchlist_count": len(watch_rows),
     }
 
@@ -717,7 +857,13 @@ def compute_and_store_stock_rs(
 
         storage.save_stock_rs_snapshot(snapshot_date, [])
         storage.save_stock_rs_issues(snapshot_date, issues_map)
-        elite_partial_inputs = _build_elite_partial_inputs(elite_market, issues_map)
+        from src.services.elite_data import build_all_elite_partial_perf_inputs
+
+        elite_partial_inputs = (
+            build_all_elite_partial_perf_inputs(elite_market)
+            if elite_market
+            else _build_elite_partial_inputs(elite_market, issues_map)
+        )
         new_stock_result = compute_and_store_new_stock_rs(
             storage,
             snapshot_date,
@@ -725,6 +871,7 @@ def compute_and_store_stock_rs(
             cross_top_percent,
             scored_industries,
             elite_partial=elite_partial_inputs,
+            elite_market=elite_market,
         )
         defer_watchlist = _should_defer_finviz_cross_watchlist(storage, snapshot_date, config)
         if defer_watchlist:
@@ -774,7 +921,13 @@ def compute_and_store_stock_rs(
     storage.save_stock_rs_issues(snapshot_date, issues_map)
 
     defer_watchlist = _should_defer_finviz_cross_watchlist(storage, snapshot_date, config)
-    elite_partial_inputs = _build_elite_partial_inputs(elite_market, issues_map)
+    from src.services.elite_data import build_all_elite_partial_perf_inputs
+
+    elite_partial_inputs = (
+        build_all_elite_partial_perf_inputs(elite_market)
+        if elite_market
+        else _build_elite_partial_inputs(elite_market, issues_map)
+    )
     new_stock_result = compute_and_store_new_stock_rs(
         storage,
         snapshot_date,
@@ -782,6 +935,7 @@ def compute_and_store_stock_rs(
         cross_top_percent,
         scored_industries,
         elite_partial=elite_partial_inputs,
+        elite_market=elite_market,
     )
 
     if defer_watchlist:
@@ -845,6 +999,10 @@ def rebuild_stock_watchlist_for_snapshot(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     """Rebuild cross watchlist from existing RS rows and latest industry stock picks."""
+    rs_cfg = config.get("stock_rs", {})
+    cross_top_percent = float(rs_cfg.get("cross_top_percent", 0.1))
+    cross_top_percent = max(0.01, min(1.0, cross_top_percent))
+
     rows = storage.get_stock_rs_raw(snapshot_date)
     if not rows:
         return {
@@ -854,26 +1012,34 @@ def rebuild_stock_watchlist_for_snapshot(
             "reason": "no_rs_rows",
         }
 
+    scored = scored_industries_from_storage_rows(storage.get_snapshot(snapshot_date))
+    industry_names = {
+        str(row["industry_key"]): str(row.get("name") or row["industry_key"])
+        for row in storage.get_snapshot(snapshot_date)
+    }
+
     main_watch = _build_main_watchlist_from_rows(
         rows,
         storage,
         snapshot_date,
-        scored_industries,
+        scored,
         config,
     )
-    top_industries = _top_industries_with_picks(storage, snapshot_date, scored_industries, config)
-    top_keys = {item.key for item in top_industries}
-    symbol_to_industries = _industry_pick_map(storage, snapshot_date, top_keys)
     leaderboard = storage.get_stock_rs_new(
         snapshot_date,
         leaderboard_only=True,
         limit=5000,
     )
-    new_watch_rows = [
-        {"symbol": row["symbol"], "rs_score": float(row["rs_score"])}
-        for row in leaderboard
-    ]
-    new_watch = _cross_watchlist_candidates(new_watch_rows, symbol_to_industries, 1.0)
+    from src.services.elite_data import fetch_elite_market_data, get_elite_market_cache
+
+    elite_market = get_elite_market_cache() or fetch_elite_market_data() or {}
+    new_watch = _build_new_stock_watchlist_candidates(
+        leaderboard,
+        market=elite_market,
+        scored_industries=scored,
+        config=config,
+        industry_names=industry_names,
+    )
 
     watch_rows = _merge_watchlists(main_watch, new_watch)
     _save_watchlist_and_enrich_catalysts(storage, snapshot_date, watch_rows)

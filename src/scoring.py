@@ -208,3 +208,32 @@ def filter_top_strong(
             top_n,
         )
     return selected
+
+
+def scored_industries_from_storage_rows(rows: list[dict[str, Any]]) -> list[ScoredIndustry]:
+    """Rebuild ScoredIndustry list from snapshot table rows."""
+    return [
+        ScoredIndustry(
+            key=str(row["industry_key"]),
+            name=str(row.get("name") or row["industry_key"]),
+            stocks=int(row.get("stocks") or 0),
+            perf_w=float(row.get("perf_w") or 0),
+            perf_m=float(row.get("perf_m") or 0),
+            perf_q=float(row.get("perf_q") or 0),
+            perf_h=float(row.get("perf_h") or 0),
+            perf_y=float(row.get("perf_y") or 0),
+            rank_w=int(row.get("rank_w") or 9999),
+            rank_m=int(row.get("rank_m") or 9999),
+            rank_q=int(row.get("rank_q") or 9999),
+            rank_h=int(row.get("rank_h") or 9999),
+            rank_y=int(row.get("rank_y") or 9999),
+            score=float(row.get("score") or 0),
+            tier=str(row.get("tier") or ""),
+            tags=list(row.get("tags") or []),
+            excluded=bool(row.get("excluded")),
+            exclude_reason=row.get("exclude_reason"),
+            finviz_url=str(row.get("finviz_url") or ""),
+        )
+        for row in rows
+        if not row.get("excluded")
+    ]

@@ -145,12 +145,12 @@ def fetch_elite_industry_rows(
         overview_html, performance_html = _fetch_elite_group_pages(key, timeout=timeout)
         rows = _merge_group_pages(overview_html, performance_html)
     except RuntimeError as exc:
-        logger.warning("%s; falling back to HTML scraper", exc)
+        logger.warning("%s; Elite industry groups unavailable", exc)
         return None
 
     if len(rows) < _MIN_INDUSTRY_ROWS:
         logger.warning(
-            "Elite groups returned too few industries (%d); falling back to scraper",
+            "Elite groups returned too few industries (%d); groups fetch unusable",
             len(rows),
         )
         return None

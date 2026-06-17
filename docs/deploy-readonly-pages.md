@@ -32,6 +32,8 @@ Workflow: [`.github/workflows/pages.yml`](../.github/workflows/pages.yml)
 
 ```text
 verify_finviz_elite_exports.py --full   (groups + market + sample industry export)
+  → catalyst env probe
+  → 70s rate-limit cooldown
   → Restore SQLite cache
   → precompute_daily.py --sync-rs --force
        1. Elite groups (industry list)

@@ -1,4 +1,4 @@
-"""Top10 industry rank scan: only industries with RS>=0.9 qualifying picks fill slots."""
+"""Top10 industry rank scan: only industries with screener picks fill slots."""
 
 from __future__ import annotations
 
@@ -146,7 +146,7 @@ def test_industry_keeps_all_qualifying_tickers_sorted_by_rs(tmp_path) -> None:
     }
     config = {
         "thresholds": {"top_list_count": 10},
-        "stock_rs": {"cross_top_percent": 0.1, "min_avg_dollar_volume_30d_usd": 100_000_000},
+        "stock_rs": {"cross_top_percent": 0.1, "min_daily_dollar_volume_usd": 100_000_000},
     }
 
     symbols_list = [sym for sym, _ in symbols]

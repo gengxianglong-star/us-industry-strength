@@ -414,7 +414,7 @@ def fetch_elite_market_data(
     """
     Pull full-market Finviz Elite CSV exports (overview + performance).
 
-    Returns symbol -> fields dict, or None to signal fallback to Yahoo/free path.
+    Returns symbol -> fields dict, or None when Elite export is unavailable.
     """
     key = auth_key or elite_auth_key()
     if not key:
@@ -454,14 +454,14 @@ def fetch_elite_market_data(
         if fetch_technical:
             text_tech = _fetch_export_text(url_technical, timeout=timeout)
     except RuntimeError as exc:
-        logger.warning("%s; falling back to free path", exc)
+        logger.warning("%s; Elite market export unavailable", exc)
         return None
 
     overview_rows = _parse_csv(text_ov)
     perf_rows = _parse_csv(text_pf)
     tech_rows = _parse_csv(text_tech) if text_tech else []
     if not overview_rows:
-        logger.warning("Elite overview CSV empty; falling back")
+        logger.warning("Elite overview CSV empty; market export unavailable")
         return None
 
     market_data: dict[str, dict[str, Any]] = {}
@@ -633,6 +633,54 @@ def classify_elite_partial_cohort(
     return None
 
 
+def build_all_elite_partial_perf_inputs(
+    market_data: dict[str, dict[str, Any]],
+) -> dict[str, tuple[str, dict[str, float]]]:
+    """Scan full Elite market for partial-perf new-stock cohort assignments."""
+    out: dict[str, tuple[str, dict[str, float]]] = {}
+    for sym in market_data:
+        row = elite_row_for_symbol(market_data, sym)
+        hit = classify_elite_partial_cohort(row)
+        if hit:
+            out[str(sym).upper()] = hit
+    return out
+
+
+COHORT_RS_PERF_KEYS: dict[str, tuple[str, ...]] = {
+    "M": ("perf_w", "perf_m"),
+    "Q": ("perf_w", "perf_m", "perf_q"),
+    "H": ("perf_w", "perf_m", "perf_q", "perf_h"),
+    "3Q": ("perf_w", "perf_m", "perf_q", "perf_h", "perf_tq"),
+}
+
+
+def build_cohort_universe_rows(
+    market_data: dict[str, dict[str, Any]],
+    cohort: str,
+) -> list[dict[str, Any]]:
+    """All symbols with enough Elite perf to rank in one cohort (full market denominator)."""
+    required = COHORT_RS_PERF_KEYS.get(cohort)
+    if not required:
+        return []
+    rows: list[dict[str, Any]] = []
+    for sym in market_data:
+        row = elite_row_for_symbol(market_data, sym)
+        if not row:
+            continue
+        perf = elite_row_perf_values(row)
+        if not all(k in perf for k in required):
+            continue
+        entry: dict[str, Any] = {
+            "symbol": str(sym).upper(),
+            "cohort": cohort,
+            "bar_count": 0,
+            "source": "cohort_universe",
+        }
+        entry.update({k: perf[k] for k in required})
+        rows.append(entry)
+    return rows
+
+
 def build_elite_partial_perf_inputs(
     market_data: dict[str, dict[str, Any]],
     symbols: list[str],
@@ -680,11 +728,13 @@ def passes_elite_swing_filters(
     Minervini-style trend stack + liquidity using Finviz SMA distance columns.
 
     SMA fields are % distance of price above/below each moving average.
+    Liquidity uses same-day price×volume from Elite export (not 30d average).
 
-    Relaxed Swing Trader thresholds:
+    Relaxed Swing Trader thresholds (aligned with stock_filters screener export):
     - RS >= 80 (top 20% in strong industry)
-    - Daily turnover >= $15M (wide enough for mid-cap momentum)
-    - Trend: price > SMA50 > SMA200 (Stage 2 uptrend, allows SMA20 pullbacks)
+    - Same-day turnover >= min_daily_dollar_volume (default $15M)
+    - price > SMA20 > SMA50 > SMA200 via Finviz % columns:
+      sma20/sma50/sma200 > 0 and sma20 <= sma50 < sma200
     """
     if rs_score < min_rs_score:
         return False
@@ -692,13 +742,36 @@ def passes_elite_swing_filters(
     volume = parse_finviz_number(row.get("volume"))
     if price is None or volume is None or price * volume < min_daily_dollar_volume:
         return False
+    sma20 = parse_finviz_percent(row.get("sma20"))
     sma50 = parse_finviz_percent(row.get("sma50"))
     sma200 = parse_finviz_percent(row.get("sma200"))
-    if sma50 is None or sma200 is None:
+    if sma20 is None or sma50 is None or sma200 is None:
         return False
-    # Stage 2 uptrend: price above SMA50 above SMA200
-    # (sma200 % > sma50 % > 0 → price furthest above SMA200 = golden cross zone)
-    if not (sma200 > sma50 > 0):
+    if not (sma200 > sma50 > sma20 > 0):
+        return False
+    return True
+
+
+def passes_new_stock_screener_filters(
+    row: dict[str, Any],
+    *,
+    min_daily_dollar_volume: float = 100_000_000.0,
+) -> bool:
+    """
+    Relaxed industry gate for new-stock watchlist (not the main Elite screener export).
+
+    - Same-day turnover >= min_daily_dollar_volume (default $100M)
+    - price > SMA20 > SMA50 via Finviz % columns: sma20/sma50 > 0 and sma20 < sma50
+    """
+    price = parse_finviz_number(row.get("price"))
+    volume = parse_finviz_number(row.get("volume"))
+    if price is None or volume is None or price * volume < min_daily_dollar_volume:
+        return False
+    sma20 = parse_finviz_percent(row.get("sma20"))
+    sma50 = parse_finviz_percent(row.get("sma50"))
+    if sma20 is None or sma50 is None:
+        return False
+    if not (sma50 > 0 and sma20 > 0 and sma20 < sma50):
         return False
     return True
 
@@ -707,7 +780,7 @@ def build_perf_map_from_elite(
     market_data: dict[str, dict[str, Any]],
     symbols: list[str],
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """Build perf_map entries for symbols Elite can cover; return symbols still needing Yahoo."""
+    """Build perf_map entries for symbols Elite can cover; return symbols missing full perf."""
     perf_map: dict[str, dict[str, Any]] = {}
     missing: list[str] = []
     for sym in symbols:

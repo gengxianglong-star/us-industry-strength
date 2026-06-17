@@ -3,8 +3,7 @@
 基于 [Finviz Industry Groups](https://finviz.com/groups?g=industry&v=210&o=name) 的多周期相对排名，筛选强势行业，并与个股 RS 交叉生成观察名单。
 
 数据源：
-- Finviz Industry / Screener
-- Yahoo Adj Close（个股 RS 价格口径）
+- Finviz Elite Export API（行业组、全市场 RS、行业筛股）— 需配置 `FINVIZ_AUTH_KEY`
 - Stockbee Market Monitor（市场宽度）
 
 ## 跨平台快速开始（macOS / Windows）

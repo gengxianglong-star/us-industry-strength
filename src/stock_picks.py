@@ -42,30 +42,16 @@ def _rank_industry_tickers(
     candidates: list[str],
     *,
     rs_map: dict[str, dict[str, Any]],
-    market: dict[str, dict[str, Any]],
-    min_rs_score: float,
-    min_daily_dv: float,
     per_industry_cap: int | None = None,
 ) -> list[str]:
-    from src.services.elite_data import elite_row_for_symbol, passes_elite_swing_filters
-
+    """Rank screener export tickers by main RS (no RS score floor)."""
     ranked: list[tuple[str, float]] = []
     for sym in candidates:
-        rs_row = rs_map.get(sym)
+        rs_row = rs_map.get(sym.upper()) or rs_map.get(sym)
         if not rs_row:
             continue
-        elite_row = elite_row_for_symbol(market, sym)
-        if not elite_row:
-            continue
         rs_score = float(rs_row.get("rs_score", 0) or 0)
-        if not passes_elite_swing_filters(
-            elite_row,
-            rs_score,
-            min_rs_score=min_rs_score,
-            min_daily_dollar_volume=min_daily_dv,
-        ):
-            continue
-        ranked.append((sym, rs_score))
+        ranked.append((sym.upper(), rs_score))
     ranked.sort(key=lambda pair: (-pair[1], pair[0]))
     tickers = [sym for sym, _ in ranked]
     if per_industry_cap is not None and per_industry_cap > 0:
@@ -76,12 +62,8 @@ def _rank_industry_tickers(
 def _resolve_qualified_industry_tickers(
     item: ScoredIndustry,
     *,
-    by_industry: dict[str, list[str]],
     rs_map: dict[str, dict[str, Any]],
-    market: dict[str, dict[str, Any]],
     config: dict[str, Any],
-    min_rs_score: float,
-    min_daily_dv: float,
 ) -> tuple[list[str], str, list[str]]:
     from src.services.elite_data import fetch_elite_industry_tickers
 
@@ -90,9 +72,6 @@ def _resolve_qualified_industry_tickers(
     tickers = _rank_industry_tickers(
         candidates,
         rs_map=rs_map,
-        market=market,
-        min_rs_score=min_rs_score,
-        min_daily_dv=min_daily_dv,
     )
     return tickers, candidate_source, candidates
 
@@ -167,7 +146,7 @@ def build_and_store_elite_industry_picks(
     *,
     elite_market: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Build Top-N industries that each have RS-qualified picks; scan lower ranks to backfill slots."""
+    """Build Top-N industries that each have screener picks; scan lower ranks to backfill slots."""
     from src.services.elite_data import (
         build_elite_industry_screener_url,
         elite_auth_key,
@@ -179,16 +158,9 @@ def build_and_store_elite_industry_picks(
     if not market:
         return {}
 
-    rs_cfg = config.get("stock_rs", {})
-    cross_top = float(rs_cfg.get("cross_top_percent", 0.1))
-    cross_top = max(0.01, min(1.0, cross_top))
-    min_rs_score = 1.0 - cross_top
-    min_daily_dv = float(rs_cfg.get("min_avg_dollar_volume_30d_usd", 15_000_000))
-
     rs_map = {
         str(row["symbol"]).upper(): row for row in storage.get_stock_rs_raw(snapshot_date)
     }
-    by_industry = _build_elite_industry_index(market)
     auth_key = elite_auth_key() or ""
 
     active = [item for item in scored if not item.excluded]
@@ -197,6 +169,7 @@ def build_and_store_elite_industry_picks(
     results: dict[str, dict[str, Any]] = {}
     filled = 0
     skipped_empty = 0
+    stale_used = 0
 
     for item in active:
         if filled >= top_n:
@@ -204,12 +177,8 @@ def build_and_store_elite_industry_picks(
 
         tickers, candidate_source, _candidates = _resolve_qualified_industry_tickers(
             item,
-            by_industry=by_industry,
             rs_map=rs_map,
-            market=market,
             config=config,
-            min_rs_score=min_rs_score,
-            min_daily_dv=min_daily_dv,
         )
 
         filters = build_screener_filters(item.key, config)
@@ -222,9 +191,8 @@ def build_and_store_elite_industry_picks(
         if not tickers:
             skipped_empty += 1
             logger.info(
-                "Elite picks: skipping industry %s (rank scan) — no RS>=%.2f symbols passing filters",
+                "Elite picks: skipping industry %s (rank scan) — no screener symbols with RS data",
                 item.name,
-                min_rs_score,
             )
             if _stale_fallback_enabled(config):
                 stale = storage.get_latest_successful_industry_stock_picks(
@@ -232,15 +200,23 @@ def build_and_store_elite_industry_picks(
                     before_snapshot_date=snapshot_date,
                 )
                 if stale and stale.get("tickers"):
-                    tickers = list(stale["tickers"])
-                    screener_url = str(stale.get("screener_url") or screener_url)
-                    filters = str(stale.get("filters") or filters)
-                    logger.info(
-                        "Elite picks: stale fallback for %s (%d tickers from %s)",
-                        item.name,
-                        len(tickers),
-                        stale.get("snapshot_date"),
+                    ranked_stale = _rank_industry_tickers(
+                        list(stale["tickers"]),
+                        rs_map=rs_map,
                     )
+                    if ranked_stale:
+                        tickers = ranked_stale
+                        candidate_source = "stale_fallback_ranked"
+                        stale_used += 1
+                        screener_url = str(stale.get("screener_url") or screener_url)
+                        filters = str(stale.get("filters") or filters)
+                        logger.info(
+                            "Elite picks: stale fallback for %s (%d/%d tickers re-qualified from %s)",
+                            item.name,
+                            len(tickers),
+                            len(stale["tickers"]),
+                            stale.get("snapshot_date"),
+                        )
             if not tickers:
                 continue
 
@@ -261,9 +237,10 @@ def build_and_store_elite_industry_picks(
         filled += 1
 
     logger.info(
-        "Elite industry picks: %d industries selected (%d skipped empty), %d tickers",
+        "Elite industry picks: %d industries selected (%d skipped empty, %d stale), %d tickers",
         len(results),
         skipped_empty,
+        stale_used,
         sum(len(payload.get("tickers") or []) for payload in results.values()),
     )
     return results
@@ -300,7 +277,11 @@ def apply_elite_picks_after_rs(
         "stock_pick_errors": max(0, len(top) - len(picks)),
         "picks_summary": {
             "total": len(picks),
-            "stale": 0,
+            "stale": sum(
+                1
+                for payload in picks.values()
+                if payload.get("candidate_source") == "stale_fallback_ranked"
+            ),
             "with_tickers": sum(1 for payload in picks.values() if payload.get("tickers")),
         },
         "watchlist_count": rebuild.get("watchlist_count", 0),

@@ -49,6 +49,35 @@ def merge_editable_config(
     return merged
 
 
+def stock_rs_min_daily_dollar_volume(rs_cfg: dict[str, Any]) -> float:
+    """Same-day price×volume floor from Elite export (not 30d average)."""
+    if rs_cfg.get("min_daily_dollar_volume_usd") is not None:
+        return float(rs_cfg["min_daily_dollar_volume_usd"])
+    return float(rs_cfg.get("min_avg_dollar_volume_30d_usd", 15_000_000))
+
+
+def _normalize_stock_rs(config: dict[str, Any]) -> None:
+    rs = config.get("stock_rs")
+    if not isinstance(rs, dict):
+        return
+    legacy = rs.get("min_avg_dollar_volume_30d_usd")
+    current = rs.get("min_daily_dollar_volume_usd")
+    if legacy is not None and current is not None and float(legacy) != float(current):
+        from src.logging_config import get_logger
+
+        get_logger(__name__).warning(
+            "stock_rs: min_avg_dollar_volume_30d_usd (%s) ignored; "
+            "using min_daily_dollar_volume_usd (%s)",
+            legacy,
+            current,
+        )
+    if current is None and legacy is not None:
+        rs["min_daily_dollar_volume_usd"] = legacy
+        current = legacy
+    if current is not None and legacy is not None:
+        rs.pop("min_avg_dollar_volume_30d_usd", None)
+
+
 def _normalize_weights(config: dict[str, Any]) -> None:
     weights = config.get("weights", {})
     total = sum(float(weights.get(tf, 0)) for tf in TIMEFRAMES)
@@ -70,6 +99,7 @@ def load_config(path: Path | None = None, *, init_logging: bool = True) -> dict[
         config = yaml.safe_load(f) or {}
 
     _normalize_weights(config)
+    _normalize_stock_rs(config)
 
     if init_logging:
         from src.logging_config import setup_logging

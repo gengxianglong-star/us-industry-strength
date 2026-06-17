@@ -99,8 +99,9 @@ def finalize_snapshot_run(
 
 def daily_options_from_config(config: dict[str, Any]) -> DailyPipelineOptions:
     raw = (config.get("automation") or {}).get("daily") or {}
+    if raw.get("skip_stocks"):
+        logger.info("automation.daily.skip_stocks is deprecated and ignored (Elite picks always run after RS)")
     return DailyPipelineOptions(
-        skip_stocks=bool(raw.get("skip_stocks", False)),
         skip_rs=bool(raw.get("skip_rs", False)),
         skip_breadth=bool(raw.get("skip_breadth", True)),
         full_breadth=bool(raw.get("full_breadth", False)),

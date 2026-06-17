@@ -15,6 +15,7 @@ from src.services.elite_data import (
     parse_finviz_number,
     parse_finviz_percent,
     passes_elite_swing_filters,
+    passes_new_stock_screener_filters,
 )
 
 
@@ -108,7 +109,23 @@ def test_passes_elite_swing_filters() -> None:
     assert passes_elite_swing_filters(row, 0.95)
     assert not passes_elite_swing_filters(row, 0.5)
     assert not passes_elite_swing_filters({**row, "sma200": "-1%"}, 0.95)
+    assert not passes_elite_swing_filters({**row, "sma50": "-2%", "sma200": "10%"}, 0.95)
+    # Misaligned short-term stack (SMA50 above SMA20) — matches screener ta_sma50_sb20
     assert not passes_elite_swing_filters({**row, "sma50": "1%", "sma20": "3%"}, 0.95)
+
+
+def test_passes_new_stock_screener_filters() -> None:
+    row = {
+        "price": "50",
+        "volume": "3,000,000",
+        "sma20": "2%",
+        "sma50": "5%",
+    }
+    assert passes_new_stock_screener_filters(row)
+    assert passes_new_stock_screener_filters(row, min_daily_dollar_volume=100_000_000)
+    assert not passes_new_stock_screener_filters(row, min_daily_dollar_volume=200_000_000)
+    assert not passes_new_stock_screener_filters({**row, "sma50": "-1%"}, min_daily_dollar_volume=100_000_000)
+    assert not passes_new_stock_screener_filters({**row, "sma50": "1%", "sma20": "3%"}, min_daily_dollar_volume=100_000_000)
 
 
 def test_parse_finviz_number() -> None:

@@ -36,4 +36,4 @@ def test_elite_prefetch_skips_yahoo_when_elite_universe() -> None:
     assert rs_source == "elite"
     assert "AAPL" in perf_map
     assert issues_map["DEAD"] == "elite_no_perf"
-    assert stats["elite_skipped_yahoo"] == 1
+    assert stats["elite_skipped_no_perf"] == 1
