@@ -20,6 +20,9 @@ export function StrongPage() {
     setSearch,
     topListCount,
     watchlist,
+    rsTop,
+    showRsTop,
+    setShowRsTop,
     pulseLine,
     filteredIndustries,
   } = useStrongPage();
@@ -83,17 +86,33 @@ export function StrongPage() {
           </div>
         </section>
 
-        {/* Watchlist */}
+        {/* Watchlist / RS Top 100 */}
         <section className="bg-[#0b0f19] border border-slate-800 rounded-xl shadow-lg p-5">
-          <div className="mb-4">
-            <h2 className="text-sm font-black text-slate-200 uppercase tracking-widest flex items-center gap-2">
-              <Target size={16} className="text-rose-500" /> Final Watchlist Setup
-            </h2>
-            <p className="text-[10px] font-mono text-slate-500 uppercase mt-1">
-              RS top 10% ∩ Top {topListCount} Finviz industries · Elite trend stack · top 100
-            </p>
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-black text-slate-200 uppercase tracking-widest flex items-center gap-2">
+                <Target size={16} className="text-rose-500" /> Final Watchlist Setup
+              </h2>
+              <p className="text-[10px] font-mono text-slate-500 uppercase mt-1">
+                RS top 10% ∩ Top {topListCount} Finviz industries · Elite trend stack · top 100
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowRsTop((v) => !v)}
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[10px] font-mono tracking-widest uppercase transition-colors ${
+                showRsTop
+                  ? "border-cyan-500/70 bg-cyan-950/40 text-cyan-300"
+                  : "border-slate-700 bg-slate-950/60 text-slate-400 hover:border-cyan-500/60 hover:text-cyan-300"
+              }`}
+            >
+              <span>{showRsTop ? "Showing RS Top 100" : "Show RS Top 100"}</span>
+            </button>
           </div>
-          <WatchlistChartGrid watchlist={watchlist} industryNames={industryNames} />
+          <WatchlistChartGrid
+            watchlist={showRsTop && rsTop.length ? rsTop : watchlist}
+            industryNames={industryNames}
+          />
         </section>
 
         {/* All Industries Reference */}

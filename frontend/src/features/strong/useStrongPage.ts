@@ -6,6 +6,7 @@ import {
   type AutomationStatus,
   type RsPayload,
   type SnapshotPayload,
+  type WatchlistRow,
 } from "../../lib/industry";
 
 export function useStrongPage() {
@@ -16,6 +17,8 @@ export function useStrongPage() {
   const [rsStatusError, setRsStatusError] = useState(false);
   const [search, setSearch] = useState("");
   const [topListCount, setTopListCount] = useState(10);
+  const [rsTop, setRsTop] = useState<WatchlistRow[]>([]);
+  const [showRsTop, setShowRsTop] = useState(false);
   const busyRef = useRef(false);
 
   const applyAutoStatus = useCallback((dashboard: AutomationStatus) => {
@@ -38,11 +41,16 @@ export function useStrongPage() {
     const snapshotData =
       snap ?? (await fetchJson<SnapshotPayload>(`/api/snapshots/${encodeURIComponent(date)}`));
 
-    const rsWatch = await fetchJson<{
-      watchlist?: RsPayload["watchlist"];
-      watchlist_total?: number;
-      rs_meta?: RsPayload["rs_meta"];
-    }>(`/api/rs/${encodeURIComponent(date)}?watchlist_only=true&watchlist_limit=150`).catch(() => null);
+    const [rsWatch, rsFull] = await Promise.all([
+      fetchJson<{
+        watchlist?: RsPayload["watchlist"];
+        watchlist_total?: number;
+        rs_meta?: RsPayload["rs_meta"];
+      }>(`/api/rs/${encodeURIComponent(date)}?watchlist_only=true&watchlist_limit=150`).catch(
+        () => null,
+      ),
+      fetchJson<RsPayload>(`/api/rs/${encodeURIComponent(date)}?limit=400`).catch(() => null),
+    ]);
 
     setSnapshot({
       ...snapshotData,
@@ -58,6 +66,29 @@ export function useStrongPage() {
       new_stock_leaderboard: [],
       rs_meta: rsWatch?.rs_meta || snapshotData.rs_meta,
     });
+
+    const rsRows = (rsFull?.rows || []) as Array<Record<string, unknown>>;
+    const rsTopRows: WatchlistRow[] = rsRows
+      .filter((row) => {
+        const price = Number(row.price ?? 0);
+        const volume = Number(row.volume ?? 0);
+        return Number.isFinite(price) && price > 5 && Number.isFinite(volume) && price * volume > 100_000_000;
+      })
+      .slice(0, 100)
+      .map((row, idx) => ({
+        symbol: String(row.symbol ?? ""),
+        rs_rank: Number(row.rs_rank ?? idx + 1),
+        rs_score: Number(row.rs_score ?? 0),
+        price: Number.isFinite(Number(row.price)) ? Number(row.price) : null,
+        volume: Number.isFinite(Number(row.volume)) ? Number(row.volume) : null,
+        industries: Array.isArray(row.industries)
+          ? (row.industries as string[])
+          : undefined,
+        industry_name: typeof row.industry_name === "string" ? row.industry_name : undefined,
+        name: typeof row.name === "string" ? row.name : undefined,
+      }));
+    setRsTop(rsTopRows);
+    setShowRsTop(false);
   }, []);
 
   const refreshFromServer = useCallback(async () => {
@@ -160,5 +191,8 @@ export function useStrongPage() {
     topListCount,
     pulseLine,
     filteredIndustries,
+    rsTop,
+    showRsTop,
+    setShowRsTop,
   };
 }

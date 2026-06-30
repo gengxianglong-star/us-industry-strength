@@ -85,6 +85,8 @@ export type WatchlistRow = {
   symbol: string;
   rs_rank: number;
   rs_score: number;
+  price?: number | null;
+  volume?: number | null;
   industries?: string[];
   industry_name?: string;
   name?: string;

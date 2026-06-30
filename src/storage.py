@@ -1034,9 +1034,22 @@ class Storage:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT rs.*, u.name, u.exchange
+                SELECT
+                    rs.*,
+                    u.name,
+                    u.exchange,
+                    p.close AS price,
+                    p.volume AS volume
                 FROM stock_rs_daily rs
                 LEFT JOIN stock_universe u ON u.symbol = rs.symbol
+                LEFT JOIN stock_price_daily p
+                    ON p.symbol = rs.symbol
+                    AND p.trade_date = (
+                        SELECT MAX(p2.trade_date)
+                        FROM stock_price_daily p2
+                        WHERE p2.symbol = rs.symbol
+                          AND p2.trade_date <= rs.snapshot_date
+                    )
                 WHERE rs.snapshot_date = ?
                 ORDER BY rs.rs_score DESC, rs.rank_m ASC
                 LIMIT ?

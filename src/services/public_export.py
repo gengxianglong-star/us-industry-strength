@@ -22,6 +22,8 @@ _RS_ROW_KEEP = (
     "symbol",
     "rs_score",
     "tier",
+    "price",
+    "volume",
     "perf_w",
     "perf_m",
     "perf_q",
