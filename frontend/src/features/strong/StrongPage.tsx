@@ -96,7 +96,7 @@ export function StrongPage() {
               </h2>
               <p className="text-[10px] font-mono text-slate-500 uppercase mt-1">
                 {showRsTop
-                  ? `RS top ${rsTop.length} · price > $5 · same-day turnover > $100M`
+                  ? `RS top ${rsTop.length} · liquid stock pool · pool-relative RS`
                   : `RS top 10% ∩ Top ${topListCount} Finviz industries · Elite trend stack`}
               </p>
             </div>

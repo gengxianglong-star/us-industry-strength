@@ -123,6 +123,14 @@ def test_enrich_rs_rows_with_elite_quotes() -> None:
     assert out[0]["volume"] == 2_000_000.0
 
 
+def test_enrich_rs_rows_with_elite_quotes_overrides_stale_db_values() -> None:
+    rows = [{"symbol": "NVDA", "rs_score": 0.99, "price": 999.0, "volume": 10.0}]
+    market = {"NVDA": {"price": "120", "volume": "2,000,000"}}
+    out = enrich_rs_rows_with_elite_quotes(rows, market=market)
+    assert out[0]["price"] == 120.0
+    assert out[0]["volume"] == 2_000_000.0
+
+
 def test_passes_new_stock_screener_filters() -> None:
     row = {
         "price": "50",

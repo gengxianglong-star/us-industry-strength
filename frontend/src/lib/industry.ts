@@ -96,9 +96,16 @@ export type WatchlistRow = {
   catalyst?: CatalystData | null;
 };
 
+export type RsTopMeta = {
+  pool_count?: number;
+  computed_count?: number;
+};
+
 export type RsPayload = {
   snapshot_date: string;
   rows: Array<Record<string, unknown>>;
+  rs_top_rows?: WatchlistRow[];
+  rs_top_meta?: RsTopMeta;
   watchlist: WatchlistRow[];
   watchlist_total?: number;
   new_stock_leaderboard: Array<Record<string, unknown>>;
@@ -238,6 +245,19 @@ export function passesRsTopLiquidityFilter(
     Number.isFinite(volume) &&
     price * volume > minDollarVolume
   );
+}
+
+export function mapRsTopRows(rows: WatchlistRow[] | undefined): WatchlistRow[] {
+  return (rows || []).map((row) => ({
+    symbol: String(row.symbol ?? ""),
+    rs_rank: Number(row.rs_rank ?? 0),
+    rs_score: Number(row.rs_score ?? 0),
+    price: Number.isFinite(Number(row.price)) ? Number(row.price) : null,
+    volume: Number.isFinite(Number(row.volume)) ? Number(row.volume) : null,
+    industries: row.industries,
+    industry_name: row.industry_name,
+    name: row.name,
+  }));
 }
 
 export function buildRsTopWatchlistRows(

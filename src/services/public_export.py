@@ -190,11 +190,16 @@ def build_public_dashboard_payloads(
         )
         watchlist = storage.get_stock_watchlist(latest, limit=watchlist_limit)
         watchlist_total = storage.count_stock_watchlist(latest)
-        from src.services.elite_data import enrich_rs_rows_with_elite_quotes
+        from src.services.elite_data import enrich_rs_rows_with_elite_quotes, get_elite_market_cache
+        from src.services.rs_top_pool import build_rs_top_100_rows
 
         raw_rs_rows = storage.get_stock_rs(latest, limit=max(rs_limit, 1), stocks_only=True)
         raw_rs_rows = enrich_rs_rows_with_elite_quotes(raw_rs_rows)
         rs_rows = [_slim_rs_export_row(row) for row in raw_rs_rows]
+        rs_top_rows, rs_top_meta = build_rs_top_100_rows(
+            config,
+            get_elite_market_cache(),
+        )
         new_stock_rows = [_slim_new_stock_row(row) for row in storage.get_stock_rs_new(latest, limit=500)]
         new_stock_leaderboard = [
             _slim_new_stock_row(row)
@@ -205,6 +210,8 @@ def build_public_dashboard_payloads(
             "rs_count": storage.count_stock_rs(latest),
             "rs_meta": storage.get_stock_rs_meta(latest),
             "rows": rs_rows,
+            "rs_top_rows": rs_top_rows,
+            "rs_top_meta": rs_top_meta,
             "new_stock_rows": new_stock_rows,
             "new_stock_leaderboard": new_stock_leaderboard,
             # Watchlist + chart bars live in rs_watchlist.json (Pages uses watchlist_only).
@@ -231,6 +238,8 @@ def build_public_dashboard_payloads(
             "rs_count": 0,
             "rs_meta": {},
             "rows": [],
+            "rs_top_rows": [],
+            "rs_top_meta": {"pool_count": 0, "computed_count": 0},
             "new_stock_rows": [],
             "new_stock_leaderboard": [],
             "watchlist": [],

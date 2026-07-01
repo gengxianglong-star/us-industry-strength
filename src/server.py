@@ -690,11 +690,19 @@ def rs_snapshot(
             "watchlist": watchlist,
         }
     rs_rows = storage.get_stock_rs(snapshot_date, limit=max(limit, 1), stocks_only=True)
-    if rs_rows:
-        from src.services.elite_data import enrich_rs_rows_with_elite_quotes
+    rs_top_rows: list[dict[str, Any]] = []
+    rs_top_meta: dict[str, Any] = {"pool_count": 0, "computed_count": 0}
+    if rs_rows or not watchlist_only:
+        from src.services.elite_data import enrich_rs_rows_with_elite_quotes, get_elite_market_cache
+        from src.services.rs_top_pool import build_rs_top_100_rows
 
-        rs_rows = enrich_rs_rows_with_elite_quotes(rs_rows)
-    if not rs_rows and not watchlist:
+        if rs_rows:
+            rs_rows = enrich_rs_rows_with_elite_quotes(rs_rows)
+        rs_top_rows, rs_top_meta = build_rs_top_100_rows(
+            config,
+            get_elite_market_cache(),
+        )
+    if not rs_rows and not watchlist and not rs_top_rows:
         raise HTTPException(status_code=404, detail=f"No stock RS for {snapshot_date}")
     return {
         "snapshot_date": snapshot_date,
@@ -702,6 +710,8 @@ def rs_snapshot(
         "rs_meta": storage.get_stock_rs_meta(snapshot_date),
         "watchlist_total": watchlist_total,
         "rows": rs_rows,
+        "rs_top_rows": rs_top_rows,
+        "rs_top_meta": rs_top_meta,
         "new_stock_rows": storage.get_stock_rs_new(snapshot_date, limit=500),
         "new_stock_leaderboard": storage.get_stock_rs_new(
             snapshot_date,

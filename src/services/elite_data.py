@@ -495,6 +495,12 @@ def fetch_elite_market_data(
                 "volatility_m": _pick(row, _PERF_FIELD_ALIASES["volatility_m"]),
             }
         )
+        perf_price = str(row.get("Price") or "").strip()
+        if perf_price:
+            market_data[ticker]["price"] = perf_price
+        perf_vol = _pick(row, _TECH_FIELD_ALIASES["volume"])
+        if perf_vol:
+            market_data[ticker]["volume"] = perf_vol
 
     for row in tech_rows:
         ticker = str(row.get("Ticker") or row.get("ticker") or "").upper().strip()
@@ -781,7 +787,7 @@ def enrich_rs_rows_with_elite_quotes(
     rows: list[dict[str, Any]],
     market: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Fill missing price/volume on RS rows from Elite export (same-day turnover gate)."""
+    """Prefer same-day Elite price/volume on RS rows used by liquidity gates."""
     if not rows:
         return rows
 
@@ -797,14 +803,6 @@ def enrich_rs_rows_with_elite_quotes(
     enriched: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
-        price = parse_finviz_number(item.get("price"))
-        volume = parse_finviz_number(item.get("volume"))
-        if price is not None and volume is not None:
-            item["price"] = price
-            item["volume"] = volume
-            enriched.append(item)
-            continue
-
         elite_row = elite_row_for_symbol(data, str(item.get("symbol") or ""))
         if elite_row:
             elite_price = parse_finviz_number(elite_row.get("price"))
@@ -813,6 +811,13 @@ def enrich_rs_rows_with_elite_quotes(
                 item["price"] = elite_price
             if elite_volume is not None:
                 item["volume"] = elite_volume
+        else:
+            price = parse_finviz_number(item.get("price"))
+            volume = parse_finviz_number(item.get("volume"))
+            if price is not None:
+                item["price"] = price
+            if volume is not None:
+                item["volume"] = volume
         enriched.append(item)
     return enriched
 

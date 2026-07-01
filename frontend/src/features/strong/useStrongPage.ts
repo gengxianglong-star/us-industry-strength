@@ -3,7 +3,7 @@ import { fetchJson, IS_READONLY } from "../../lib/api";
 import { useAutomationEnsureOnStale } from "../../hooks/useAutomationEnsure";
 import {
   getTopStrongIndustries,
-  buildRsTopWatchlistRows,
+  mapRsTopRows,
   type AutomationStatus,
   type RsPayload,
   type SnapshotPayload,
@@ -42,7 +42,7 @@ export function useStrongPage() {
     const snapshotData =
       snap ?? (await fetchJson<SnapshotPayload>(`/api/snapshots/${encodeURIComponent(date)}`));
 
-    const [rsWatch, rsFull] = await Promise.all([
+    const [rsWatch, rsTopPayload] = await Promise.all([
       fetchJson<{
         watchlist?: RsPayload["watchlist"];
         watchlist_total?: number;
@@ -50,7 +50,9 @@ export function useStrongPage() {
       }>(`/api/rs/${encodeURIComponent(date)}?watchlist_only=true&watchlist_limit=150`).catch(
         () => null,
       ),
-      fetchJson<RsPayload>(`/api/rs/${encodeURIComponent(date)}?limit=1000`).catch(() => null),
+      fetchJson<Pick<RsPayload, "rs_top_rows" | "rs_top_meta">>(
+        `/api/rs/${encodeURIComponent(date)}?limit=1`,
+      ).catch(() => null),
     ]);
 
     setSnapshot({
@@ -68,8 +70,7 @@ export function useStrongPage() {
       rs_meta: rsWatch?.rs_meta || snapshotData.rs_meta,
     });
 
-    const rsRows = (rsFull?.rows || []) as Array<Record<string, unknown>>;
-    setRsTop(buildRsTopWatchlistRows(rsRows, 100));
+    setRsTop(mapRsTopRows(rsTopPayload?.rs_top_rows));
     setShowRsTop(false);
   }, []);
 
