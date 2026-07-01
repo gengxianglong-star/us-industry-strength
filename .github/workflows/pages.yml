@@ -116,6 +116,8 @@ jobs:
 
       - name: Export static dashboard JSON
         if: github.event_name != 'workflow_dispatch' || inputs.skip_precompute != true
+        env:
+          FINVIZ_AUTH_KEY: ${{ secrets.FINVIZ_AUTH_KEY }}
         run: python scripts/export_public_dashboard.py
 
       - name: Validate exported dashboard JSON

@@ -776,6 +776,46 @@ def passes_new_stock_screener_filters(
     return True
 
 
+def enrich_rs_rows_with_elite_quotes(
+    rows: list[dict[str, Any]],
+    market: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Fill missing price/volume on RS rows from Elite export (same-day turnover gate)."""
+    if not rows:
+        return rows
+
+    data = market
+    if data is None:
+        data = get_elite_market_cache()
+    if not data:
+        data = fetch_elite_market_data() or {}
+
+    if not data:
+        return rows
+
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        price = parse_finviz_number(item.get("price"))
+        volume = parse_finviz_number(item.get("volume"))
+        if price is not None and volume is not None:
+            item["price"] = price
+            item["volume"] = volume
+            enriched.append(item)
+            continue
+
+        elite_row = elite_row_for_symbol(data, str(item.get("symbol") or ""))
+        if elite_row:
+            elite_price = parse_finviz_number(elite_row.get("price"))
+            elite_volume = parse_finviz_number(elite_row.get("volume"))
+            if elite_price is not None:
+                item["price"] = elite_price
+            if elite_volume is not None:
+                item["volume"] = elite_volume
+        enriched.append(item)
+    return enriched
+
+
 def build_perf_map_from_elite(
     market_data: dict[str, dict[str, Any]],
     symbols: list[str],

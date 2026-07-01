@@ -3,6 +3,7 @@ import { fetchJson, IS_READONLY } from "../../lib/api";
 import { useAutomationEnsureOnStale } from "../../hooks/useAutomationEnsure";
 import {
   getTopStrongIndustries,
+  buildRsTopWatchlistRows,
   type AutomationStatus,
   type RsPayload,
   type SnapshotPayload,
@@ -49,7 +50,7 @@ export function useStrongPage() {
       }>(`/api/rs/${encodeURIComponent(date)}?watchlist_only=true&watchlist_limit=150`).catch(
         () => null,
       ),
-      fetchJson<RsPayload>(`/api/rs/${encodeURIComponent(date)}?limit=400`).catch(() => null),
+      fetchJson<RsPayload>(`/api/rs/${encodeURIComponent(date)}?limit=1000`).catch(() => null),
     ]);
 
     setSnapshot({
@@ -68,26 +69,7 @@ export function useStrongPage() {
     });
 
     const rsRows = (rsFull?.rows || []) as Array<Record<string, unknown>>;
-    const rsTopRows: WatchlistRow[] = rsRows
-      .filter((row) => {
-        const price = Number(row.price ?? 0);
-        const volume = Number(row.volume ?? 0);
-        return Number.isFinite(price) && price > 5 && Number.isFinite(volume) && price * volume > 100_000_000;
-      })
-      .slice(0, 100)
-      .map((row, idx) => ({
-        symbol: String(row.symbol ?? ""),
-        rs_rank: Number(row.rs_rank ?? idx + 1),
-        rs_score: Number(row.rs_score ?? 0),
-        price: Number.isFinite(Number(row.price)) ? Number(row.price) : null,
-        volume: Number.isFinite(Number(row.volume)) ? Number(row.volume) : null,
-        industries: Array.isArray(row.industries)
-          ? (row.industries as string[])
-          : undefined,
-        industry_name: typeof row.industry_name === "string" ? row.industry_name : undefined,
-        name: typeof row.name === "string" ? row.name : undefined,
-      }));
-    setRsTop(rsTopRows);
+    setRsTop(buildRsTopWatchlistRows(rsRows, 100));
     setShowRsTop(false);
   }, []);
 

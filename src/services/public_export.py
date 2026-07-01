@@ -147,7 +147,7 @@ def build_public_dashboard_payloads(
     storage: Storage,
     config: dict[str, Any],
     *,
-    rs_limit: int = 500,
+    rs_limit: int = 1000,
     watchlist_limit: int = 120,
     breadth_limit: int = 756,
 ) -> dict[str, Any]:
@@ -165,7 +165,11 @@ def build_public_dashboard_payloads(
         )
         watchlist = storage.get_stock_watchlist(latest, limit=watchlist_limit)
         watchlist_total = storage.count_stock_watchlist(latest)
-        rs_rows = [_slim_rs_row(row) for row in storage.get_stock_rs(latest, limit=max(rs_limit, 1))]
+        from src.services.elite_data import enrich_rs_rows_with_elite_quotes
+
+        raw_rs_rows = storage.get_stock_rs(latest, limit=max(rs_limit, 1))
+        raw_rs_rows = enrich_rs_rows_with_elite_quotes(raw_rs_rows)
+        rs_rows = [_slim_rs_row(row) for row in raw_rs_rows]
         new_stock_rows = [_slim_new_stock_row(row) for row in storage.get_stock_rs_new(latest, limit=500)]
         new_stock_leaderboard = [
             _slim_new_stock_row(row)

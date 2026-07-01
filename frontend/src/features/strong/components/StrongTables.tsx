@@ -204,14 +204,16 @@ export function CoreIndustryTable({ snapshot }: { snapshot: SnapshotPayload | nu
 export function WatchlistChartGrid({
   watchlist,
   industryNames,
+  emptyMessage,
 }: {
   watchlist: RsPayload["watchlist"];
   industryNames?: Map<string, string>;
+  emptyMessage?: string;
 }) {
   if (!watchlist.length) {
     return (
       <p className="text-xs text-slate-500 font-mono py-4 text-center">
-        Charts appear after the daily watchlist is built.
+        {emptyMessage || "Charts appear after the daily watchlist is built."}
       </p>
     );
   }

@@ -690,6 +690,10 @@ def rs_snapshot(
             "watchlist": watchlist,
         }
     rs_rows = storage.get_stock_rs(snapshot_date, limit=max(limit, 1))
+    if rs_rows:
+        from src.services.elite_data import enrich_rs_rows_with_elite_quotes
+
+        rs_rows = enrich_rs_rows_with_elite_quotes(rs_rows)
     if not rs_rows and not watchlist:
         raise HTTPException(status_code=404, detail=f"No stock RS for {snapshot_date}")
     return {

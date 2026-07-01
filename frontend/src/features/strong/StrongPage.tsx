@@ -30,6 +30,7 @@ export function StrongPage() {
   const industryNames = new Map(
     (snapshot?.industries || []).map((row) => [row.industry_key, row.name]),
   );
+  const displayWatchlist = showRsTop ? rsTop : watchlist;
 
   return (
     <AppShell
@@ -94,7 +95,9 @@ export function StrongPage() {
                 <Target size={16} className="text-rose-500" /> Final Watchlist Setup
               </h2>
               <p className="text-[10px] font-mono text-slate-500 uppercase mt-1">
-                RS top 10% ∩ Top {topListCount} Finviz industries · Elite trend stack · top 100
+                {showRsTop
+                  ? `RS top ${rsTop.length} · price > $5 · same-day turnover > $100M`
+                  : `RS top 10% ∩ Top ${topListCount} Finviz industries · Elite trend stack`}
               </p>
             </div>
             <button
@@ -106,12 +109,19 @@ export function StrongPage() {
                   : "border-slate-700 bg-slate-950/60 text-slate-400 hover:border-cyan-500/60 hover:text-cyan-300"
               }`}
             >
-              <span>{showRsTop ? "Showing RS Top 100" : "Show RS Top 100"}</span>
+              <span>
+                {showRsTop ? `Showing RS Top ${rsTop.length}` : `Show RS Top 100${rsTop.length ? ` (${rsTop.length})` : ""}`}
+              </span>
             </button>
           </div>
           <WatchlistChartGrid
-            watchlist={showRsTop && rsTop.length ? rsTop : watchlist}
+            watchlist={displayWatchlist}
             industryNames={industryNames}
+            emptyMessage={
+              showRsTop
+                ? "No RS Top 100 matches yet. Need price/volume in RS export (price > $5, same-day turnover > $100M)."
+                : undefined
+            }
           />
         </section>
 

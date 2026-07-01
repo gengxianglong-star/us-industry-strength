@@ -225,6 +225,43 @@ export function finvizQuoteUrl(symbol: string) {
   return `https://finviz.com/quote.ashx?t=${encodeURIComponent(symbol)}`;
 }
 
+export function passesRsTopLiquidityFilter(
+  row: { price?: unknown; volume?: unknown },
+  minPrice = 5,
+  minDollarVolume = 100_000_000,
+) {
+  const price = Number(row.price ?? 0);
+  const volume = Number(row.volume ?? 0);
+  return (
+    Number.isFinite(price) &&
+    price > minPrice &&
+    Number.isFinite(volume) &&
+    price * volume > minDollarVolume
+  );
+}
+
+export function buildRsTopWatchlistRows(
+  rows: Array<Record<string, unknown>>,
+  limit = 100,
+): WatchlistRow[] {
+  const out: WatchlistRow[] = [];
+  for (const row of rows) {
+    if (!passesRsTopLiquidityFilter(row)) continue;
+    out.push({
+      symbol: String(row.symbol ?? ""),
+      rs_rank: out.length + 1,
+      rs_score: Number(row.rs_score ?? 0),
+      price: Number.isFinite(Number(row.price)) ? Number(row.price) : null,
+      volume: Number.isFinite(Number(row.volume)) ? Number(row.volume) : null,
+      industries: Array.isArray(row.industries) ? (row.industries as string[]) : undefined,
+      industry_name: typeof row.industry_name === "string" ? row.industry_name : undefined,
+      name: typeof row.name === "string" ? row.name : undefined,
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 export function rsUniverseCount(
   snapshot: SnapshotPayload | null,
   rsMeta?: RsMeta | null,

@@ -15,6 +15,7 @@ from src.services.elite_data import (
     parse_finviz_number,
     parse_finviz_percent,
     passes_elite_swing_filters,
+    enrich_rs_rows_with_elite_quotes,
     passes_new_stock_screener_filters,
 )
 
@@ -112,6 +113,14 @@ def test_passes_elite_swing_filters() -> None:
     assert not passes_elite_swing_filters({**row, "sma50": "-2%", "sma200": "10%"}, 0.95)
     # Misaligned short-term stack (SMA50 above SMA20) — matches screener ta_sma50_sb20
     assert not passes_elite_swing_filters({**row, "sma50": "1%", "sma20": "3%"}, 0.95)
+
+
+def test_enrich_rs_rows_with_elite_quotes() -> None:
+    rows = [{"symbol": "NVDA", "rs_score": 0.99}]
+    market = {"NVDA": {"price": "120", "volume": "2,000,000"}}
+    out = enrich_rs_rows_with_elite_quotes(rows, market=market)
+    assert out[0]["price"] == 120.0
+    assert out[0]["volume"] == 2_000_000.0
 
 
 def test_passes_new_stock_screener_filters() -> None:
