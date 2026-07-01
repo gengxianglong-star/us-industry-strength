@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS industry_stock_picks (
 CREATE TABLE IF NOT EXISTS stock_universe (
     symbol TEXT PRIMARY KEY,
     name TEXT,
+    company TEXT,
+    sector TEXT,
+    industry TEXT,
     exchange TEXT,
     source TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -276,8 +279,20 @@ class Storage:
     def _init_db(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate_stock_universe(conn)
             self._migrate_stock_rs_meta(conn)
             self._migrate_rs_job_runs(conn)
+
+    def _migrate_stock_universe(self, conn: sqlite3.Connection) -> None:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(stock_universe)").fetchall()}
+        additions = [
+            ("company", "TEXT"),
+            ("sector", "TEXT"),
+            ("industry", "TEXT"),
+        ]
+        for name, typedef in additions:
+            if name not in cols:
+                conn.execute(f"ALTER TABLE stock_universe ADD COLUMN {name} {typedef}")
 
     def _migrate_stock_rs_meta(self, conn: sqlite3.Connection) -> None:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(stock_rs_meta)").fetchall()}
@@ -1030,13 +1045,24 @@ class Storage:
         self,
         snapshot_date: str,
         limit: int = 200,
+        *,
+        stocks_only: bool = False,
     ) -> list[dict[str, Any]]:
+        etf_filter = ""
+        if stocks_only:
+            # Backward-compatible: old rows stored the industry label in `name`.
+            etf_filter = """
+                AND COALESCE(NULLIF(u.industry, ''), NULLIF(u.name, ''), '') != 'Exchange Traded Fund'
+            """
         with self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     rs.*,
                     u.name,
+                    u.company,
+                    u.sector,
+                    u.industry,
                     u.exchange,
                     p.close AS price,
                     p.volume AS volume
@@ -1051,6 +1077,7 @@ class Storage:
                           AND p2.trade_date <= rs.snapshot_date
                     )
                 WHERE rs.snapshot_date = ?
+                {etf_filter}
                 ORDER BY rs.rs_score DESC, rs.rank_m ASC
                 LIMIT ?
                 """,

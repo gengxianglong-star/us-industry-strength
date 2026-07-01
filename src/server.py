@@ -689,7 +689,7 @@ def rs_snapshot(
             "new_stock_leaderboard": [],
             "watchlist": watchlist,
         }
-    rs_rows = storage.get_stock_rs(snapshot_date, limit=max(limit, 1))
+    rs_rows = storage.get_stock_rs(snapshot_date, limit=max(limit, 1), stocks_only=True)
     if rs_rows:
         from src.services.elite_data import enrich_rs_rows_with_elite_quotes
 

@@ -192,7 +192,7 @@ def build_public_dashboard_payloads(
         watchlist_total = storage.count_stock_watchlist(latest)
         from src.services.elite_data import enrich_rs_rows_with_elite_quotes
 
-        raw_rs_rows = storage.get_stock_rs(latest, limit=max(rs_limit, 1))
+        raw_rs_rows = storage.get_stock_rs(latest, limit=max(rs_limit, 1), stocks_only=True)
         raw_rs_rows = enrich_rs_rows_with_elite_quotes(raw_rs_rows)
         rs_rows = [_slim_rs_export_row(row) for row in raw_rs_rows]
         new_stock_rows = [_slim_new_stock_row(row) for row in storage.get_stock_rs_new(latest, limit=500)]

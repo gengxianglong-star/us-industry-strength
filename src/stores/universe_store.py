@@ -18,10 +18,13 @@ def upsert_stock_universe(
     updated_at = datetime.now(timezone.utc).isoformat()
     conn.executemany(
         """
-        INSERT INTO stock_universe(symbol, name, exchange, source, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO stock_universe(symbol, name, company, sector, industry, exchange, source, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(symbol) DO UPDATE SET
             name=excluded.name,
+            company=excluded.company,
+            sector=excluded.sector,
+            industry=excluded.industry,
             exchange=excluded.exchange,
             source=excluded.source,
             updated_at=excluded.updated_at
@@ -30,6 +33,9 @@ def upsert_stock_universe(
             (
                 str(row.get("symbol", "")).upper(),
                 row.get("name") or "",
+                row.get("company") or "",
+                row.get("sector") or "",
+                row.get("industry") or "",
                 row.get("exchange") or "",
                 source,
                 updated_at,
@@ -70,7 +76,7 @@ def get_stock_universe_freshness(conn: sqlite3.Connection) -> dict[str, Any] | N
 def list_stock_universe(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT symbol, name, exchange, source, updated_at
+        SELECT symbol, name, company, sector, industry, exchange, source, updated_at
         FROM stock_universe
         ORDER BY symbol ASC
         """

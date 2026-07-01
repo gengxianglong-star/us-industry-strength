@@ -444,8 +444,17 @@ def _universe_rows_from_elite(market_data: dict[str, dict[str, Any]]) -> list[di
     rows: list[dict[str, Any]] = []
     for sym in sorted(market_data.keys()):
         row = market_data[sym]
-        label = str(row.get("industry") or row.get("sector") or sym).strip() or sym
-        rows.append({"symbol": sym, "name": label, "exchange": "ELITE"})
+        company = str(row.get("company") or sym).strip() or sym
+        rows.append(
+            {
+                "symbol": sym,
+                "name": company,
+                "company": company,
+                "sector": str(row.get("sector") or "").strip(),
+                "industry": str(row.get("industry") or "").strip(),
+                "exchange": "ELITE",
+            }
+        )
     return rows
 
 

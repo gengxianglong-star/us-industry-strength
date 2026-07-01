@@ -471,6 +471,7 @@ def fetch_elite_market_data(
             continue
         market_data[ticker] = {
             "symbol": ticker,
+            "company": row.get("Company", "") or "",
             "industry": row.get("Industry", "") or "",
             "sector": row.get("Sector", "") or "",
             "market_cap": row.get("Market Cap", "") or "",
