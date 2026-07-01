@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.services.public_export import _slim_new_stock_row, _slim_rs_row
+from src.services.public_export import _slim_new_stock_row, _slim_rs_export_row, _slim_rs_row
 
 
 class PublicExportSlimTests(unittest.TestCase):
@@ -32,6 +32,24 @@ class PublicExportSlimTests(unittest.TestCase):
         self.assertEqual(slim["perf_m"], 2.3)
         self.assertNotIn("name", slim)
         self.assertNotIn("exchange", slim)
+
+    def test_slim_rs_export_row_keeps_liquidity_fields_only(self) -> None:
+        row = {
+            "symbol": "NVDA",
+            "rs_score": 0.987654,
+            "price": 120.456,
+            "volume": 1_500_000.7,
+            "perf_m": 2.3,
+            "rank_m": 20,
+            "name": "NVIDIA",
+        }
+        slim = _slim_rs_export_row(row)
+        self.assertEqual(slim, {
+            "symbol": "NVDA",
+            "rs_score": 0.9877,
+            "price": 120.46,
+            "volume": 1_500_000,
+        })
 
     def test_slim_new_stock_row_keeps_cohort_fields(self) -> None:
         row = {

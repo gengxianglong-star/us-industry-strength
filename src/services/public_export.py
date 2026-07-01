@@ -17,6 +17,13 @@ from src.storage import Storage, latest_trading_date
 
 logger = get_logger(__name__)
 
+_RS_EXPORT_ROW_KEEP = (
+    "symbol",
+    "rs_score",
+    "price",
+    "volume",
+)
+
 _RS_ROW_KEEP = (
     "snapshot_date",
     "symbol",
@@ -47,6 +54,24 @@ _NEW_STOCK_ROW_KEEP = _RS_ROW_KEEP + (
 
 def _slim_rs_row(row: dict[str, Any]) -> dict[str, Any]:
     return {key: row[key] for key in _RS_ROW_KEEP if key in row}
+
+
+def _slim_rs_export_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Pages rs.json rows: RS Top 100 only needs symbol/score/liquidity fields."""
+    out: dict[str, Any] = {}
+    for key in _RS_EXPORT_ROW_KEEP:
+        if key not in row or row[key] is None:
+            continue
+        val = row[key]
+        if key == "price":
+            out[key] = round(float(val), 2)
+        elif key == "volume":
+            out[key] = int(float(val))
+        elif key == "rs_score":
+            out[key] = round(float(val), 4)
+        else:
+            out[key] = val
+    return out
 
 
 def _slim_new_stock_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -169,7 +194,7 @@ def build_public_dashboard_payloads(
 
         raw_rs_rows = storage.get_stock_rs(latest, limit=max(rs_limit, 1))
         raw_rs_rows = enrich_rs_rows_with_elite_quotes(raw_rs_rows)
-        rs_rows = [_slim_rs_row(row) for row in raw_rs_rows]
+        rs_rows = [_slim_rs_export_row(row) for row in raw_rs_rows]
         new_stock_rows = [_slim_new_stock_row(row) for row in storage.get_stock_rs_new(latest, limit=500)]
         new_stock_leaderboard = [
             _slim_new_stock_row(row)
